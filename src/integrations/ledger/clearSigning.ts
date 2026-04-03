@@ -1,0 +1,1 @@
+// Clear signing descriptor formatting

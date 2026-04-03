@@ -1,0 +1,13 @@
+{
+  "name": "orchestra",
+  "version": "0.1.0",
+  "description": "Always-on AI financial agent for onchain portfolio management — ETHGlobal Cannes 2025",
+  "main": "src/orchestrator/index.ts",
+  "scripts": {
+    "dev": "ts-node src/orchestrator/index.ts",
+    "build": "tsc",
+    "start": "node dist/orchestrator/index.js"
+  },
+  "keywords": ["0g", "uniswap", "ledger", "safe", "elizaos", "ai-agents"],
+  "license": "MIT"
+}
