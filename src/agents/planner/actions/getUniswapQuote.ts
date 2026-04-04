@@ -18,7 +18,7 @@ const getUniswapQuote: Action = {
     const tokenIn = args.tokenIn as string;
     const tokenOut = args.tokenOut as string;
     const amount = args.amount as string;
-    const chainId = Number(args.chain) || 1;
+    const chainId = Number(args.chain) || 11155111; // Sepolia by default
 
     const res = await fetch('https://trade-api.gateway.uniswap.org/v1/quote', {
       method: 'POST',

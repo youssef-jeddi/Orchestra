@@ -147,13 +147,46 @@ class ZeroGStorage {
   }
 }
 
-const storage = new ZeroGStorage();
+// Auto-select backend: use 0G if env vars are set, otherwise in-memory
+let storageBackend: {
+  write: (key: string, data: unknown) => Promise<void>;
+  read: (key: string) => Promise<unknown | null>;
+  readMany: (collection: string, filter?: Record<string, unknown>) => Promise<unknown[]>;
+  append: (collection: string, data: unknown) => Promise<void>;
+  delete: (key: string) => Promise<void>;
+  clear: () => Promise<void>;
+};
 
-export const write = storage.write.bind(storage);
-export const read = storage.read.bind(storage);
-export const readMany = storage.readMany.bind(storage);
-export const append = storage.append.bind(storage);
-export const deleteKey = storage.delete.bind(storage);
-export const clear = storage.clear.bind(storage);
+if (process.env.ZERO_G_PRIVATE_KEY && process.env.ZERO_G_RPC_URL && process.env.ZERO_G_INDEXER_URL) {
+  console.log('[Storage] Using 0G decentralized storage');
+  const s = new ZeroGStorage();
+  storageBackend = {
+    write: s.write.bind(s),
+    read: s.read.bind(s),
+    readMany: s.readMany.bind(s),
+    append: s.append.bind(s),
+    delete: s.delete.bind(s),
+    clear: s.clear.bind(s),
+  };
+} else {
+  console.log('[Storage] Using in-memory storage (set ZERO_G_* env vars for decentralized storage)');
+  // Lazy import to avoid circular deps
+  const mem = require('./memoryStorage');
+  storageBackend = {
+    write: mem.write,
+    read: mem.read,
+    readMany: mem.readMany,
+    append: mem.append,
+    delete: mem.deleteKey,
+    clear: mem.clear,
+  };
+}
 
-export default storage;
+export const write = storageBackend.write;
+export const read = storageBackend.read;
+export const readMany = storageBackend.readMany;
+export const append = storageBackend.append;
+export const deleteKey = storageBackend.delete;
+export const clear = storageBackend.clear;
+
+export default storageBackend;

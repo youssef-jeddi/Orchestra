@@ -14,6 +14,9 @@ import { checkApproval, getQuote } from "../uniswap/api";
 import { fetchQuoteWithRouting } from "../uniswap/routing";
 import { executeSwap } from "../uniswap/execution";
 import { WETH_SEPOLIA, USDC_SEPOLIA, CHAIN_ID } from "../uniswap/types";
+import { runPlanner } from "../../agents/planner/index";
+import { runGatekeeper } from "../../agents/gatekeeper/index";
+import { write, read, readMany } from "../zero-g/storage";
 
 const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || "https://rpc.sepolia.org";
 const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC);
@@ -229,6 +232,170 @@ app.get("/nonce/:address", async (req, res) => {
     });
   } catch (err: any) {
     console.error("[serve] /nonce error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST /intent ───
+// Process a natural-language intent through the agent pipeline:
+//   Intent → Planner (LLM) → Gatekeeper (LLM) → verdict + quote
+app.post("/intent", async (req, res) => {
+  try {
+    const { message, walletAddress } = req.body;
+
+    if (!message) {
+      res.status(400).json({ error: "message is required" });
+      return;
+    }
+
+    console.log(`\n[intent] ═══════════════════════════════════════`);
+    console.log(`[intent] "${message}"`);
+    console.log(`[intent] wallet: ${walletAddress || "not provided"}`);
+
+    // Step 1: Write user message to storage (agents read it from there)
+    await write("messages:latest", {
+      message,
+      walletAddress,
+      timestamp: new Date().toISOString(),
+    });
+
+    // Step 2: Run Planner — it reads the message, calls LLM, writes an ActionPlan
+    console.log(`[intent] Running Planner…`);
+    const plannerResult = await runPlanner(message);
+    console.log(`[intent] Planner action: ${plannerResult.action}`);
+    console.log(`[intent] Planner reasoning: ${plannerResult.reasoning}`);
+
+    // Read the plan it just wrote
+    const plans = (await readMany("plans")) as Record<string, unknown>[];
+    const latestPlan = plans.sort((a, b) =>
+      (b.createdAt as string).localeCompare(a.createdAt as string)
+    )[0];
+
+    if (!latestPlan) {
+      res.json({
+        status: "no_action",
+        reasoning: plannerResult.reasoning,
+      });
+      return;
+    }
+
+    console.log(`[intent] Plan: ${latestPlan.summary}`);
+    console.log(`[intent] Steps: ${(latestPlan.steps as any[])?.length || 0}`);
+    console.log(`[intent] Value: $${latestPlan.totalEstimatedValueUsd}`);
+
+    // Step 3: Run Gatekeeper — it reads the plan, assesses risk, writes a RiskAssessment
+    console.log(`[intent] Running Gatekeeper…`);
+    const gatekeeperResult = await runGatekeeper();
+    console.log(`[intent] Gatekeeper action: ${gatekeeperResult.action}`);
+    console.log(`[intent] Gatekeeper reasoning: ${gatekeeperResult.reasoning}`);
+
+    // Read the assessment it just wrote
+    const assessments = (await readMany("assessments")) as Record<string, unknown>[];
+    const latestAssessment = assessments.sort((a, b) =>
+      (b.assessedAt as string).localeCompare(a.assessedAt as string)
+    )[0];
+
+    const verdict = latestAssessment?.verdict ?? "NEEDS_APPROVAL";
+    const riskScore = latestAssessment?.riskScore ?? 50;
+    const reasons = latestAssessment?.reasons ?? [gatekeeperResult.reasoning];
+
+    console.log(`[intent] Verdict: ${verdict} (risk: ${riskScore})`);
+
+    // Step 4: If it's a swap, fetch a real quote
+    let quoteData = null;
+    const steps = (latestPlan.steps as any[]) || [];
+    const swapStep = steps.find((s: any) =>
+      s.action === "swap" || s.protocol === "uniswap" || s.protocol === "Uniswap"
+    );
+
+    if (swapStep && walletAddress) {
+      console.log(`[intent] Fetching Uniswap quote for swap step…`);
+      try {
+        const params = swapStep.params || {};
+        const tokenIn = params.tokenIn || params.from || WETH_SEPOLIA;
+        const tokenOut = params.tokenOut || params.to || USDC_SEPOLIA;
+        const amount = params.amount || params.value || "0";
+
+        // Convert to wei if it looks like a human-readable amount
+        let amountWei = amount;
+        if (!amount.match(/^\d{10,}$/)) {
+          // Looks like ETH amount, not wei
+          amountWei = ethers.parseEther(String(amount)).toString();
+        }
+
+        const approvalTx = await checkApproval({
+          walletAddress,
+          token: tokenIn,
+          tokenOut: tokenOut,
+          amount: amountWei,
+        });
+
+        const riskLevel = assessRisk({
+          tradeId: latestPlan.id as string,
+          fromToken: tokenIn,
+          toToken: tokenOut,
+          amountIn: amountWei,
+          valueUSD: (latestPlan.totalEstimatedValueUsd as number) || 0,
+          tokenVerified: true,
+          liquidityUSD: 1_000_000,
+          routerAddress: "0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD",
+          calldataHex: "",
+          summary: latestPlan.summary as string,
+        });
+
+        const quoteResult = await fetchQuoteWithRouting(
+          { swapper: walletAddress, tokenIn, tokenOut, amount: amountWei },
+          riskLevel
+        );
+
+        quoteData = {
+          tradeId: latestPlan.id,
+          quote: quoteResult.quote,
+          permitData: quoteResult.permitData,
+          routing: quoteResult.routing,
+          isMevProtected: quoteResult.isMevProtected,
+          isGasless: quoteResult.isGasless,
+          riskLevel,
+          approvalNeeded: !!approvalTx,
+          approvalTx,
+          tokenIn,
+          tokenOut,
+          amount: amountWei,
+        };
+
+        console.log(`[intent] Quote ready — routing: ${quoteResult.routing}`);
+      } catch (err: any) {
+        console.error(`[intent] Quote error: ${err.message}`);
+      }
+    }
+
+    // Clear the processed message
+    await write("messages:latest", { message: null, timestamp: null });
+
+    console.log(`[intent] ═══════════════════════════════════════\n`);
+
+    res.json({
+      status: "ok",
+      plan: {
+        id: latestPlan.id,
+        summary: latestPlan.summary,
+        steps,
+        totalEstimatedValueUsd: latestPlan.totalEstimatedValueUsd,
+      },
+      assessment: {
+        verdict,
+        riskScore,
+        reasons,
+        requiresLedger: verdict === "NEEDS_APPROVAL",
+      },
+      quoteData,
+      agentReasoning: {
+        planner: plannerResult.reasoning,
+        gatekeeper: gatekeeperResult.reasoning,
+      },
+    });
+  } catch (err: any) {
+    console.error("[intent] Pipeline error:", err);
     res.status(500).json({ error: err.message });
   }
 });

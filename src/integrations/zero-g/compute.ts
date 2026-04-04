@@ -91,7 +91,7 @@ async function inferGroq(systemPrompt: string, userPrompt: string): Promise<Agen
   });
 
   const content = completion.choices[0]?.message?.content ?? '';
-  console.log('[0G Compute] Groq response received');
+  console.log('[0G Compute] Groq raw response:', content.slice(0, 500));
   return parseResponse(content);
 }
 

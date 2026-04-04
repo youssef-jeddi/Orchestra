@@ -7,7 +7,7 @@ const portfolioProvider: Provider = {
   handler: async (): Promise<string> => {
     const portfolio = await read('portfolio:current');
     if (portfolio === null) {
-      throw new Error('No portfolio data found in storage — seed it first');
+      return JSON.stringify({ holdings: [], note: "No portfolio data available" });
     }
     return JSON.stringify(portfolio);
   },

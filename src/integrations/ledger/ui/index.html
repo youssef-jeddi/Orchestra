@@ -333,6 +333,17 @@
     .badge-classic { background: #1a1a2a; color: var(--accent); }
     .badge-risk-autonomous { background: #1a2a1a; color: var(--green); }
     .badge-risk-requires_approval { background: #2a2a1a; color: var(--amber); }
+
+    /* ── Intent Form ── */
+    .intent-form { display: flex; flex-direction: column; gap: 8px; }
+
+    .badge-verdict-AUTO_EXECUTE { background: #1a2a1a; color: var(--green); }
+    .badge-verdict-NEEDS_APPROVAL { background: #2a2a1a; color: var(--amber); }
+    .badge-verdict-BLOCKED { background: #2a1a1a; color: var(--red); }
+
+    .agent-step { margin-bottom: 8px; }
+    .agent-step-label { font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--accent); margin-bottom: 2px; }
+    .agent-step-text { color: var(--text-dim); font-size: 11px; }
   </style>
 </head>
 <body>
@@ -360,7 +371,16 @@
 
       <hr style="border: none; border-top: 1px solid var(--border); margin: 16px 0;" />
 
-      <h2>Swap</h2>
+      <h2>Intent</h2>
+      <div class="intent-form">
+        <input id="intent-input" type="text" placeholder="e.g. Swap 0.01 ETH to USDC" class="input-field" style="width:100%" />
+        <button id="intent-btn" class="btn btn-primary">Send Intent</button>
+        <div id="intent-status" style="font-size:11px;font-family:'JetBrains Mono',monospace;margin-top:4px;color:var(--text-dim)"></div>
+      </div>
+
+      <hr style="border: none; border-top: 1px solid var(--border); margin: 16px 0;" />
+
+      <h2>Manual Swap</h2>
       <div class="swap-form">
         <div class="swap-pair">
           <span class="token-label">WETH</span>
@@ -383,8 +403,12 @@
       </div>
     </section>
 
-    <!-- Pending Approvals -->
+    <!-- Agent Reasoning + Pending Approvals -->
     <section id="approvals-panel">
+      <div id="agent-panel" style="display:none;margin-bottom:16px">
+        <h2>Agent Pipeline</h2>
+        <div id="agent-result" class="quote-result" style="line-height:1.8"></div>
+      </div>
       <h2>Pending Approvals</h2>
       <div id="approvals-container">
         <p class="empty-state">No pending approvals</p>

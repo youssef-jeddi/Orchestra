@@ -19,6 +19,11 @@ const bridgeLabel     = document.getElementById("bridge-label")!;
 const swapAmountInput = document.getElementById("swap-amount")! as HTMLInputElement;
 const quoteBtn        = document.getElementById("quote-btn")! as HTMLButtonElement;
 const quoteResultEl   = document.getElementById("quote-result")!;
+const intentInput     = document.getElementById("intent-input")! as HTMLInputElement;
+const intentBtn       = document.getElementById("intent-btn")! as HTMLButtonElement;
+const intentStatusEl  = document.getElementById("intent-status")!;
+const agentPanel      = document.getElementById("agent-panel")!;
+const agentResultEl   = document.getElementById("agent-result")!;
 
 // ─── State ───
 let deviceStatus: DeviceStatus = "disconnected";
@@ -284,6 +289,117 @@ mockTradeBtn.addEventListener("click", async () => {
   }
 });
 
+// ─── Intent flow (AI agents) ───
+intentBtn.addEventListener("click", async () => {
+  const message = intentInput.value.trim();
+  if (!message) return;
+
+  if (!fullWalletAddress) {
+    log("⚠ Connect Ledger first");
+    return;
+  }
+
+  intentBtn.disabled = true;
+  intentStatusEl.textContent = "Running agent pipeline…";
+  intentStatusEl.style.color = "var(--text-dim)";
+  agentPanel.style.display = "none";
+  log(`Intent: "${message}"`);
+  log("Running Planner → Gatekeeper pipeline…");
+
+  try {
+    const res = await fetch(`${BRIDGE_HTTP}/intent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message, walletAddress: fullWalletAddress }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+
+    const data = await res.json();
+
+    if (data.status === "no_action") {
+      log(`Agents found no action needed: ${data.reasoning}`);
+      intentStatusEl.textContent = "No action needed.";
+      return;
+    }
+
+    // Show agent reasoning panel
+    const verdictBadge = `<span class="badge badge-verdict-${data.assessment.verdict}">${data.assessment.verdict.replace("_", " ")}</span>`;
+    agentResultEl.innerHTML = `
+      <div class="agent-step">
+        <div class="agent-step-label">Planner</div>
+        <div class="agent-step-text">${data.agentReasoning.planner}</div>
+      </div>
+      <div class="agent-step">
+        <div class="agent-step-label">Plan</div>
+        <div class="agent-step-text">${data.plan.summary} — $${data.plan.totalEstimatedValueUsd}</div>
+      </div>
+      <div class="agent-step">
+        <div class="agent-step-label">Gatekeeper</div>
+        <div class="agent-step-text">${data.agentReasoning.gatekeeper}</div>
+      </div>
+      <div class="agent-step">
+        <div class="agent-step-label">Verdict</div>
+        <div class="agent-step-text">
+          ${verdictBadge}
+          risk score: ${data.assessment.riskScore}/100
+          ${data.assessment.requiresLedger ? "— Ledger approval required" : ""}
+        </div>
+      </div>
+    `;
+    agentPanel.style.display = "block";
+
+    log(`Plan: ${data.plan.summary}`);
+    log(`Verdict: ${data.assessment.verdict} (risk: ${data.assessment.riskScore})`);
+
+    // If we have a quote and it needs approval, show the Sign & Swap flow
+    if (data.quoteData) {
+      lastQuoteData = data.quoteData;
+
+      const routingBadge = data.quoteData.isMevProtected
+        ? `<span class="badge badge-mev">MEV Protected</span>`
+        : `<span class="badge badge-classic">AMM</span>`;
+
+      quoteResultEl.innerHTML = `
+        Routing: ${routingBadge}<br>
+        Risk: ${verdictBadge}<br>
+        ${data.quoteData.approvalNeeded ? "⚠ Permit2 approval needed<br>" : "✓ Permit2 approved<br>"}
+        <button id="sign-swap-btn" class="btn btn-sign" style="margin-top:8px;width:100%">Sign & Swap on Ledger</button>
+        <div id="swap-status" style="margin-top:6px;font-size:11px;"></div>
+      `;
+      quoteResultEl.style.display = "block";
+
+      document.getElementById("sign-swap-btn")!.addEventListener("click", () =>
+        handleSignAndSwap(data.quoteData, message)
+      );
+
+      intentStatusEl.textContent = "Quote ready — sign on Ledger to execute.";
+      intentStatusEl.style.color = "var(--green)";
+      log("Quote fetched — ready to sign on Ledger");
+    } else if (data.assessment.verdict === "AUTO_EXECUTE") {
+      intentStatusEl.textContent = "✓ Auto-executed (low risk)";
+      intentStatusEl.style.color = "var(--green)";
+      log("Auto-executed — no Ledger approval needed");
+    } else {
+      intentStatusEl.textContent = "Plan created — no swap quote needed.";
+    }
+  } catch (err: any) {
+    log(`❌ Intent error: ${err.message}`);
+    intentStatusEl.textContent = `Error: ${err.message}`;
+    intentStatusEl.style.color = "var(--red)";
+  } finally {
+    intentBtn.disabled = false;
+  }
+});
+
+// Allow Enter key to submit intent
+intentInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") intentBtn.click();
+});
+
 // ─── Quote flow ───
 let lastQuoteData: any = null;
 
@@ -494,6 +610,13 @@ async function handleSignAndSwap(quoteData: any, amountEth: string): Promise<voi
     const unsignedTx = swapResult.unsignedTx;
     log(`Swap tx received: to=${unsignedTx.to?.slice(0, 10)}… data=${(unsignedTx.data || "").slice(0, 20)}…`);
 
+    // Cap gas limit — Uniswap API can return very high estimates that Sepolia rejects
+    let gasLimit = Number(unsignedTx.gasLimit || unsignedTx.gas || 350000);
+    if (gasLimit > 500000) {
+      log(`Gas limit ${gasLimit} too high — capping at 500000`);
+      gasLimit = 500000;
+    }
+
     status("Sign swap transaction on Ledger…");
     setDeviceStatus("signing");
 
@@ -502,7 +625,7 @@ async function handleSignAndSwap(quoteData: any, amountEth: string): Promise<voi
       data: unsignedTx.data || "0x",
       value: unsignedTx.value || "0x0",
       chainId: 11155111,
-      gasLimit: unsignedTx.gasLimit || unsignedTx.gas || 350000,
+      gasLimit,
       type: 2,
       maxFeePerGas,
       maxPriorityFeePerGas,
