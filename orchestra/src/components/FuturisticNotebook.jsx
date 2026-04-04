@@ -138,7 +138,7 @@ export default function FuturisticNotebook({ onClose, initialMessage = '' }) {
         alignItems: 'center',
         justifyContent: 'center',
         cursor: 'none',
-        background: '#0D0B08',
+        background: '#1A1510',
       }}
     >
       <style>{`
@@ -185,7 +185,8 @@ export default function FuturisticNotebook({ onClose, initialMessage = '' }) {
           width: '100%',
           height: '100%',
           objectFit: 'cover',
-          opacity: 0.1,
+          opacity: 0.45,
+          filter: 'brightness(1.3)',
           pointerEvents: 'none',
         }}
       />
@@ -199,17 +200,17 @@ export default function FuturisticNotebook({ onClose, initialMessage = '' }) {
           whileHover={{ color: '#E8E4DE' }}
           style={{
             position: 'absolute', top: 24, right: 16, zIndex: 10,
-            background: 'none', border: 'none', cursor: 'none', color: '#444', padding: 8,
+            background: 'none', border: 'none', cursor: 'none', color: '#FFFFFF', padding: 8,
           }}
         >
-          <X size={24} />
+          <X size={28} />
         </motion.button>
 
         {/* Left: History */}
         <div className="nb-sidebar">
           <div style={{ position: 'absolute', left: 32, top: 0, bottom: 0, width: 1, background: '#1A1A1A', pointerEvents: 'none' }} />
           <div style={{ padding: '48px 24px 16px 48px' }}>
-            <p style={{ fontFamily: 'var(--font-playfair)', fontSize: 16, fontWeight: 400, color: '#666', margin: 0, marginBottom: 4 }}>
+            <p style={{ fontFamily: 'var(--font-playfair)', fontSize: 16, fontWeight: 400, color: '#FFFFFF', margin: 0, marginBottom: 4 }}>
               Research Log
             </p>
             <div style={{ width: 60, height: 1, background: '#222', marginBottom: 20 }} />
@@ -228,10 +229,10 @@ export default function FuturisticNotebook({ onClose, initialMessage = '' }) {
                   borderRadius: 6, padding: '10px 12px', cursor: 'none',
                 }}
               >
-                <p style={{ margin: 0, fontFamily: 'var(--font-inter)', fontSize: 13, fontWeight: activeHistory === entry.id ? 400 : 300, color: activeHistory === entry.id ? '#E8E4DE' : '#666', lineHeight: 1.3 }}>
+                <p style={{ margin: 0, fontFamily: 'var(--font-inter)', fontSize: 13, fontWeight: activeHistory === entry.id ? 400 : 300, color: '#FFFFFF', lineHeight: 1.3 }}>
                   {entry.label}
                 </p>
-                <p style={{ margin: '4px 0 0', fontFamily: 'var(--font-inter)', fontSize: 11, fontWeight: 300, color: '#444', lineHeight: 1.4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                <p style={{ margin: '4px 0 0', fontFamily: 'var(--font-inter)', fontSize: 11, fontWeight: 300, color: '#FFFFFF', opacity: 0.5, lineHeight: 1.4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {entry.preview}
                 </p>
               </button>
@@ -246,10 +247,10 @@ export default function FuturisticNotebook({ onClose, initialMessage = '' }) {
           {/* Header */}
           <div style={{ padding: '48px 48px 20px', textAlign: 'center', flexShrink: 0 }}>
             <div style={{ width: '100%', height: 1, background: '#1A1A1A', marginBottom: 20 }} />
-            <h1 style={{ fontFamily: 'var(--font-playfair)', fontSize: 22, fontWeight: 400, color: '#E8E4DE', margin: 0, lineHeight: 1.4 }}>
+            <h1 style={{ fontFamily: 'var(--font-playfair)', fontSize: 22, fontWeight: 400, color: '#FFFFFF', margin: 0, lineHeight: 1.4 }}>
               The Scholar&apos;s Notebook
             </h1>
-            <div style={{ width: 160, height: 1, background: '#222', margin: '12px auto 0' }} />
+            <div style={{ width: 160, height: 1, background: '#444', margin: '12px auto 0' }} />
           </div>
 
           {/* Messages */}
@@ -259,13 +260,13 @@ export default function FuturisticNotebook({ onClose, initialMessage = '' }) {
                 {msg.role === 'scholar' ? (
                   <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
                     <Feather size={14} style={{ color: '#444', flexShrink: 0, marginTop: 4 }} />
-                    <p style={{ margin: 0, fontFamily: 'var(--font-inter)', fontSize: 15, fontWeight: 300, color: '#C8C0B8', lineHeight: 1.75 }}>
+                    <p style={{ margin: 0, fontFamily: 'var(--font-inter)', fontSize: 15, fontWeight: 300, color: '#FFFFFF', lineHeight: 1.75 }}>
                       {msg.isNew ? <TypewriterText text={msg.text} /> : msg.text}
                     </p>
                   </div>
                 ) : (
                   <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                    <div style={{ maxWidth: '75%', padding: '12px 18px', background: 'rgba(192,132,252,0.08)', border: '1px solid rgba(192,132,252,0.15)', borderRadius: 12, fontFamily: 'var(--font-inter)', fontSize: 15, fontWeight: 300, color: '#E8E4DE', lineHeight: 1.65 }}>
+                    <div style={{ maxWidth: '75%', padding: '12px 18px', background: 'rgba(192,132,252,0.08)', border: '1px solid rgba(192,132,252,0.15)', borderRadius: 12, fontFamily: 'var(--font-inter)', fontSize: 15, fontWeight: 300, color: '#FFFFFF', lineHeight: 1.65 }}>
                       {msg.text}
                     </div>
                   </div>

@@ -16,7 +16,7 @@ import { ChevronDown, Send } from 'lucide-react';
 
 const IMAGES = [
   '/images/maestro-hero.png',
-  '/images/scholar.jpg',
+  '/images/notebook-bg.png',
   '/images/guardian.jpg',
   '/images/treasurer.jpg',
 ];
@@ -135,21 +135,21 @@ function IMsgBubble({ progress, threshold, role, text, variant, alert }) {
   const styles = {
     light: {
       user: { background: '#007AFF', color: '#fff', borderRadius: '18px 18px 4px 18px' },
-      bot:  { background: '#E9E9EB', color: '#1c1c1e', borderRadius: '4px 18px 18px 18px' },
+      bot:  { background: '#FFFFFF', color: '#1c1c1e', borderRadius: '4px 18px 18px 18px' },
     },
     dark: {
-      user: { background: '#1c1c1e', color: '#E8E4DE', borderRadius: '18px 18px 4px 18px' },
+      user: { background: '#1C1C1E', color: '#E8E4DE', borderRadius: '18px 18px 4px 18px' },
       bot:  {
-        background: alert ? 'rgba(220,38,38,0.12)' : 'rgba(255,255,255,0.05)',
+        background: alert ? '#2A1A1A' : '#1C1C1E',
         color: alert ? '#ef4444' : '#E8E4DE',
         borderRadius: '4px 18px 18px 18px',
-        border: alert ? '1px solid rgba(220,38,38,0.3)' : '1px solid rgba(255,255,255,0.08)',
-        borderLeft: alert ? '3px solid rgba(220,38,38,0.4)' : undefined,
+        border: alert ? '1px solid rgba(220,38,38,0.5)' : '1px solid rgba(255,255,255,0.15)',
+        borderLeft: alert ? '3px solid rgba(220,38,38,0.6)' : undefined,
       },
     },
     treasury: {
-      user: { background: 'rgba(192,132,252,0.12)', color: '#C084FC', borderRadius: '18px 18px 4px 18px', border: '1px solid rgba(192,132,252,0.2)' },
-      bot:  { background: 'rgba(255,255,255,0.05)', color: '#E8E4DE', borderRadius: '4px 18px 18px 18px', border: '1px solid rgba(255,255,255,0.08)' },
+      user: { background: '#1E1630', color: '#C084FC', borderRadius: '18px 18px 4px 18px', border: '1px solid rgba(192,132,252,0.35)' },
+      bot:  { background: '#1C1C1E', color: '#E8E4DE', borderRadius: '4px 18px 18px 18px', border: '1px solid rgba(255,255,255,0.15)' },
     },
   };
 
@@ -254,9 +254,6 @@ function SlideHero({ sp }) {
           AI-Conducted DeFi Symphony
         </p>
 
-        {/* Spacer for search bar alignment */}
-        <div style={{ height: 100 }} />
-
         {/* Scroll down indicator — fades at 5% scroll */}
         <motion.div
           style={{ position: 'absolute', bottom: '8vh', display: 'flex', flexDirection: 'column', alignItems: 'center', opacity: chevronOpacity }}
@@ -307,7 +304,7 @@ function SlideNotebook({ sp, onOpenNotebook }) {
         <div style={{ width: '100%', height: '100%', backgroundImage: `url(${IMAGES[1]})`, backgroundSize: 'cover', backgroundPosition: '50% 40%', transform: 'scale(1.05) translate(var(--px, 0), var(--py, 0))', transition: 'transform 0.1s linear' }} />
       </motion.div>
       <motion.div animate={{ opacity: bookZoom ? 1 : 0 }} transition={{ duration: 0.8 }} style={{ position: 'absolute', inset: 0, backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)', pointerEvents: 'none', zIndex: 1 }} />
-      <div style={{ position: 'absolute', inset: 0, background: 'rgba(15,15,18,0.6)' }} />
+      <div style={{ position: 'absolute', inset: 0, background: 'rgba(15,15,18,0.35)' }} />
 
       <div style={{ position: 'relative', height: '100%', zIndex: 2, display: 'flex', alignItems: 'center', padding: '0 6vw' }}>
         <div style={{ flex: '0 0 35%' }}>
@@ -410,26 +407,8 @@ function SlideTreasurer({ sp }) {
 
 // ─── Global Search Bar (hero → fixed bottom on scroll) ──────────
 
-function GlobalSearchBar({ sp, onOpenNotebook }) {
+function GlobalSearchBar({ onOpenNotebook }) {
   const [searchValue, setSearchValue] = useState('');
-  const [isHero, setIsHero] = useState(true);
-  const isHeroRef = useRef(true);
-  const [yOffset, setYOffset] = useState(-300);
-
-  useEffect(() => {
-    const calc = () => setYOffset(-(window.innerHeight * 0.42));
-    calc();
-    window.addEventListener('resize', calc);
-    return () => window.removeEventListener('resize', calc);
-  }, []);
-
-  useMotionValueEvent(sp, 'change', (v) => {
-    const hero = v < 0.15;
-    if (hero !== isHeroRef.current) {
-      isHeroRef.current = hero;
-      setIsHero(hero);
-    }
-  });
 
   const handleSearch = () => {
     const text = searchValue.trim();
@@ -446,15 +425,12 @@ function GlobalSearchBar({ sp, onOpenNotebook }) {
   };
 
   return (
-    <motion.div
-      initial={false}
-      animate={{ y: isHero ? yOffset : 0 }}
-      transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
+    <div
       style={{
         position: 'fixed',
         bottom: 32,
         left: '50%',
-        x: '-50%',
+        transform: 'translateX(-50%)',
         zIndex: 50,
         width: 520,
         maxWidth: '90vw',
@@ -492,7 +468,7 @@ function GlobalSearchBar({ sp, onOpenNotebook }) {
           <Send size={18} color={searchValue.trim() ? '#C084FC' : '#555'} />
         </motion.button>
       </div>
-    </motion.div>
+    </div>
   );
 }
 
@@ -511,7 +487,7 @@ export default function PresentationFlow({ onOpenNotebook }) {
       <SlideNotebook sp={sp} onOpenNotebook={onOpenNotebook} />
       <SlideGuardian sp={sp} />
       <SlideTreasurer sp={sp} />
-      <GlobalSearchBar sp={sp} onOpenNotebook={onOpenNotebook} />
+      <GlobalSearchBar onOpenNotebook={onOpenNotebook} />
     </div>
   );
 }

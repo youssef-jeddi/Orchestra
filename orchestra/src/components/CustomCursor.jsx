@@ -69,7 +69,7 @@ export default function CustomCursor() {
       <motion.div
         aria-hidden="true"
         className="fixed top-0 left-0 pointer-events-none"
-        style={{ x, y, zIndex: 9999, willChange: 'transform' }}
+        style={{ x, y, zIndex: 99999, willChange: 'transform' }}
       >
         <div style={{ transform: 'translate(-10px, -4px)' }}>
           <span
@@ -93,7 +93,7 @@ export default function CustomCursor() {
           key={p.id}
           aria-hidden="true"
           className="fixed pointer-events-none"
-          style={{ left: p.x - 8, top: p.y - 8, zIndex: 9998, willChange: 'transform, opacity' }}
+          style={{ left: p.x - 8, top: p.y - 8, zIndex: 99998, willChange: 'transform, opacity' }}
           initial={{ opacity: 1, y: 0, scale: 1 }}
           animate={{ opacity: 0, y: -36, scale: 0.5 }}
           transition={{ duration: 0.8, ease: 'easeOut' }}
