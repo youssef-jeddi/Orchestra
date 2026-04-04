@@ -10,6 +10,9 @@ function parseResponse(raw: string): AgentResponse {
   try {
     let cleaned = raw.trim();
 
+    // Strip <think>...</think> blocks (Qwen3 thinking mode)
+    cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+
     // Strip markdown code fences
     if (cleaned.startsWith('```json')) {
       cleaned = cleaned.slice(7);
@@ -33,7 +36,29 @@ function parseResponse(raw: string): AgentResponse {
       // Fall through to regex extraction
     }
 
-    // Extract first JSON object from surrounding text
+    // Extract JSON object containing "action" key (find balanced braces)
+    const startIdx = cleaned.indexOf('{"action"');
+    if (startIdx !== -1) {
+      let depth = 0;
+      for (let i = startIdx; i < cleaned.length; i++) {
+        if (cleaned[i] === '{') depth++;
+        else if (cleaned[i] === '}') depth--;
+        if (depth === 0) {
+          try {
+            const parsed = JSON.parse(cleaned.slice(startIdx, i + 1));
+            return {
+              action: parsed.action ?? null,
+              args: parsed.args ?? {},
+              reasoning: parsed.reasoning ?? '',
+            };
+          } catch {
+            break;
+          }
+        }
+      }
+    }
+
+    // Fallback: greedy regex for any JSON object
     const match = cleaned.match(/\{[\s\S]*\}/);
     if (match) {
       const parsed = JSON.parse(match[0]);
