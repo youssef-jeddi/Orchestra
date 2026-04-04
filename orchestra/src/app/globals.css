@@ -1,0 +1,76 @@
+@import "tailwindcss";
+
+/* ── Reset / Base ── */
+*, *::before, *::after { box-sizing: border-box; }
+
+html {
+  scroll-behavior: smooth;
+  font-size: 16px;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+html::-webkit-scrollbar {
+  display: none;
+}
+
+body {
+  background: #0F0F12;
+  color: #E8E4DE;
+  font-family: var(--font-inter, sans-serif);
+  font-weight: 300;
+  line-height: 1.8;
+  cursor: none;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+/* Subtle noise texture overlay */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 9990;
+  pointer-events: none;
+  opacity: 0.035;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='a' x='0' y='0'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.75' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23a)'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+}
+
+/* Native cursor on touch */
+@media (hover: none) and (pointer: coarse) {
+  body { cursor: auto; }
+  button, a, [role="button"] { cursor: pointer; }
+}
+
+section {
+  position: relative;
+}
+
+/* ── Tokens ── */
+:root {
+  --bg:        #0F0F12;
+  --bg-card:   #141418;
+  --border:    #222228;
+  --border-hi: #333333;
+  --text-1:    #E8E4DE;
+  --text-2:    #666666;
+  --text-3:    #444444;
+  --accent:    #C084FC;
+}
+
+/* ── Shiny metallic text ── */
+.shiny-text {
+  background: linear-gradient(90deg, #E8E4DE 0%, #fff 45%, #E8E4DE 55%, #999 100%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  color: transparent;
+  animation: shiny-slide 8s linear infinite;
+}
+
+@keyframes shiny-slide {
+  0%   { background-position: 200% center; }
+  100% { background-position: -200% center; }
+}
