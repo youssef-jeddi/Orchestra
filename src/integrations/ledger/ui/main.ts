@@ -27,12 +27,26 @@ const agentResultEl   = document.getElementById("agent-result")!;
 const providerGroqBtn = document.getElementById("provider-groq")! as HTMLButtonElement;
 const provider0gBtn   = document.getElementById("provider-0g")! as HTMLButtonElement;
 const providerStatusEl = document.getElementById("provider-status")!;
+const onboardingScreen = document.getElementById("onboarding-screen")!;
+const deploySafeBtn   = document.getElementById("deploy-safe-btn")! as HTMLButtonElement;
+const onboardStatusEl = document.getElementById("onboard-status")!;
+const safeStatusEl    = document.getElementById("safe-status")!;
+const safeStatusText  = document.getElementById("safe-status-text")!;
+const limitButtons    = document.querySelectorAll(".limit-btn");
+const depositSection  = document.getElementById("deposit-section")!;
+const depositToken    = document.getElementById("deposit-token")! as HTMLSelectElement;
+const depositAmount   = document.getElementById("deposit-amount")! as HTMLInputElement;
+const depositBtn      = document.getElementById("deposit-btn")! as HTMLButtonElement;
+const depositStatusEl = document.getElementById("deposit-status")!;
+const safeBalancesEl  = document.getElementById("safe-balances")!;
 
 // ─── State ───
 let deviceStatus: DeviceStatus = "disconnected";
 let ws: WebSocket | null = null;
 let hasApprovals = false;
 let fullWalletAddress: string | null = null;
+let currentSafeAddress: string | null = null;
+let selectedLimit = 100;
 
 const BRIDGE_URL = "ws://localhost:3001/ws";
 const BRIDGE_HTTP = "http://localhost:3001";
@@ -112,6 +126,9 @@ connectBtn.addEventListener("click", async () => {
 
           setDeviceStatus("ready");
           log("Device is READY ✓");
+
+          // Check Safe status after Ledger connects
+          checkSafeStatus(address);
         } catch (err: any) {
           log(`❌ Connection error: ${err.message}`);
           console.error("Connection error:", err);
@@ -140,8 +157,213 @@ disconnectBtn.addEventListener("click", async () => {
   setDeviceStatus("disconnected");
   deviceAddressEl.textContent = "—";
   fullWalletAddress = null;
+  currentSafeAddress = null;
+  safeStatusEl.style.display = "none";
+  depositSection.style.display = "none";
   connectBtn.disabled = false;
   log("Device disconnected");
+});
+
+// ─── Safe Onboarding ───
+async function checkSafeStatus(address: string): Promise<void> {
+  safeStatusEl.style.display = "block";
+  safeStatusText.textContent = "Safe: detecting...";
+  try {
+    const resp = await fetch(`${BRIDGE_HTTP}/check-safe?address=${address}`);
+    const data = await resp.json();
+    if (data.hasSafe) {
+      currentSafeAddress = data.safeAddress;
+      safeStatusText.innerHTML = `Safe: <span style="cursor:pointer;text-decoration:underline" title="Click to copy" onclick="navigator.clipboard.writeText('${data.safeAddress}')">${data.safeAddress.slice(0, 8)}...${data.safeAddress.slice(-6)}</span> ($${data.spendingLimitUSD} auto-limit)`;
+      depositSection.style.display = "block";
+      refreshSafeBalances(data.safeAddress);
+      log(`Safe account detected: ${data.safeAddress}`);
+    } else {
+      safeStatusText.textContent = "Safe: not deployed";
+      safeStatusText.style.color = "var(--text-dim)";
+      safeStatusEl.style.borderColor = "var(--border)";
+      safeStatusEl.style.background = "transparent";
+      showOnboarding();
+    }
+  } catch (err: any) {
+    safeStatusText.textContent = "Safe: check failed";
+    log(`Safe check error: ${err.message}`);
+  }
+}
+
+function showOnboarding(): void {
+  onboardingScreen.style.display = "flex";
+}
+
+function hideOnboarding(): void {
+  onboardingScreen.style.display = "none";
+}
+
+// Limit button selection
+limitButtons.forEach(btn => {
+  btn.addEventListener("click", () => {
+    limitButtons.forEach(b => {
+      (b as HTMLElement).classList.remove("btn-primary");
+      (b as HTMLElement).classList.add("btn-secondary");
+    });
+    (btn as HTMLElement).classList.remove("btn-secondary");
+    (btn as HTMLElement).classList.add("btn-primary");
+    selectedLimit = Number((btn as HTMLElement).dataset.limit);
+  });
+});
+
+// Deploy Safe button
+deploySafeBtn.addEventListener("click", async () => {
+  if (!fullWalletAddress) {
+    onboardStatusEl.textContent = "Connect Ledger first";
+    return;
+  }
+
+  deploySafeBtn.disabled = true;
+  onboardStatusEl.textContent = "Deploying your Safe account on Sepolia...";
+
+  try {
+    const resp = await fetch(`${BRIDGE_HTTP}/onboard`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ledgerAddress: fullWalletAddress, spendingLimitUSD: selectedLimit }),
+    });
+
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || "Onboarding failed");
+
+    currentSafeAddress = data.safeAddress;
+    onboardStatusEl.innerHTML = `Safe deployed! Use the Deposit section to fund it.`;
+    log(`Safe deployed: ${data.safeAddress}`);
+
+    // Update Safe status display
+    safeStatusText.innerHTML = `Safe: <span style="cursor:pointer;text-decoration:underline" title="Click to copy" onclick="navigator.clipboard.writeText('${data.safeAddress}')">${data.safeAddress.slice(0, 8)}...${data.safeAddress.slice(-6)}</span> ($${selectedLimit} auto-limit)`;
+    safeStatusText.style.color = "#0f8";
+    safeStatusEl.style.borderColor = "rgba(0,255,128,0.2)";
+    safeStatusEl.style.background = "rgba(0,255,128,0.08)";
+    depositSection.style.display = "block";
+    refreshSafeBalances(data.safeAddress);
+
+    setTimeout(hideOnboarding, 1500);
+  } catch (err: any) {
+    onboardStatusEl.textContent = `Error: ${err.message}`;
+    log(`Onboard error: ${err.message}`);
+  } finally {
+    deploySafeBtn.disabled = false;
+  }
+});
+
+// ─── Safe Deposit ───
+async function refreshSafeBalances(safeAddr: string): Promise<void> {
+  try {
+    const resp = await fetch(`${BRIDGE_HTTP}/safe-balances?address=${safeAddr}`);
+    const b = await resp.json();
+    safeBalancesEl.innerHTML = `Safe balances: <strong>${Number(b.eth).toFixed(4)}</strong> ETH | <strong>${Number(b.usdc).toFixed(2)}</strong> USDC | <strong>${Number(b.weth).toFixed(4)}</strong> WETH`;
+  } catch {
+    safeBalancesEl.textContent = "Could not fetch Safe balances";
+  }
+}
+
+const USDC_SEPOLIA_ADDR = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238";
+const WETH_SEPOLIA_ADDR = "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14";
+
+depositBtn.addEventListener("click", async () => {
+  if (!fullWalletAddress || !currentSafeAddress) {
+    depositStatusEl.textContent = "Connect Ledger and deploy Safe first";
+    return;
+  }
+
+  const token = depositToken.value;
+  const amount = depositAmount.value.trim();
+  if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
+    depositStatusEl.textContent = "Enter a valid amount";
+    return;
+  }
+
+  depositBtn.disabled = true;
+  depositStatusEl.textContent = "Preparing transaction...";
+
+  try {
+    const { ethers } = await import("ethers");
+
+    const nonceResp = await fetch(`${BRIDGE_HTTP}/nonce/${fullWalletAddress}`);
+    const nonceData = await nonceResp.json();
+    const maxFeePerGas = BigInt(nonceData.maxFeePerGas);
+    const maxPriorityFeePerGas = BigInt(nonceData.maxPriorityFeePerGas);
+
+    const sessionId = getActiveSession();
+    if (!sessionId) throw new Error("No active Ledger session");
+    const signer = createSigner(sessionId);
+
+    let tx: ReturnType<typeof ethers.Transaction.from>;
+
+    if (token === "eth") {
+      const value = ethers.parseEther(amount);
+      depositStatusEl.textContent = "Sign ETH transfer on Ledger...";
+      log(`Depositing ${amount} ETH to Safe...`);
+
+      tx = ethers.Transaction.from({
+        to: currentSafeAddress,
+        value,
+        nonce: nonceData.nonce,
+        maxFeePerGas,
+        maxPriorityFeePerGas,
+        gasLimit: 21000,
+        chainId: 11155111,
+        type: 2,
+      });
+    } else {
+      const tokenAddr = token === "usdc" ? USDC_SEPOLIA_ADDR : WETH_SEPOLIA_ADDR;
+      const decimals = token === "usdc" ? 6 : 18;
+      const iface = new ethers.Interface(["function transfer(address to, uint256 amount)"]);
+      const data = iface.encodeFunctionData("transfer", [
+        currentSafeAddress,
+        ethers.parseUnits(amount, decimals),
+      ]);
+
+      depositStatusEl.textContent = `Sign ${token.toUpperCase()} transfer on Ledger...`;
+      log(`Depositing ${amount} ${token.toUpperCase()} to Safe...`);
+
+      tx = ethers.Transaction.from({
+        to: tokenAddr,
+        value: 0n,
+        data,
+        nonce: nonceData.nonce,
+        maxFeePerGas,
+        maxPriorityFeePerGas,
+        gasLimit: 80000,
+        chainId: 11155111,
+        type: 2,
+      });
+    }
+
+    setDeviceStatus("signing");
+    const sig = await requestSignature(signer, tx.unsignedSerialized, (s) => log(`  ↳ ${s}`));
+
+    const signedTx = tx.clone();
+    signedTx.signature = ethers.Signature.from(sig);
+    setDeviceStatus("ready");
+
+    depositStatusEl.textContent = "Broadcasting...";
+    const broadcastResp = await fetch(`${BRIDGE_HTTP}/broadcast`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ signedTx: signedTx.serialized }),
+    });
+    const result = await broadcastResp.json();
+    if (!broadcastResp.ok) throw new Error(result.error);
+
+    depositStatusEl.innerHTML = `Deposited ${amount} ${token.toUpperCase()} — <a href="${result.explorerUrl}" target="_blank" style="color:var(--accent)">view tx</a>`;
+    log(`${token.toUpperCase()} deposit: ${result.txHash}`);
+
+    // Refresh balances after deposit
+    setTimeout(() => refreshSafeBalances(currentSafeAddress!), 5000);
+
+  } catch (err: any) {
+    depositStatusEl.textContent = `Error: ${err.message}`;
+    log(`Deposit error: ${err.message}`);
+  } finally {
+    depositBtn.disabled = false;
+  }
 });
 
 // ─── WebSocket bridge ───
@@ -358,8 +580,21 @@ intentBtn.addEventListener("click", async () => {
     log(`Plan: ${data.plan.summary}`);
     log(`Verdict: ${data.assessment.verdict} (risk: ${data.assessment.riskScore})`);
 
-    // If we have a quote and it needs approval, show the Sign & Swap flow
-    if (data.quoteData) {
+    // Handle auto-executed transactions (Safe signed by agent wallet)
+    if (data.autoExecuted && data.txHash) {
+      quoteResultEl.innerHTML = `
+        <div style="color:var(--green);font-weight:bold;margin-bottom:6px">Executed automatically by agent</div>
+        <div style="font-size:11px">No Ledger approval needed (below spending limit)</div>
+        <div style="margin-top:8px">
+          <a href="${data.explorerUrl}" target="_blank" style="color:var(--accent)">View on Etherscan: ${data.txHash.slice(0, 10)}...</a>
+        </div>
+      `;
+      quoteResultEl.style.display = "block";
+      intentStatusEl.textContent = "Auto-executed via Safe";
+      intentStatusEl.style.color = "var(--green)";
+      log(`Auto-executed via Safe: ${data.txHash}`);
+    } else if (data.quoteData) {
+      // NEEDS_APPROVAL — show the Sign & Swap flow
       lastQuoteData = data.quoteData;
 
       const routingBadge = data.quoteData.isMevProtected
@@ -369,7 +604,7 @@ intentBtn.addEventListener("click", async () => {
       quoteResultEl.innerHTML = `
         Routing: ${routingBadge}<br>
         Risk: ${verdictBadge}<br>
-        ${data.quoteData.approvalNeeded ? "⚠ Permit2 approval needed<br>" : "✓ Permit2 approved<br>"}
+        ${data.quoteData.approvalNeeded ? "Permit2 approval needed<br>" : "Permit2 approved<br>"}
         <button id="sign-swap-btn" class="btn btn-sign" style="margin-top:8px;width:100%">Sign & Swap on Ledger</button>
         <div id="swap-status" style="margin-top:6px;font-size:11px;"></div>
       `;
@@ -383,7 +618,7 @@ intentBtn.addEventListener("click", async () => {
       intentStatusEl.style.color = "var(--green)";
       log("Quote fetched — ready to sign on Ledger");
     } else if (data.assessment.verdict === "AUTO_EXECUTE") {
-      intentStatusEl.textContent = "✓ Auto-executed (low risk)";
+      intentStatusEl.textContent = "Auto-executed (low risk)";
       intentStatusEl.style.color = "var(--green)";
       log("Auto-executed — no Ledger approval needed");
     } else {
