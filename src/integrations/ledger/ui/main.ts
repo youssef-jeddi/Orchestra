@@ -24,6 +24,9 @@ const intentBtn       = document.getElementById("intent-btn")! as HTMLButtonElem
 const intentStatusEl  = document.getElementById("intent-status")!;
 const agentPanel      = document.getElementById("agent-panel")!;
 const agentResultEl   = document.getElementById("agent-result")!;
+const providerGroqBtn = document.getElementById("provider-groq")! as HTMLButtonElement;
+const provider0gBtn   = document.getElementById("provider-0g")! as HTMLButtonElement;
+const providerStatusEl = document.getElementById("provider-status")!;
 
 // ─── State ───
 let deviceStatus: DeviceStatus = "disconnected";
@@ -675,6 +678,61 @@ async function handleSignAndSwap(quoteData: any, amountEth: string): Promise<voi
     signSwapBtn.disabled = false;
   }
 }
+
+// ─── Compute provider toggle ───
+function setProviderUI(provider: string): void {
+  if (provider === "0g") {
+    providerGroqBtn.className = "btn btn-secondary";
+    providerGroqBtn.style.flex = "1";
+    providerGroqBtn.style.fontSize = "11px";
+    providerGroqBtn.style.padding = "7px 4px";
+    provider0gBtn.className = "btn btn-primary";
+    provider0gBtn.style.flex = "1";
+    provider0gBtn.style.fontSize = "11px";
+    provider0gBtn.style.padding = "7px 4px";
+    provider0gBtn.style.background = "var(--green)";
+    providerStatusEl.textContent = "Active: 0G Compute — TeeML verified";
+    providerStatusEl.style.color = "var(--green)";
+  } else {
+    providerGroqBtn.className = "btn btn-primary";
+    providerGroqBtn.style.flex = "1";
+    providerGroqBtn.style.fontSize = "11px";
+    providerGroqBtn.style.padding = "7px 4px";
+    provider0gBtn.className = "btn btn-secondary";
+    provider0gBtn.style.flex = "1";
+    provider0gBtn.style.fontSize = "11px";
+    provider0gBtn.style.padding = "7px 4px";
+    provider0gBtn.style.background = "";
+    providerStatusEl.textContent = "Active: Groq";
+    providerStatusEl.style.color = "var(--text-dim)";
+  }
+}
+
+async function switchProvider(provider: string): Promise<void> {
+  try {
+    const res = await fetch(`${BRIDGE_HTTP}/set-compute-provider`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider }),
+    });
+    const data = await res.json() as Record<string, unknown>;
+    if (data.success) {
+      setProviderUI(provider);
+      log(`Compute provider switched to: ${provider}`);
+    }
+  } catch (err: any) {
+    log(`Failed to switch provider: ${err.message}`);
+  }
+}
+
+providerGroqBtn.addEventListener("click", () => switchProvider("groq"));
+provider0gBtn.addEventListener("click", () => switchProvider("0g"));
+
+// Fetch initial provider on load
+fetch(`${BRIDGE_HTTP}/compute-provider`)
+  .then(r => r.json())
+  .then((data: any) => setProviderUI(data.provider))
+  .catch(() => {});
 
 // ─── Init ───
 log("SafeSwarm × Ledger — Test Console initialized");

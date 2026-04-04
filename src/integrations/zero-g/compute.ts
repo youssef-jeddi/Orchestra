@@ -1,5 +1,18 @@
 import { AgentResponse } from '../../types/agents';
 
+// ── Runtime provider switching ──────────────────────────────────────
+let currentProvider = process.env.COMPUTE_PROVIDER || 'groq';
+
+export function setComputeProvider(provider: 'groq' | '0g'): void {
+  currentProvider = provider;
+  console.log(`[0G Compute] Provider switched to: ${provider}`);
+}
+
+export function getComputeProvider(): string {
+  return currentProvider;
+}
+
+// ── Response parsing ────────────────────────────────────────────────
 function parseResponse(raw: string): AgentResponse {
   const fallback: AgentResponse = {
     action: null,
@@ -88,6 +101,7 @@ function parseResponse(raw: string): AgentResponse {
   }
 }
 
+// ── Groq inference ──────────────────────────────────────────────────
 async function inferGroq(systemPrompt: string, userPrompt: string): Promise<AgentResponse> {
   const Groq = (await import('groq-sdk')).default;
   const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
@@ -106,44 +120,31 @@ async function inferGroq(systemPrompt: string, userPrompt: string): Promise<Agen
   return parseResponse(content);
 }
 
+// ── 0G Compute inference (API key approach) ─────────────────────────
+// Uses the 0G Compute marketplace API key for authentication.
+// Simpler and avoids ESM/CJS broker SDK import issues in tsx runtime.
+// Fee settlement happens automatically on the provider side.
+
+const ZERO_G_DEFAULT_URL = 'https://compute-network-6.integratenetwork.work/v1/proxy';
+const ZERO_G_DEFAULT_MODEL = 'qwen/qwen-2.5-7b-instruct';
+
 async function infer0G(systemPrompt: string, userPrompt: string): Promise<AgentResponse> {
-  const { ethers } = await import('ethers');
-  const { createZGComputeNetworkBroker } = await import('@0glabs/0g-serving-broker');
-
-  const privateKey = process.env.ZERO_G_PRIVATE_KEY;
-  if (!privateKey) {
-    throw new Error('[0G Compute] Missing required env var: ZERO_G_PRIVATE_KEY');
+  const apiKey = process.env.ZERO_G_API_KEY;
+  if (!apiKey) {
+    throw new Error('[0G Compute] Missing required env var: ZERO_G_API_KEY');
   }
 
-  const rpcUrl = process.env.ZERO_G_RPC_URL || 'https://evmrpc-testnet.0g.ai';
-  const provider = new ethers.JsonRpcProvider(rpcUrl);
-  const wallet = new ethers.Wallet(privateKey, provider);
+  const serviceUrl = process.env.ZERO_G_SERVICE_URL || ZERO_G_DEFAULT_URL;
+  const model = process.env.ZERO_G_MODEL || ZERO_G_DEFAULT_MODEL;
 
-  if (!broker) {
-    broker = await createZGComputeNetworkBroker(wallet);
-  }
+  console.log(`[0G Compute] Endpoint: ${serviceUrl}`);
+  console.log(`[0G Compute] Model: ${model}`);
 
-  // Use configured provider or discover one
-  let providerAddress = process.env.ZERO_G_PROVIDER_ADDRESS;
-  if (!providerAddress) {
-    const services = await broker.inference.listService();
-    const chatService = services.find((s: Record<string, unknown>) =>
-      String(s.serviceType || s.type || '').toLowerCase().includes('chat')
-    );
-    if (!chatService) {
-      throw new Error('[0G Compute] No chat service found on 0G network');
-    }
-    providerAddress = (chatService as Record<string, string>).provider || (chatService as Record<string, string>).address;
-  }
-
-  const { endpoint, model } = await broker.inference.getServiceMetadata(providerAddress);
-  const headers = await broker.inference.getRequestHeaders(providerAddress);
-
-  const response = await fetch(`${endpoint}/v1/proxy/chat/completions`, {
+  const response = await fetch(`${serviceUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...headers,
+      'Authorization': `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
       model,
@@ -155,37 +156,25 @@ async function infer0G(systemPrompt: string, userPrompt: string): Promise<AgentR
     }),
   });
 
-  const data = await response.json() as Record<string, unknown>;
-
-  // Process response for fee settlement
-  const chatID =
-    response.headers.get('ZG-Res-Key') ||
-    response.headers.get('zg-res-key') ||
-    (data.id as string);
-
-  if (chatID) {
-    try {
-      await broker.inference.processResponse(providerAddress, chatID, JSON.stringify(data.usage));
-    } catch (err) {
-      console.warn('[0G Compute] processResponse settlement warning:', err);
-    }
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`[0G Compute] Inference request failed (${response.status}): ${errorText}`);
   }
+
+  const data = await response.json() as Record<string, unknown>;
 
   const choices = data.choices as Array<{ message: { content: string } }> | undefined;
   const content = choices?.[0]?.message?.content ?? '';
-  console.log('[0G Compute] 0G response received');
+  console.log('[0G Compute] 0G raw response:', content.slice(0, 500));
+
   return parseResponse(content);
 }
 
-// Lazy singleton for the 0G broker (SDK doesn't export a typed interface)
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let broker: any = null;
-
+// ── Main inference export ───────────────────────────────────────────
 export async function infer(systemPrompt: string, userPrompt: string): Promise<AgentResponse> {
-  const computeProvider = process.env.COMPUTE_PROVIDER || 'groq';
-  console.log(`[0G Compute] Using provider: ${computeProvider}`);
+  console.log(`[0G Compute] Using provider: ${currentProvider}`);
 
-  switch (computeProvider) {
+  switch (currentProvider) {
     case '0g':
       return infer0G(systemPrompt, userPrompt);
     case 'groq':

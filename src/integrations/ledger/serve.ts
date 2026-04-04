@@ -17,6 +17,7 @@ import { WETH_SEPOLIA, USDC_SEPOLIA, CHAIN_ID } from "../uniswap/types";
 import { runPlanner } from "../../agents/planner/index";
 import { runGatekeeper } from "../../agents/gatekeeper/index";
 import { write, read, readMany } from "../zero-g/storage";
+import { setComputeProvider, getComputeProvider } from "../zero-g/compute";
 
 const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || "https://eth-sepolia.g.alchemy.com/v2/demo";
 const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC);
@@ -548,6 +549,22 @@ app.post("/intent", async (req, res) => {
     console.error("[intent] Pipeline error:", err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// ─── Compute provider toggle ───
+app.post("/set-compute-provider", (req, res) => {
+  const { provider } = req.body;
+  if (provider !== "groq" && provider !== "0g") {
+    res.status(400).json({ error: "provider must be 'groq' or '0g'" });
+    return;
+  }
+  setComputeProvider(provider);
+  console.log(`[serve] Compute provider set to: ${provider}`);
+  res.json({ success: true, provider });
+});
+
+app.get("/compute-provider", (_req, res) => {
+  res.json({ provider: getComputeProvider() });
 });
 
 // ─── Health check ───
