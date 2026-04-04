@@ -608,12 +608,21 @@ async function handleSignAndSwap(quoteData: any, amountEth: string): Promise<voi
 
     // Classic: we have an unsigned tx — sign it on Ledger
     const unsignedTx = swapResult.unsignedTx;
-    log(`Swap tx received: to=${unsignedTx.to?.slice(0, 10)}… data=${(unsignedTx.data || "").slice(0, 20)}…`);
+
+    // ── Detailed tx logging ──
+    log(`── Unsigned Swap Tx from Uniswap ──`);
+    log(`  to:       ${unsignedTx.to}`);
+    log(`  value:    ${unsignedTx.value}`);
+    log(`  gasLimit: ${unsignedTx.gasLimit || unsignedTx.gas || "not set"}`);
+    log(`  data:     ${(unsignedTx.data || "").slice(0, 40)}…`);
+    log(`  nonce:    ${currentNonce}`);
+    log(`  maxFee:   ${maxFeePerGas} (${(BigInt(maxFeePerGas) / 1000000000n).toString()} gwei)`);
+    log(`  maxPrio:  ${maxPriorityFeePerGas}`);
 
     // Cap gas limit — Uniswap API can return very high estimates that Sepolia rejects
     let gasLimit = Number(unsignedTx.gasLimit || unsignedTx.gas || 350000);
     if (gasLimit > 500000) {
-      log(`Gas limit ${gasLimit} too high — capping at 500000`);
+      log(`⚠ Gas limit ${gasLimit} too high — capping at 500000`);
       gasLimit = 500000;
     }
 
@@ -632,12 +641,15 @@ async function handleSignAndSwap(quoteData: any, amountEth: string): Promise<voi
       nonce: currentNonce,
     });
 
+    log(`Assembled tx hash (unsigned): ${swapTx.unsignedHash}`);
+
     const swapSig = await requestSignature(signer, swapTx.unsignedSerialized, (s) => log(`  ↳ ${s}`));
     log(`✓ Swap tx signed`);
 
     // Assemble the fully signed transaction
     const signedSwap = swapTx.clone();
     signedSwap.signature = ethers.Signature.from(swapSig);
+    log(`Signed tx length: ${signedSwap.serialized.length} chars`);
 
     // ── Step: Broadcast to Sepolia ──
     status("Broadcasting swap to Sepolia…");

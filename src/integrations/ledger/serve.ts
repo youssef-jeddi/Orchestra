@@ -169,10 +169,15 @@ app.post("/swap", async (req, res) => {
     }
 
     // Classic: call Uniswap /swap to get the unsigned tx
+    console.log(`[serve] /swap request — routing: ${routing}, hasPermitData: ${!!permitData}, hasSignature: ${!!signature}`);
     const { submitSwap } = await import("../uniswap/api");
     const swapTx = await submitSwap(quote, permitData, signature);
 
-    console.log(`[serve] swap tx from Uniswap:`, JSON.stringify(swapTx).slice(0, 200));
+    console.log(`[serve] ── Unsigned Swap Tx from Uniswap API ──`);
+    console.log(`[serve]   to:       ${swapTx.to}`);
+    console.log(`[serve]   value:    ${swapTx.value}`);
+    console.log(`[serve]   gasLimit: ${swapTx.gasLimit}`);
+    console.log(`[serve]   data:     ${(swapTx.data || "").slice(0, 40)}…(${(swapTx.data || "").length} chars)`);
 
     // Return the unsigned tx fields — the UI will sign this on Ledger
     res.json({
@@ -236,9 +241,46 @@ app.get("/nonce/:address", async (req, res) => {
   }
 });
 
+// ─── Deterministic intent parser ───
+// Catches simple swap intents without needing LLM. Returns null if it can't parse.
+const TOKEN_MAP: Record<string, { address: string; decimals: number; symbol: string }> = {
+  eth:  { address: WETH_SEPOLIA, decimals: 18, symbol: "WETH" },
+  weth: { address: WETH_SEPOLIA, decimals: 18, symbol: "WETH" },
+  usdc: { address: USDC_SEPOLIA, decimals: 6, symbol: "USDC" },
+};
+
+function parseSwapIntent(message: string): {
+  tokenIn: string; tokenOut: string; amount: string; amountWei: string;
+  symbolIn: string; symbolOut: string; decimalsIn: number;
+} | null {
+  // Match patterns like: "swap 0.01 ETH to USDC", "swap 100 USDC for ETH"
+  const match = message.match(
+    /swap\s+([\d.]+)\s+(\w+)\s+(?:to|for|into|→)\s+(\w+)/i
+  );
+  if (!match) return null;
+
+  const [, amountStr, fromSymbol, toSymbol] = match;
+  const from = TOKEN_MAP[fromSymbol.toLowerCase()];
+  const to = TOKEN_MAP[toSymbol.toLowerCase()];
+  if (!from || !to) return null;
+
+  const amountWei = ethers.parseUnits(amountStr, from.decimals).toString();
+
+  return {
+    tokenIn: from.address,
+    tokenOut: to.address,
+    amount: amountStr,
+    amountWei,
+    symbolIn: from.symbol,
+    symbolOut: to.symbol,
+    decimalsIn: from.decimals,
+  };
+}
+
 // ─── POST /intent ───
-// Process a natural-language intent through the agent pipeline:
-//   Intent → Planner (LLM) → Gatekeeper (LLM) → verdict + quote
+// Process a natural-language intent:
+//   1. Try deterministic parser first (fast, reliable for simple swaps)
+//   2. Fall back to AI agent pipeline (Planner → Gatekeeper) for complex intents
 app.post("/intent", async (req, res) => {
   try {
     const { message, walletAddress } = req.body;
@@ -252,146 +294,197 @@ app.post("/intent", async (req, res) => {
     console.log(`[intent] "${message}"`);
     console.log(`[intent] wallet: ${walletAddress || "not provided"}`);
 
-    // Step 1: Write user message to storage (agents read it from there)
-    await write("messages:latest", {
-      message,
-      walletAddress,
-      timestamp: new Date().toISOString(),
-    });
+    // ── Step 1: Try deterministic parser ──
+    const parsed = parseSwapIntent(message);
 
-    // Step 2: Run Planner — it reads the message, calls LLM, writes an ActionPlan
-    console.log(`[intent] Running Planner…`);
-    const plannerResult = await runPlanner(message);
-    console.log(`[intent] Planner action: ${plannerResult.action}`);
-    console.log(`[intent] Planner reasoning: ${plannerResult.reasoning}`);
+    let planSummary: string;
+    let planSteps: any[];
+    let totalEstimatedValueUsd: number;
+    let plannerReasoning: string;
+    let gatekeeperReasoning: string;
+    let verdict: string;
+    let riskScore: number;
 
-    // Read the plan it just wrote
-    const plans = (await readMany("plans")) as Record<string, unknown>[];
-    const latestPlan = plans.sort((a, b) =>
-      (b.createdAt as string).localeCompare(a.createdAt as string)
-    )[0];
+    if (parsed) {
+      console.log(`[intent] ✓ Deterministic parse succeeded`);
+      console.log(`[intent]   ${parsed.amount} ${parsed.symbolIn} → ${parsed.symbolOut}`);
+      console.log(`[intent]   tokenIn:  ${parsed.tokenIn}`);
+      console.log(`[intent]   tokenOut: ${parsed.tokenOut}`);
+      console.log(`[intent]   amountWei: ${parsed.amountWei}`);
 
-    if (!latestPlan) {
-      res.json({
-        status: "no_action",
-        reasoning: plannerResult.reasoning,
+      planSummary = `Swap ${parsed.amount} ${parsed.symbolIn} for ${parsed.symbolOut} on Uniswap`;
+      planSteps = [{
+        protocol: "uniswap",
+        action: "swap",
+        params: {
+          tokenIn: parsed.tokenIn,
+          tokenOut: parsed.tokenOut,
+          amount: parsed.amount,
+        },
+        estimatedGasWei: "300000",
+        order: 0,
+      }];
+
+      // Rough USD estimate (ETH ≈ $2000, USDC ≈ $1)
+      const ethAmount = parsed.symbolIn === "WETH" ? Number(parsed.amount) : 0;
+      totalEstimatedValueUsd = ethAmount > 0 ? ethAmount * 2000 : Number(parsed.amount);
+
+      plannerReasoning = `Deterministic parser: swap ${parsed.amount} ${parsed.symbolIn} → ${parsed.symbolOut}`;
+      gatekeeperReasoning = totalEstimatedValueUsd > 100
+        ? `Value $${totalEstimatedValueUsd} exceeds auto-approve limit → NEEDS_APPROVAL`
+        : `Value $${totalEstimatedValueUsd} within auto-approve limit, verified tokens → AUTO_EXECUTE`;
+      verdict = totalEstimatedValueUsd > 100 ? "NEEDS_APPROVAL" : "AUTO_EXECUTE";
+      riskScore = totalEstimatedValueUsd > 100 ? 70 : 10;
+    } else {
+      // ── Step 2: Fall back to AI agent pipeline ──
+      console.log(`[intent] Deterministic parse failed, falling back to AI agents…`);
+
+      await write("messages:latest", {
+        message,
+        walletAddress,
+        timestamp: new Date().toISOString(),
       });
-      return;
+
+      console.log(`[intent] Running Planner…`);
+      const plannerResult = await runPlanner(message);
+      console.log(`[intent] Planner action: ${plannerResult.action}`);
+      console.log(`[intent] Planner args: ${JSON.stringify(plannerResult.args)}`);
+      console.log(`[intent] Planner reasoning: ${plannerResult.reasoning}`);
+
+      const plans = (await readMany("plans")) as Record<string, unknown>[];
+      const latestPlan = plans.sort((a, b) =>
+        (b.createdAt as string).localeCompare(a.createdAt as string)
+      )[0];
+
+      if (!latestPlan) {
+        console.log(`[intent] No plan written by Planner`);
+        res.json({ status: "no_action", reasoning: plannerResult.reasoning });
+        return;
+      }
+
+      console.log(`[intent] Plan written: ${JSON.stringify(latestPlan, null, 2)}`);
+
+      console.log(`[intent] Running Gatekeeper…`);
+      const gatekeeperResult = await runGatekeeper();
+      console.log(`[intent] Gatekeeper action: ${gatekeeperResult.action}`);
+      console.log(`[intent] Gatekeeper args: ${JSON.stringify(gatekeeperResult.args)}`);
+      console.log(`[intent] Gatekeeper reasoning: ${gatekeeperResult.reasoning}`);
+
+      const assessments = (await readMany("assessments")) as Record<string, unknown>[];
+      const latestAssessment = assessments.sort((a, b) =>
+        (b.assessedAt as string).localeCompare(a.assessedAt as string)
+      )[0];
+
+      console.log(`[intent] Assessment: ${JSON.stringify(latestAssessment, null, 2)}`);
+
+      planSummary = latestPlan.summary as string;
+      planSteps = (latestPlan.steps as any[]) || [];
+      totalEstimatedValueUsd = (latestPlan.totalEstimatedValueUsd as number) || 0;
+      plannerReasoning = plannerResult.reasoning;
+      gatekeeperReasoning = gatekeeperResult.reasoning;
+      verdict = (latestAssessment?.verdict as string) ?? "NEEDS_APPROVAL";
+      riskScore = (latestAssessment?.riskScore as number) ?? 50;
+
+      await write("messages:latest", { message: null, timestamp: null });
     }
 
-    console.log(`[intent] Plan: ${latestPlan.summary}`);
-    console.log(`[intent] Steps: ${(latestPlan.steps as any[])?.length || 0}`);
-    console.log(`[intent] Value: $${latestPlan.totalEstimatedValueUsd}`);
-
-    // Step 3: Run Gatekeeper — it reads the plan, assesses risk, writes a RiskAssessment
-    console.log(`[intent] Running Gatekeeper…`);
-    const gatekeeperResult = await runGatekeeper();
-    console.log(`[intent] Gatekeeper action: ${gatekeeperResult.action}`);
-    console.log(`[intent] Gatekeeper reasoning: ${gatekeeperResult.reasoning}`);
-
-    // Read the assessment it just wrote
-    const assessments = (await readMany("assessments")) as Record<string, unknown>[];
-    const latestAssessment = assessments.sort((a, b) =>
-      (b.assessedAt as string).localeCompare(a.assessedAt as string)
-    )[0];
-
-    const verdict = latestAssessment?.verdict ?? "NEEDS_APPROVAL";
-    const riskScore = latestAssessment?.riskScore ?? 50;
-    const reasons = latestAssessment?.reasons ?? [gatekeeperResult.reasoning];
-
+    console.log(`[intent] ── Summary ──`);
+    console.log(`[intent] Plan: ${planSummary}`);
+    console.log(`[intent] Steps: ${planSteps.length}`);
     console.log(`[intent] Verdict: ${verdict} (risk: ${riskScore})`);
 
-    // Step 4: If it's a swap, fetch a real quote
+    // ── Step 3: Fetch real Uniswap quote ──
     let quoteData = null;
-    const steps = (latestPlan.steps as any[]) || [];
-    const swapStep = steps.find((s: any) =>
+    const swapStep = planSteps.find((s: any) =>
       s.action === "swap" || s.protocol === "uniswap" || s.protocol === "Uniswap"
     );
 
     if (swapStep && walletAddress) {
-      console.log(`[intent] Fetching Uniswap quote for swap step…`);
+      const params = swapStep.params || {};
+      const tokenIn = params.tokenIn || params.from || (parsed?.tokenIn ?? WETH_SEPOLIA);
+      const tokenOut = params.tokenOut || params.to || (parsed?.tokenOut ?? USDC_SEPOLIA);
+      const rawAmount = params.amount || params.value || parsed?.amount || "0";
+
+      // Convert to wei if it looks like a human-readable amount
+      let amountWei: string;
+      if (parsed) {
+        amountWei = parsed.amountWei;
+      } else if (!String(rawAmount).match(/^\d{10,}$/)) {
+        amountWei = ethers.parseEther(String(rawAmount)).toString();
+      } else {
+        amountWei = String(rawAmount);
+      }
+
+      console.log(`[intent] ── Quote Request ──`);
+      console.log(`[intent]   tokenIn:   ${tokenIn}`);
+      console.log(`[intent]   tokenOut:  ${tokenOut}`);
+      console.log(`[intent]   amountWei: ${amountWei}`);
+      console.log(`[intent]   swapper:   ${walletAddress}`);
+
       try {
-        const params = swapStep.params || {};
-        const tokenIn = params.tokenIn || params.from || WETH_SEPOLIA;
-        const tokenOut = params.tokenOut || params.to || USDC_SEPOLIA;
-        const amount = params.amount || params.value || "0";
-
-        // Convert to wei if it looks like a human-readable amount
-        let amountWei = amount;
-        if (!amount.match(/^\d{10,}$/)) {
-          // Looks like ETH amount, not wei
-          amountWei = ethers.parseEther(String(amount)).toString();
-        }
-
         const approvalTx = await checkApproval({
           walletAddress,
           token: tokenIn,
           tokenOut: tokenOut,
           amount: amountWei,
         });
-
-        const riskLevel = assessRisk({
-          tradeId: latestPlan.id as string,
-          fromToken: tokenIn,
-          toToken: tokenOut,
-          amountIn: amountWei,
-          valueUSD: (latestPlan.totalEstimatedValueUsd as number) || 0,
-          tokenVerified: true,
-          liquidityUSD: 1_000_000,
-          routerAddress: "0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD",
-          calldataHex: "",
-          summary: latestPlan.summary as string,
-        });
+        console.log(`[intent]   approval needed: ${!!approvalTx}`);
 
         const quoteResult = await fetchQuoteWithRouting(
           { swapper: walletAddress, tokenIn, tokenOut, amount: amountWei },
-          riskLevel
+          "autonomous"
         );
 
+        console.log(`[intent] ── Quote Response ──`);
+        console.log(`[intent]   routing:      ${quoteResult.routing}`);
+        console.log(`[intent]   mevProtected: ${quoteResult.isMevProtected}`);
+        console.log(`[intent]   permitData:   ${quoteResult.permitData ? "yes" : "no"}`);
+        console.log(`[intent]   quote keys:   ${Object.keys(quoteResult.quote).join(", ")}`);
+
         quoteData = {
-          tradeId: latestPlan.id,
+          tradeId: crypto.randomUUID(),
           quote: quoteResult.quote,
           permitData: quoteResult.permitData,
           routing: quoteResult.routing,
           isMevProtected: quoteResult.isMevProtected,
           isGasless: quoteResult.isGasless,
-          riskLevel,
+          riskLevel: "autonomous",
           approvalNeeded: !!approvalTx,
           approvalTx,
           tokenIn,
           tokenOut,
           amount: amountWei,
         };
-
-        console.log(`[intent] Quote ready — routing: ${quoteResult.routing}`);
       } catch (err: any) {
         console.error(`[intent] Quote error: ${err.message}`);
       }
+    } else {
+      console.log(`[intent] No swap step found or no wallet — skipping quote`);
+      if (planSteps.length > 0) {
+        console.log(`[intent] Steps: ${JSON.stringify(planSteps, null, 2)}`);
+      }
     }
-
-    // Clear the processed message
-    await write("messages:latest", { message: null, timestamp: null });
 
     console.log(`[intent] ═══════════════════════════════════════\n`);
 
     res.json({
       status: "ok",
       plan: {
-        id: latestPlan.id,
-        summary: latestPlan.summary,
-        steps,
-        totalEstimatedValueUsd: latestPlan.totalEstimatedValueUsd,
+        id: quoteData?.tradeId || crypto.randomUUID(),
+        summary: planSummary,
+        steps: planSteps,
+        totalEstimatedValueUsd,
       },
       assessment: {
         verdict,
         riskScore,
-        reasons,
+        reasons: [gatekeeperReasoning],
         requiresLedger: verdict === "NEEDS_APPROVAL",
       },
       quoteData,
       agentReasoning: {
-        planner: plannerResult.reasoning,
-        gatekeeper: gatekeeperResult.reasoning,
+        planner: plannerReasoning,
+        gatekeeper: gatekeeperReasoning,
       },
     });
   } catch (err: any) {
