@@ -33,6 +33,11 @@ const onboardStatusEl = document.getElementById("onboard-status")!;
 const safeStatusEl    = document.getElementById("safe-status")!;
 const safeStatusText  = document.getElementById("safe-status-text")!;
 const limitButtons    = document.querySelectorAll(".limit-btn");
+const settingsSection = document.getElementById("settings-section")!;
+const currentLimitEl  = document.getElementById("current-limit")!;
+const newLimitInput   = document.getElementById("new-limit-input")! as HTMLInputElement;
+const updateLimitBtn  = document.getElementById("update-limit-btn")! as HTMLButtonElement;
+const limitStatusEl   = document.getElementById("limit-status")!;
 const depositSection  = document.getElementById("deposit-section")!;
 const depositToken    = document.getElementById("deposit-token")! as HTMLSelectElement;
 const depositAmount   = document.getElementById("deposit-amount")! as HTMLInputElement;
@@ -160,6 +165,7 @@ disconnectBtn.addEventListener("click", async () => {
   currentSafeAddress = null;
   safeStatusEl.style.display = "none";
   depositSection.style.display = "none";
+  settingsSection.style.display = "none";
   connectBtn.disabled = false;
   log("Device disconnected");
 });
@@ -173,7 +179,10 @@ async function checkSafeStatus(address: string): Promise<void> {
     const data = await resp.json();
     if (data.hasSafe) {
       currentSafeAddress = data.safeAddress;
-      safeStatusText.innerHTML = `Safe: <span style="cursor:pointer;text-decoration:underline" title="Click to copy" onclick="navigator.clipboard.writeText('${data.safeAddress}')">${data.safeAddress.slice(0, 8)}...${data.safeAddress.slice(-6)}</span> ($${data.spendingLimitUSD} auto-limit)`;
+      selectedLimit = data.spendingLimitUSD || 100;
+      currentLimitEl.textContent = `$${selectedLimit}`;
+      safeStatusText.innerHTML = `Safe: <span style="cursor:pointer;text-decoration:underline" title="Click to copy" onclick="navigator.clipboard.writeText('${data.safeAddress}')">${data.safeAddress.slice(0, 8)}...${data.safeAddress.slice(-6)}</span> ($${selectedLimit} auto-limit)`;
+      settingsSection.style.display = "block";
       depositSection.style.display = "block";
       refreshSafeBalances(data.safeAddress);
       log(`Safe account detected: ${data.safeAddress}`);
@@ -241,6 +250,8 @@ deploySafeBtn.addEventListener("click", async () => {
     safeStatusEl.style.borderColor = "rgba(0,255,128,0.2)";
     safeStatusEl.style.background = "rgba(0,255,128,0.08)";
     depositSection.style.display = "block";
+    settingsSection.style.display = "block";
+    currentLimitEl.textContent = `$${selectedLimit}`;
     refreshSafeBalances(data.safeAddress);
 
     setTimeout(hideOnboarding, 1500);
@@ -249,6 +260,121 @@ deploySafeBtn.addEventListener("click", async () => {
     log(`Onboard error: ${err.message}`);
   } finally {
     deploySafeBtn.disabled = false;
+  }
+});
+
+// ─── Update Spending Limit (Ledger-signed) ───
+updateLimitBtn.addEventListener("click", async () => {
+  const newLimit = Number(newLimitInput.value);
+  if (!newLimit || newLimit <= 0) {
+    limitStatusEl.textContent = "Enter a valid amount";
+    limitStatusEl.style.color = "var(--red)";
+    return;
+  }
+  if (!fullWalletAddress || !currentSafeAddress) {
+    limitStatusEl.textContent = "Connect Ledger and deploy Safe first";
+    limitStatusEl.style.color = "var(--red)";
+    return;
+  }
+  if (deviceStatus !== "ready") {
+    limitStatusEl.textContent = "Ledger not ready";
+    limitStatusEl.style.color = "var(--red)";
+    return;
+  }
+  const sessionId = getActiveSession();
+  if (!sessionId) {
+    limitStatusEl.textContent = "No active Ledger session";
+    limitStatusEl.style.color = "var(--red)";
+    return;
+  }
+
+  updateLimitBtn.disabled = true;
+  limitStatusEl.textContent = "Preparing transaction...";
+  limitStatusEl.style.color = "var(--text-dim)";
+  log(`Updating spending limit to $${newLimit}...`);
+
+  try {
+    const { ethers } = await import("ethers");
+
+    // Step 1: Get unsigned tx from backend
+    const prepRes = await fetch(`${BRIDGE_HTTP}/prepare-limit-update`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ newLimitUSD: newLimit, ledgerAddress: fullWalletAddress }),
+    });
+    const prepData = await prepRes.json();
+    if (!prepRes.ok) throw new Error(prepData.error || "Failed to prepare tx");
+
+    const { unsignedTx } = prepData;
+
+    // Step 2: Get nonce + gas for the Ledger EOA
+    const nonceRes = await fetch(`${BRIDGE_HTTP}/nonce/${fullWalletAddress}`);
+    const { nonce, maxFeePerGas, maxPriorityFeePerGas } = await nonceRes.json();
+
+    // Step 3: Sign on Ledger
+    limitStatusEl.textContent = "Sign on Ledger to update limit...";
+    log("Sign Safe tx on Ledger...");
+    setDeviceStatus("signing");
+
+    const tx = ethers.Transaction.from({
+      to: unsignedTx.to,
+      data: unsignedTx.data,
+      value: 0n,
+      chainId: 11155111,
+      gasLimit: unsignedTx.gasLimit,
+      type: 2,
+      maxFeePerGas: BigInt(maxFeePerGas),
+      maxPriorityFeePerGas: BigInt(maxPriorityFeePerGas),
+      nonce,
+    });
+
+    const signer = createSigner(sessionId);
+    const sig = await requestSignature(signer, tx.unsignedSerialized, (s) => log(`  ↳ ${s}`));
+
+    const signedTx = tx.clone();
+    signedTx.signature = ethers.Signature.from(sig);
+    setDeviceStatus("ready");
+
+    // Step 4: Broadcast
+    limitStatusEl.textContent = "Broadcasting...";
+    log("Broadcasting limit update tx...");
+
+    const broadcastRes = await fetch(`${BRIDGE_HTTP}/broadcast`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ signedTx: signedTx.serialized }),
+    });
+    const broadcastData = await broadcastRes.json();
+    if (!broadcastRes.ok) throw new Error(broadcastData.error || "Broadcast failed");
+
+    log(`Limit update tx broadcast: ${broadcastData.txHash}`);
+    limitStatusEl.textContent = "Confirming on-chain...";
+
+    // Step 5: Finalize — update 0G Storage + OrchestraPolicy
+    const finalRes = await fetch(`${BRIDGE_HTTP}/finalize-limit-update`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ newLimitUSD: newLimit, ledgerAddress: fullWalletAddress, txHash: broadcastData.txHash }),
+    });
+    const finalData = await finalRes.json();
+    if (!finalRes.ok) throw new Error(finalData.error || "Finalize failed");
+
+    // Step 6: Update UI
+    selectedLimit = newLimit;
+    currentLimitEl.textContent = `$${newLimit}`;
+    safeStatusText.innerHTML = `Safe: <span style="cursor:pointer;text-decoration:underline" title="Click to copy" onclick="navigator.clipboard.writeText('${currentSafeAddress}')">${currentSafeAddress!.slice(0, 8)}...${currentSafeAddress!.slice(-6)}</span> ($${newLimit} auto-limit)`;
+    newLimitInput.value = "";
+    limitStatusEl.innerHTML = `Updated! <a href="${broadcastData.explorerUrl}" target="_blank" style="color:var(--accent)">view tx</a>`;
+    limitStatusEl.style.color = "var(--green)";
+    log(`Spending limit updated to $${newLimit}`);
+    setTimeout(() => { limitStatusEl.textContent = ""; }, 8000);
+  } catch (err: any) {
+    limitStatusEl.textContent = `Error: ${err.message}`;
+    limitStatusEl.style.color = "var(--red)";
+    log(`Limit update error: ${err.message}`);
+    setDeviceStatus("ready");
+  } finally {
+    updateLimitBtn.disabled = false;
   }
 });
 

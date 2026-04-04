@@ -160,3 +160,79 @@ export async function updateSpendingLimit(
   console.log('[Safe] Spending limits updated');
   return txHashes;
 }
+
+// ── Ledger-signed limit update ──
+// Builds a single unsigned tx that batches all 3 setAllowance calls via MultiSend
+// through the Safe. The Ledger owner signs this as a regular ETH tx.
+
+const MULTISEND_ADDRESS = '0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526';
+
+const SAFE_EXEC_ABI = [
+  'function execTransaction(address to, uint256 value, bytes data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, bytes signatures) payable returns (bool)',
+];
+
+/** Pack inner txs into MultiSend's `transactions` bytes (packed encoding). */
+function encodeMultiSendData(txs: Array<{ to: string; value: string; data: string }>): string {
+  const parts: string[] = [];
+  for (const tx of txs) {
+    const dataBytes = ethers.getBytes(tx.data);
+    const packed = ethers.solidityPacked(
+      ['uint8', 'address', 'uint256', 'uint256', 'bytes'],
+      [0, tx.to, BigInt(tx.value || '0'), dataBytes.length, tx.data],
+    );
+    parts.push(packed.slice(2)); // strip 0x for concat
+  }
+  return '0x' + parts.join('');
+}
+
+/**
+ * Build an unsigned ETH transaction that, when sent by `ledgerAddress`,
+ * executes a MultiSend of 3 setAllowance calls through the Safe.
+ * Returns { to, data, value } — caller adds nonce/gas/chainId and signs on Ledger.
+ */
+export function buildLimitUpdateTx(
+  safeAddress: string,
+  ledgerAddress: string,
+  agentWalletAddress: string,
+  newLimitUSD: number,
+): { to: string; data: string; value: string; gasLimit: number } {
+  const allowanceIface = new ethers.Interface(ALLOWANCE_ABI);
+
+  const usdcAmount = BigInt(newLimitUSD) * 1000000n;
+  const ethAmount = ethers.parseEther((newLimitUSD / 2500).toFixed(8));
+
+  const innerTxs = [
+    { to: ALLOWANCE_MODULE_ADDRESS, value: '0', data: allowanceIface.encodeFunctionData('setAllowance', [agentWalletAddress, USDC_SEPOLIA, usdcAmount, 1440, 0]) },
+    { to: ALLOWANCE_MODULE_ADDRESS, value: '0', data: allowanceIface.encodeFunctionData('setAllowance', [agentWalletAddress, WETH_SEPOLIA, ethAmount, 1440, 0]) },
+    { to: ALLOWANCE_MODULE_ADDRESS, value: '0', data: allowanceIface.encodeFunctionData('setAllowance', [agentWalletAddress, ETH_ADDRESS, ethAmount, 1440, 0]) },
+  ];
+
+  // Pack into MultiSend calldata
+  const packed = encodeMultiSendData(innerTxs);
+  const multiSendIface = new ethers.Interface(['function multiSend(bytes transactions)']);
+  const multiSendCalldata = multiSendIface.encodeFunctionData('multiSend', [packed]);
+
+  // Owner pre-approved signature: when msg.sender is a Safe owner and v=1,
+  // the Safe contract accepts it without an ECDSA check (threshold=1).
+  const ownerSig = ethers.solidityPacked(
+    ['uint256', 'uint256', 'uint8'],
+    [BigInt(ledgerAddress), 0n, 1],
+  );
+
+  // Encode Safe.execTransaction (DELEGATECALL to MultiSend)
+  const safeIface = new ethers.Interface(SAFE_EXEC_ABI);
+  const execData = safeIface.encodeFunctionData('execTransaction', [
+    MULTISEND_ADDRESS,    // to
+    0,                     // value
+    multiSendCalldata,     // data
+    1,                     // operation = DELEGATECALL
+    0,                     // safeTxGas
+    0,                     // baseGas
+    0,                     // gasPrice
+    ethers.ZeroAddress,    // gasToken
+    ethers.ZeroAddress,    // refundReceiver
+    ownerSig,              // signatures
+  ]);
+
+  return { to: safeAddress, data: execData, value: '0', gasLimit: 500000 };
+}

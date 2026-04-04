@@ -390,6 +390,18 @@
 
       <hr style="border: none; border-top: 1px solid var(--border); margin: 16px 0;" />
 
+      <div id="settings-section" style="display:none">
+        <h2>Spending Limit</h2>
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px">Swaps below this limit auto-execute without Ledger.</div>
+        <div style="display:flex;gap:6px;margin-bottom:8px">
+          <span id="current-limit" style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--green);line-height:32px;min-width:50px">$100</span>
+          <input id="new-limit-input" type="number" placeholder="New limit" class="input-field" style="flex:1" />
+          <button id="update-limit-btn" class="btn btn-primary" style="width:auto;margin-bottom:0;padding:8px 14px;font-size:12px">Update</button>
+        </div>
+        <div id="limit-status" style="font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text-dim)"></div>
+        <hr style="border: none; border-top: 1px solid var(--border); margin: 16px 0;" />
+      </div>
+
       <div id="deposit-section" style="display:none">
         <h2>Deposit to Safe</h2>
         <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px">Send tokens from your Ledger to your Safe account.</div>

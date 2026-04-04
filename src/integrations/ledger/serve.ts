@@ -20,7 +20,7 @@ import { write, read, readMany } from "../zero-g/storage";
 import { setComputeProvider, getComputeProvider } from "../zero-g/compute";
 import { deploySafe } from "../safe/deploy";
 import { detectExistingSafe } from "../safe/detect";
-import { setInitialSpendingLimits, updateSpendingLimit } from "../safe/spendingLimit";
+import { setInitialSpendingLimits, updateSpendingLimit, buildLimitUpdateTx } from "../safe/spendingLimit";
 import { getAgentAddress } from "../safe/agentWallet";
 import { executePlan } from "../../executor";
 
@@ -730,7 +730,7 @@ app.post("/onboard", async (req, res) => {
       address: ledgerAddress,
       safeAddress,
       riskTolerance: "moderate",
-      autoExecuteLimitUsd: spendingLimitUSD,
+      autoApproveLimit: spendingLimitUSD,
       preferredTokens: ["USDC", "WETH", "ETH"],
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -789,7 +789,8 @@ app.get("/safe-balances", async (req, res) => {
   }
 });
 
-app.post("/update-limit", async (req, res) => {
+// Step 1: Build unsigned tx for Ledger to sign (MultiSend of 3 setAllowance calls through Safe)
+app.post("/prepare-limit-update", async (req, res) => {
   try {
     const { newLimitUSD, ledgerAddress } = req.body;
     if (!newLimitUSD || !ledgerAddress) {
@@ -803,12 +804,34 @@ app.post("/update-limit", async (req, res) => {
       return;
     }
     const safeAddress = (stored as any).safeAddress;
-    const agentKey = process.env.AGENT_PRIVATE_KEY!;
     const agentAddr = getAgentAddress();
 
-    const txHashes = await updateSpendingLimit(safeAddress, agentAddr, newLimitUSD, agentKey);
+    const unsignedTx = buildLimitUpdateTx(safeAddress, ledgerAddress, agentAddr, newLimitUSD);
 
-    // Update storage
+    console.log(`[prepare-limit-update] Built tx for $${newLimitUSD} limit (Safe: ${safeAddress})`);
+    res.json({ unsignedTx });
+  } catch (err: any) {
+    console.error("[prepare-limit-update] Error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Step 2: After Ledger signs and tx is broadcast, update storage + OrchestraPolicy
+app.post("/finalize-limit-update", async (req, res) => {
+  try {
+    const { newLimitUSD, ledgerAddress, txHash } = req.body;
+    if (!newLimitUSD || !ledgerAddress) {
+      res.status(400).json({ error: "newLimitUSD and ledgerAddress required" });
+      return;
+    }
+
+    const stored = await read(`safe:${ledgerAddress.toLowerCase()}`);
+    if (!stored) {
+      res.status(400).json({ error: "No Safe found." });
+      return;
+    }
+
+    // Update 0G Storage
     await write(`safe:${ledgerAddress.toLowerCase()}`, {
       ...(stored as any),
       spendingLimitUSD: newLimitUSD,
@@ -817,15 +840,32 @@ app.post("/update-limit", async (req, res) => {
     if (profile) {
       await write("user:profile", {
         ...(profile as any),
-        autoExecuteLimitUsd: newLimitUSD,
+        autoApproveLimit: newLimitUSD,
         updatedAt: new Date().toISOString(),
       });
     }
 
-    console.log(`[update-limit] Updated to $${newLimitUSD}`);
-    res.json({ success: true, txHashes });
+    // Update OrchestraPolicy on-chain (agent wallet signs — it's just a registry write)
+    const policyAddress = process.env.ORCHESTRA_POLICY_ADDRESS;
+    if (policyAddress) {
+      try {
+        const agentKey = process.env.AGENT_PRIVATE_KEY!;
+        const wallet = new ethers.Wallet(agentKey, provider);
+        const policy = new ethers.Contract(policyAddress, [
+          'function updateSpendingLimit(uint256 newLimitUSD) external',
+        ], wallet);
+        const policyTx = await policy.updateSpendingLimit(newLimitUSD * 100);
+        await policyTx.wait();
+        console.log(`[finalize-limit-update] OrchestraPolicy updated: ${policyTx.hash}`);
+      } catch (policyErr: any) {
+        console.warn(`[finalize-limit-update] OrchestraPolicy update failed (non-critical): ${policyErr.message}`);
+      }
+    }
+
+    console.log(`[finalize-limit-update] Limit updated to $${newLimitUSD}, on-chain tx: ${txHash}`);
+    res.json({ success: true });
   } catch (err: any) {
-    console.error("[update-limit] Error:", err.message);
+    console.error("[finalize-limit-update] Error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
