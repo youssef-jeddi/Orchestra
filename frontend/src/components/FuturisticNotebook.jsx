@@ -14,13 +14,6 @@ const DEFAULT_MESSAGES = [
   },
 ];
 
-const HISTORY_ENTRIES = [
-  { id: 'h1', label: 'Yield strategies', preview: 'Lido stETH 3.8%, Uni V3...' },
-  { id: 'h2', label: 'Risk analysis', preview: 'AAVE HF 1.42, collateral...' },
-  { id: 'h3', label: 'Gas optimization', preview: '18 gwei window, bridge USDC...' },
-  { id: 'h4', label: 'Whale movements', preview: '$LINK accumulation detected...' },
-  { id: 'h5', label: 'LP performance', preview: '24h vol $2,840, fees $6.20' },
-];
 
 function TypewriterText({ text, onComplete }) {
   const [displayed, setDisplayed] = useState('');
@@ -171,7 +164,6 @@ export default function FuturisticNotebook({ onClose, initialMessage = '' }) {
   const [messages, setMessages] = useState(DEFAULT_MESSAGES);
   const [inputValue, setInputValue] = useState('');
   const [isTyping, setIsTyping] = useState(false);
-  const [activeHistory, setActiveHistory] = useState('h1');
   const [signingId, setSigningId] = useState(null);
   const messagesEndRef = useRef(null);
   const queryHandled = useRef(false);
@@ -320,194 +312,115 @@ export default function FuturisticNotebook({ onClose, initialMessage = '' }) {
 
   return (
     <motion.div
-      initial={{ scale: 0.95, opacity: 0, filter: 'blur(8px)' }}
-      animate={{ scale: 1, opacity: 1, filter: 'blur(0px)' }}
-      exit={{ scale: 0.95, opacity: 0, filter: 'blur(8px)' }}
-      transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.3, ease: 'easeOut' }}
       style={{
         position: 'fixed', inset: 0, zIndex: 9999,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        cursor: 'none', background: '#1A1510',
+        display: 'flex', flexDirection: 'column',
+        cursor: 'none', background: '#000',
       }}
     >
-      <style>{`
-        .nb-grimoire {
-          display: flex; width: 100%; max-width: 1100px; height: 100vh; position: relative;
-        }
-        .nb-sidebar {
-          width: 280px; flex-shrink: 0; border-right: 1px solid #1A1A1A;
-          display: flex; flex-direction: column;
-        }
-        .nb-main {
-          flex: 1; min-width: 0; display: flex; flex-direction: column;
-        }
-        @media (max-width: 768px) {
-          .nb-sidebar { display: none; }
-          .nb-grimoire { max-width: 700px; }
-        }
-        .nb-hist {
-          transition: background 0.2s, transform 0.25s cubic-bezier(0.16,1,0.3,1);
-        }
-        .nb-hist:hover {
-          background: rgba(255,255,255,0.03); transform: scale(1.02);
-        }
-      `}</style>
-
-      {/* Background */}
-      <img
-        src="/images/notebook-bg.png" alt=""
-        style={{
-          position: 'absolute', inset: 0, width: '100%', height: '100%',
-          objectFit: 'cover', opacity: 0.45, filter: 'brightness(1.3)', pointerEvents: 'none',
-        }}
-      />
-
-      <div className="nb-grimoire" style={{ zIndex: 2 }}>
-        {/* Close */}
-        <motion.button
-          onClick={onClose} aria-label="Close notebook"
-          whileHover={{ color: '#E8E4DE' }}
-          style={{
-            position: 'absolute', top: 24, right: 16, zIndex: 10,
-            background: 'none', border: 'none', cursor: 'none', color: '#FFFFFF', padding: 8,
-          }}
-        >
-          <X size={28} />
-        </motion.button>
-
-        {/* Left: History */}
-        <div className="nb-sidebar">
-          <div style={{ position: 'absolute', left: 32, top: 0, bottom: 0, width: 1, background: '#1A1A1A', pointerEvents: 'none' }} />
-          <div style={{ padding: '48px 24px 16px 48px' }}>
-            <p style={{ fontFamily: 'var(--font-playfair)', fontSize: 16, fontWeight: 400, color: '#FFFFFF', margin: 0, marginBottom: 4 }}>
-              Research Log
+      {/* Header */}
+      <div style={{ padding: '20px 24px', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid #1a1a1a' }}>
+        <div>
+          <h1 style={{ fontFamily: 'var(--font-playfair)', fontSize: 18, fontWeight: 400, color: '#E8E4DE', margin: 0 }}>
+            Orchestra
+          </h1>
+          {ledger.walletAddress ? (
+            <p style={{ fontSize: 11, color: '#555', fontFamily: 'var(--font-inter)', margin: '2px 0 0' }}>
+              {ledger.walletAddress.slice(0, 6)}...{ledger.walletAddress.slice(-4)}
             </p>
-            <div style={{ width: 60, height: 1, background: '#222', marginBottom: 20 }} />
-          </div>
-          <div style={{ flex: 1, overflowY: 'auto', padding: '0 24px 16px 48px', scrollbarWidth: 'none', display: 'flex', flexDirection: 'column', gap: 2 }}>
-            {HISTORY_ENTRIES.map((entry) => (
-              <button
-                key={entry.id} className="nb-hist"
-                onClick={() => setActiveHistory(entry.id)}
-                style={{
-                  display: 'block', width: '100%', textAlign: 'left',
-                  background: activeHistory === entry.id ? 'rgba(192,132,252,0.06)' : 'transparent',
-                  border: 'none',
-                  borderLeft: activeHistory === entry.id ? '2px solid #C084FC' : '2px solid transparent',
-                  borderRadius: 6, padding: '10px 12px', cursor: 'none',
-                }}
-              >
-                <p style={{ margin: 0, fontFamily: 'var(--font-inter)', fontSize: 13, fontWeight: activeHistory === entry.id ? 400 : 300, color: '#FFFFFF', lineHeight: 1.3 }}>
-                  {entry.label}
-                </p>
-                <p style={{ margin: '4px 0 0', fontFamily: 'var(--font-inter)', fontSize: 11, fontWeight: 300, color: '#FFFFFF', opacity: 0.5, lineHeight: 1.4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {entry.preview}
-                </p>
-              </button>
-            ))}
-          </div>
+          ) : (
+            <p style={{ fontSize: 11, color: '#444', fontFamily: 'var(--font-inter)', margin: '2px 0 0' }}>
+              Connect Ledger to start
+            </p>
+          )}
         </div>
+        <motion.button
+          onClick={onClose} aria-label="Close"
+          whileHover={{ color: '#fff' }}
+          style={{ background: 'none', border: 'none', cursor: 'none', color: '#555', padding: 8 }}
+        >
+          <X size={20} />
+        </motion.button>
+      </div>
 
-        {/* Right: Conversation */}
-        <div className="nb-main">
-          <div style={{ position: 'absolute', right: 32, top: 0, bottom: 0, width: 1, background: '#1A1A1A', zIndex: 1, pointerEvents: 'none' }} />
-
-          {/* Header */}
-          <div style={{ padding: '48px 48px 20px', textAlign: 'center', flexShrink: 0 }}>
-            <div style={{ width: '100%', height: 1, background: '#1A1A1A', marginBottom: 20 }} />
-            <h1 style={{ fontFamily: 'var(--font-playfair)', fontSize: 22, fontWeight: 400, color: '#FFFFFF', margin: 0, lineHeight: 1.4 }}>
-              The Scholar&apos;s Notebook
-            </h1>
-            <div style={{ width: 160, height: 1, background: '#444', margin: '12px auto 0' }} />
-            {/* Connection status */}
-            {ledger.walletAddress && (
-              <p style={{ fontSize: 11, color: '#0f8', fontFamily: 'var(--font-inter)', marginTop: 8, opacity: 0.7 }}>
-                {ledger.walletAddress.slice(0, 6)}...{ledger.walletAddress.slice(-4)}
-              </p>
-            )}
-            {!ledger.walletAddress && (
-              <p style={{ fontSize: 11, color: '#FFB400', fontFamily: 'var(--font-inter)', marginTop: 8, opacity: 0.7 }}>
-                Connect Ledger for full functionality
-              </p>
-            )}
-          </div>
-
-          {/* Messages */}
-          <div style={{ flex: 1, overflowY: 'auto', padding: '8px 48px 16px', display: 'flex', flexDirection: 'column', gap: 20, scrollbarWidth: 'none', msOverflowStyle: 'none' }}>
-            {messages.map((msg) => (
-              <div key={msg.id}>
-                {msg.role === 'agent' ? (
-                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
-                    <Feather size={14} style={{ color: '#444', flexShrink: 0, marginTop: 4 }} />
-                    <div style={{ flex: 1 }}>
-                      <AgentReasoning data={msg.data} />
-                      {msg.data.intentType === 'balance' && <BalanceDisplay balances={msg.data.balances} />}
-                      <SwapAction
-                        data={msg.data}
-                        signing={signingId !== null}
-                        onSign={() => handleSignAndSwap(msg.data)}
-                      />
-                    </div>
-                  </div>
-                ) : msg.role === 'scholar' ? (
-                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
-                    <Feather size={14} style={{ color: '#444', flexShrink: 0, marginTop: 4 }} />
-                    <div>
-                      <p style={{ margin: 0, fontFamily: 'var(--font-inter)', fontSize: 15, fontWeight: 300, color: '#FFFFFF', lineHeight: 1.75 }}>
-                        {msg.isNew ? <TypewriterText text={msg.text} /> : msg.text}
-                      </p>
-                      {msg.explorerUrl && (
-                        <a href={msg.explorerUrl} target="_blank" rel="noopener" style={{ fontSize: 12, color: '#C084FC', display: 'flex', alignItems: 'center', gap: 4, marginTop: 6 }}>
-                          <ExternalLink size={11} /> View on Etherscan
-                        </a>
-                      )}
-                    </div>
-                  </div>
-                ) : (
-                  <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                    <div style={{ maxWidth: '75%', padding: '12px 18px', background: 'rgba(192,132,252,0.08)', border: '1px solid rgba(192,132,252,0.15)', borderRadius: 12, fontFamily: 'var(--font-inter)', fontSize: 15, fontWeight: 300, color: '#FFFFFF', lineHeight: 1.65 }}>
-                      {msg.text}
-                    </div>
-                  </div>
-                )}
-              </div>
-            ))}
-
-            {isTyping && (
-              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <Feather size={14} style={{ color: '#444', flexShrink: 0 }} />
-                <div style={{ display: 'flex', gap: 5, padding: '4px 0' }}>
-                  {[0, 1, 2].map((i) => (
-                    <motion.div key={i} style={{ width: 5, height: 5, borderRadius: '50%', background: '#444' }} animate={{ opacity: [0.3, 1, 0.3] }} transition={{ duration: 0.8, repeat: Infinity, delay: i * 0.2 }} />
-                  ))}
+      {/* Messages */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '16px 24px', display: 'flex', flexDirection: 'column', gap: 16, scrollbarWidth: 'none', msOverflowStyle: 'none' }}>
+        {messages.map((msg) => (
+          <div key={msg.id}>
+            {msg.role === 'agent' ? (
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                <Feather size={14} style={{ color: '#333', flexShrink: 0, marginTop: 4 }} />
+                <div style={{ flex: 1 }}>
+                  <AgentReasoning data={msg.data} />
+                  {msg.data.intentType === 'balance' && <BalanceDisplay balances={msg.data.balances} />}
+                  <SwapAction
+                    data={msg.data}
+                    signing={signingId !== null}
+                    onSign={() => handleSignAndSwap(msg.data)}
+                  />
                 </div>
-              </motion.div>
+              </div>
+            ) : msg.role === 'scholar' ? (
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                <Feather size={14} style={{ color: '#333', flexShrink: 0, marginTop: 4 }} />
+                <div>
+                  <p style={{ margin: 0, fontFamily: 'var(--font-inter)', fontSize: 14, fontWeight: 300, color: '#ccc', lineHeight: 1.7 }}>
+                    {msg.isNew ? <TypewriterText text={msg.text} /> : msg.text}
+                  </p>
+                  {msg.explorerUrl && (
+                    <a href={msg.explorerUrl} target="_blank" rel="noopener" style={{ fontSize: 12, color: '#C084FC', display: 'flex', alignItems: 'center', gap: 4, marginTop: 6 }}>
+                      <ExternalLink size={11} /> View on Etherscan
+                    </a>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                <div style={{ maxWidth: '80%', padding: '10px 16px', background: '#111', borderRadius: 12, fontFamily: 'var(--font-inter)', fontSize: 14, fontWeight: 300, color: '#E8E4DE', lineHeight: 1.6 }}>
+                  {msg.text}
+                </div>
+              </div>
             )}
-            <div ref={messagesEndRef} />
           </div>
+        ))}
 
-          {/* Input */}
-          <div style={{ padding: '16px 48px 32px', flexShrink: 0 }}>
-            <div style={{ display: 'flex', gap: 12, alignItems: 'center', background: '#111114', border: '1px solid #222', borderRadius: 16, padding: '4px 6px 4px 18px' }}>
-              <input
-                type="text"
-                value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="Swap 0.01 ETH for USDC..."
-                style={{ flex: 1, background: 'transparent', border: 'none', fontSize: 14, fontFamily: 'var(--font-inter)', fontWeight: 300, color: '#E8E4DE', outline: 'none', cursor: 'none', padding: '10px 0' }}
-              />
-              <motion.button
-                onClick={handleSend} aria-label="Send"
-                whileHover={canSend ? { scale: 1.1 } : {}}
-                whileTap={canSend ? { scale: 0.9 } : {}}
-                disabled={!canSend}
-                style={{ width: 38, height: 38, borderRadius: 12, background: 'transparent', border: 'none', cursor: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
-              >
-                <Send size={16} color={canSend ? '#C084FC' : '#333'} />
-              </motion.button>
+        {isTyping && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <Feather size={14} style={{ color: '#333', flexShrink: 0 }} />
+            <div style={{ display: 'flex', gap: 5, padding: '4px 0' }}>
+              {[0, 1, 2].map((i) => (
+                <motion.div key={i} style={{ width: 4, height: 4, borderRadius: '50%', background: '#444' }} animate={{ opacity: [0.3, 1, 0.3] }} transition={{ duration: 0.8, repeat: Infinity, delay: i * 0.2 }} />
+              ))}
             </div>
-          </div>
+          </motion.div>
+        )}
+        <div ref={messagesEndRef} />
+      </div>
+
+      {/* Input */}
+      <div style={{ padding: '12px 24px 24px', flexShrink: 0, borderTop: '1px solid #1a1a1a' }}>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', background: '#0a0a0a', border: '1px solid #1a1a1a', borderRadius: 12, padding: '4px 6px 4px 16px' }}>
+          <input
+            type="text"
+            value={inputValue}
+            onChange={(e) => setInputValue(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Swap 0.01 ETH for USDC..."
+            style={{ flex: 1, background: 'transparent', border: 'none', fontSize: 14, fontFamily: 'var(--font-inter)', fontWeight: 300, color: '#E8E4DE', outline: 'none', cursor: 'none', padding: '10px 0' }}
+          />
+          <motion.button
+            onClick={handleSend} aria-label="Send"
+            whileHover={canSend ? { scale: 1.1 } : {}}
+            whileTap={canSend ? { scale: 0.9 } : {}}
+            disabled={!canSend}
+            style={{ width: 36, height: 36, borderRadius: 10, background: 'transparent', border: 'none', cursor: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
+          >
+            <Send size={16} color={canSend ? '#C084FC' : '#222'} />
+          </motion.button>
         </div>
       </div>
     </motion.div>
