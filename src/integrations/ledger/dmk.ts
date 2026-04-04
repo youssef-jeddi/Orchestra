@@ -4,6 +4,7 @@
 import {
   DeviceManagementKitBuilder,
   ConsoleLogger,
+  OpenAppDeviceAction,
   type DeviceManagementKit,
   type DiscoveredDevice,
 } from "@ledgerhq/device-management-kit";
@@ -95,6 +96,39 @@ export function getDeviceState(sessionId?: string) {
   const id = sessionId ?? activeSessionId;
   if (!id) return null;
   return getDMK().getDeviceSessionState({ sessionId: id });
+}
+
+/**
+ * Open a specific app on the Ledger device (e.g. "Uniswap", "Ethereum").
+ * The Uniswap app enables clear signing for Uniswap transactions.
+ */
+export function openApp(
+  appName: string = "Uniswap",
+  sessionId?: string,
+  onStatus?: (status: string) => void
+): Promise<void> {
+  const dmk = getDMK();
+  const id = sessionId ?? activeSessionId;
+  if (!id) throw new Error("No active session — connect first");
+
+  const deviceAction = new OpenAppDeviceAction({ input: { appName } });
+
+  return new Promise<void>((resolve, reject) => {
+    const { observable } = dmk.executeDeviceAction({ sessionId: id, deviceAction });
+
+    observable.subscribe({
+      next: (state: any) => {
+        if (state.status === "pending") {
+          onStatus?.(`Opening ${appName} app…`);
+        } else if (state.status === "completed") {
+          resolve();
+        } else if (state.status === "error") {
+          reject(new Error(state.error?.message || `Failed to open ${appName}`));
+        }
+      },
+      error: (err: Error) => reject(err),
+    });
+  });
 }
 
 /** Disconnect the current session. */

@@ -1,7 +1,7 @@
 // ─── SafeSwarm × Ledger — Browser Entry Point ───
 // Glues DMK, signer, and WS bridge together for the test UI.
 
-import { initDMK, discoverDevices, stopDiscovering, connectDevice, disconnectDevice, getActiveSession } from "../dmk";
+import { initDMK, discoverDevices, stopDiscovering, connectDevice, disconnectDevice, getActiveSession, openApp } from "../dmk";
 import { createSigner, requestSignature, signTypedData, getAddress } from "../signer";
 import type { TypedData } from "../signer";
 import type { ApprovalRequest, ApprovalResult, DeviceStatus, BridgeMessage } from "../types";
@@ -106,6 +106,16 @@ connectBtn.addEventListener("click", async () => {
           fullWalletAddress = address;
           deviceAddressEl.textContent = `${address.slice(0, 8)}…${address.slice(-6)}`;
           log(`Address: ${address}`);
+
+          // Open the Uniswap app for clear signing support
+          log("Opening Uniswap app on device…");
+          try {
+            await openApp("Uniswap", sessionId, (s) => log(`  ↳ ${s}`));
+            log("Uniswap app opened ✓ (clear signing enabled)");
+          } catch (appErr: any) {
+            log(`⚠ Could not open Uniswap app: ${appErr.message}`);
+            log("Falling back to Ethereum app (blind signing)");
+          }
 
           setDeviceStatus("ready");
           log("Device is READY ✓");

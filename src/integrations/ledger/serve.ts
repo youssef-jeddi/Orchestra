@@ -17,6 +17,10 @@ import { WETH_SEPOLIA, USDC_SEPOLIA, CHAIN_ID } from "../uniswap/types";
 import { runPlanner } from "../../agents/planner/index";
 import { runGatekeeper } from "../../agents/gatekeeper/index";
 import { write, read, readMany } from "../zero-g/storage";
+import { getSpendingLimit, getAllowanceTokens, updateSpendingLimit } from "../safe/spendingLimit";
+import { initSafe } from "../safe/transaction";
+import { ALLOWANCE_MODULE_ADDRESS } from "../../types/safe";
+import { getTokens } from "../uniswap/types";
 
 const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || "https://eth-sepolia.g.alchemy.com/v2/demo";
 const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC);
@@ -546,6 +550,88 @@ app.post("/intent", async (req, res) => {
     });
   } catch (err: any) {
     console.error("[intent] Pipeline error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /safe/status ───
+// Returns Safe address, spending limits, and remaining allowances.
+app.get("/safe/status", async (req, res) => {
+  try {
+    const safeAddress = process.env.SAFE_ADDRESS;
+    const agentKey = process.env.AGENT_HOT_WALLET_PRIVATE_KEY;
+    if (!safeAddress || !agentKey) {
+      res.status(400).json({ error: "SAFE_ADDRESS and AGENT_HOT_WALLET_PRIVATE_KEY must be set in .env" });
+      return;
+    }
+
+    const agentAddress = new ethers.Wallet(agentKey).address;
+    const chainId = Number(req.query.chainId) || CHAIN_ID;
+    const tokens = getTokens(chainId);
+    const p = chainId === 1
+      ? new ethers.JsonRpcProvider(process.env.MAINNET_RPC_URL || "https://cloudflare-eth.com")
+      : provider;
+
+    const limits: Record<string, any> = {};
+    for (const [symbol, address] of Object.entries(tokens)) {
+      try {
+        limits[symbol] = await getSpendingLimit(p, safeAddress, agentAddress, address);
+      } catch {
+        limits[symbol] = null;
+      }
+    }
+
+    res.json({
+      safeAddress,
+      agentAddress,
+      chainId,
+      autoExecuteLimitUsd: Number(process.env.AUTO_EXECUTE_LIMIT_USD) || 100,
+      allowances: limits,
+    });
+  } catch (err: any) {
+    console.error("[serve] /safe/status error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST /safe/update-limit ───
+// Updates the spending limit both on-chain (AllowanceModule) and in the risk engine.
+app.post("/safe/update-limit", async (req, res) => {
+  try {
+    const { limitUsd, chainId: reqChainId } = req.body;
+    const safeAddress = process.env.SAFE_ADDRESS;
+    const agentKey = process.env.AGENT_HOT_WALLET_PRIVATE_KEY;
+
+    if (!safeAddress || !agentKey || !limitUsd) {
+      res.status(400).json({ error: "limitUsd required, SAFE_ADDRESS and AGENT_HOT_WALLET_PRIVATE_KEY must be set" });
+      return;
+    }
+
+    const chainId = reqChainId || CHAIN_ID;
+    const rpcUrl = chainId === 1
+      ? (process.env.MAINNET_RPC_URL || "https://cloudflare-eth.com")
+      : (process.env.SEPOLIA_RPC_URL || "https://rpc.sepolia.org");
+
+    const agentAddress = new ethers.Wallet(agentKey).address;
+    const tokens = getTokens(chainId);
+
+    // Update on-chain allowances
+    const safeSdk = await initSafe(rpcUrl, agentKey, safeAddress);
+
+    const usdcAllowanceWei = ethers.parseUnits(String(limitUsd), 6);
+    const wethAllowanceWei = ethers.parseEther(String(limitUsd / 2000));
+
+    await updateSpendingLimit(safeSdk, agentAddress, tokens.USDC, usdcAllowanceWei);
+    await updateSpendingLimit(safeSdk, agentAddress, tokens.WETH, wethAllowanceWei);
+
+    // Update off-chain risk engine
+    const { setThresholds } = await import("./riskEngine");
+    setThresholds({ autoExecuteMaxUSD: limitUsd });
+
+    console.log(`[serve] ✓ Spending limit updated to $${limitUsd}`);
+    res.json({ ok: true, limitUsd, chainId });
+  } catch (err: any) {
+    console.error("[serve] /safe/update-limit error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
