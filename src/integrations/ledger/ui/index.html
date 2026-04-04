@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SafeSwarm × Ledger — Test Console</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Inter:wght@400;500;600&display=swap');
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg: #0a0a0f;
+      --surface: #12121a;
+      --border: #1e1e2e;
+      --text: #e0e0e8;
+      --text-dim: #6b6b80;
+      --accent: #7c5cfc;
+      --accent-dim: #5a3ec8;
+      --green: #34d399;
+      --red: #f87171;
+      --amber: #fbbf24;
+      --radius: 10px;
+    }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 24px;
+    }
+
+    header {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 28px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    header h1 {
+      font-size: 20px;
+      font-weight: 600;
+      background: linear-gradient(135deg, var(--accent), #a78bfa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    header .subtitle {
+      font-size: 13px;
+      color: var(--text-dim);
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    main {
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      grid-template-rows: auto 1fr;
+      gap: 16px;
+      max-width: 1100px;
+    }
+
+    section {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px;
+    }
+
+    section h2 {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 1.2px;
+      color: var(--text-dim);
+      margin-bottom: 14px;
+    }
+
+    /* ── Device Panel ── */
+    #device-panel { grid-row: 1 / 3; }
+
+    .device-info {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-bottom: 18px;
+    }
+
+    .device-info label {
+      font-size: 11px;
+      color: var(--text-dim);
+      display: block;
+      margin-bottom: 3px;
+    }
+
+    .status-badge {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .status-disconnected { background: #2a1a1a; color: var(--red); }
+    .status-scanning     { background: #2a2a1a; color: var(--amber); }
+    .status-connected    { background: #1a2a1a; color: var(--green); }
+    .status-ready        { background: #1a2a1a; color: var(--green); }
+    .status-signing      { background: #1a1a2a; color: var(--accent); }
+    .status-approved     { background: #1a2a1a; color: var(--green); }
+    .status-rejected     { background: #2a1a1a; color: var(--red); }
+    .status-locked       { background: #2a2a1a; color: var(--amber); }
+
+    /* ── Buttons ── */
+    .btn {
+      font-family: 'Inter', sans-serif;
+      font-size: 13px;
+      font-weight: 500;
+      padding: 9px 16px;
+      border-radius: 6px;
+      border: none;
+      cursor: pointer;
+      width: 100%;
+      transition: all 0.15s ease;
+      margin-bottom: 8px;
+    }
+
+    .btn:hover { transform: translateY(-1px); }
+    .btn:active { transform: translateY(0); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+    .btn-primary {
+      background: var(--accent);
+      color: white;
+    }
+    .btn-primary:hover { background: #8b6dff; }
+
+    .btn-danger {
+      background: #2a1a1a;
+      color: var(--red);
+      border: 1px solid #3a2020;
+    }
+    .btn-danger:hover { background: #3a2020; }
+
+    .btn-secondary {
+      background: var(--border);
+      color: var(--text);
+    }
+    .btn-secondary:hover { background: #2a2a3a; }
+
+    .btn-sign {
+      background: linear-gradient(135deg, var(--accent), #a78bfa);
+      color: white;
+      width: auto;
+      padding: 7px 14px;
+      font-size: 12px;
+    }
+
+    /* ── Approvals ── */
+    #approvals-panel { grid-column: 2; }
+
+    .empty-state {
+      color: var(--text-dim);
+      font-size: 13px;
+      font-style: italic;
+      text-align: center;
+      padding: 32px 0;
+    }
+
+    .approval-card {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px;
+      margin-bottom: 10px;
+      transition: border-color 0.3s ease;
+    }
+
+    .card-approved { border-color: var(--green); }
+    .card-rejected { border-color: var(--red); }
+
+    .approval-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .risk-badge {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      padding: 3px 8px;
+      border-radius: 4px;
+    }
+
+    .risk-autonomous         { background: #1a2a1a; color: var(--green); }
+    .risk-requires_approval  { background: #2a2a1a; color: var(--amber); }
+    .risk-blocked            { background: #2a1a1a; color: var(--red); }
+
+    .trade-time {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+
+    .trade-summary {
+      font-size: 14px;
+      margin-bottom: 10px;
+    }
+
+    .trade-tx {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: var(--text-dim);
+      word-break: break-all;
+      margin-bottom: 10px;
+    }
+
+    .approval-actions { display: flex; gap: 8px; }
+
+    .approval-status {
+      margin-top: 8px;
+      font-size: 13px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .status-pending  { color: var(--amber); }
+    .status-approved { color: var(--green); }
+    .status-rejected { color: var(--red); }
+
+    /* ── Log Panel ── */
+    #log-panel { grid-column: 1 / 3; max-height: 260px; overflow: hidden; }
+
+    #log-container {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      max-height: 210px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column-reverse;
+    }
+
+    .log-entry {
+      padding: 3px 0;
+      border-bottom: 1px solid #15151f;
+      color: var(--text-dim);
+    }
+
+    .log-entry .log-time { color: var(--text-dim); }
+    .log-entry .log-msg  { color: var(--text); }
+
+    /* ── Bridge indicator ── */
+    .bridge-status {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--text-dim);
+      margin-top: 16px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .bridge-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--red);
+    }
+
+    .bridge-dot.connected { background: var(--green); }
+
+    /* ── Swap Form ── */
+    .swap-form { display: flex; flex-direction: column; gap: 10px; }
+
+    .swap-pair {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+    }
+
+    .token-label {
+      background: var(--bg);
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-weight: 600;
+      font-size: 12px;
+    }
+
+    .swap-arrow { color: var(--text-dim); }
+
+    .input-field {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+      padding: 8px 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      outline: none;
+    }
+
+    .input-field:focus { border-color: var(--accent); }
+
+    .quote-result {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: var(--text-dim);
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px;
+      line-height: 1.6;
+    }
+
+    .quote-result .badge {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      padding: 2px 6px;
+      border-radius: 3px;
+      margin-left: 4px;
+    }
+
+    .badge-mev { background: #1a2a1a; color: var(--green); }
+    .badge-classic { background: #1a1a2a; color: var(--accent); }
+    .badge-risk-autonomous { background: #1a2a1a; color: var(--green); }
+    .badge-risk-requires_approval { background: #2a2a1a; color: var(--amber); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>SafeSwarm × Ledger</h1>
+    <span class="subtitle">test console</span>
+  </header>
+
+  <main>
+    <!-- Device Panel -->
+    <section id="device-panel">
+      <h2>Device</h2>
+      <div class="device-info">
+        <div>
+          <label>Status</label>
+          <span id="device-status" class="status-badge status-disconnected">disconnected</span>
+        </div>
+        <div>
+          <label>Address</label>
+          <span id="device-address">—</span>
+        </div>
+      </div>
+      <button id="connect-btn" class="btn btn-primary">Connect Ledger</button>
+      <button id="disconnect-btn" class="btn btn-danger" style="display:none">Disconnect</button>
+
+      <hr style="border: none; border-top: 1px solid var(--border); margin: 16px 0;" />
+
+      <h2>Swap</h2>
+      <div class="swap-form">
+        <div class="swap-pair">
+          <span class="token-label">WETH</span>
+          <span class="swap-arrow">&rarr;</span>
+          <span class="token-label">USDC</span>
+        </div>
+        <input id="swap-amount" type="text" placeholder="Amount (ETH)" class="input-field" value="0.01" />
+        <button id="quote-btn" class="btn btn-primary">Get Quote</button>
+        <div id="quote-result" class="quote-result" style="display:none"></div>
+      </div>
+
+      <hr style="border: none; border-top: 1px solid var(--border); margin: 16px 0;" />
+
+      <h2>Controls</h2>
+      <button id="mock-trade-btn" class="btn btn-secondary">Trigger Mock Trade</button>
+
+      <div class="bridge-status">
+        <div id="bridge-dot" class="bridge-dot"></div>
+        <span id="bridge-label">bridge: disconnected</span>
+      </div>
+    </section>
+
+    <!-- Pending Approvals -->
+    <section id="approvals-panel">
+      <h2>Pending Approvals</h2>
+      <div id="approvals-container">
+        <p class="empty-state">No pending approvals</p>
+      </div>
+    </section>
+
+    <!-- Log -->
+    <section id="log-panel">
+      <h2>Log</h2>
+      <div id="log-container"></div>
+    </section>
+  </main>
+
+  <script type="module" src="./main.ts"></script>
+</body>
+</html>
