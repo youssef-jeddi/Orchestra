@@ -16,10 +16,10 @@ export async function bridgeFetch(path, options = {}) {
 
 // ── Specific API calls ──
 
-export async function sendIntent(message, walletAddress) {
+export async function sendIntent(message, walletAddress, options = {}) {
   return bridgeFetch('/intent', {
     method: 'POST',
-    body: JSON.stringify({ message, walletAddress }),
+    body: JSON.stringify({ message, walletAddress, ...options }),
   });
 }
 

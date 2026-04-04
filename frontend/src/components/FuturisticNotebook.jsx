@@ -2,9 +2,9 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
-import { X, Send, Feather, Bot, ShieldCheck, Zap, ExternalLink } from 'lucide-react';
+import { X, Send, Feather, Bot, ShieldCheck, Zap, ExternalLink, Settings, ChevronDown } from 'lucide-react';
 import { useOrchestra } from '@/context/OrchestraContext';
-import { sendIntent, broadcast, submitSwap, getNonce } from '@/lib/bridge';
+import { sendIntent, broadcast, submitSwap, getNonce, setComputeProvider, getComputeProvider } from '@/lib/bridge';
 
 const DEFAULT_MESSAGES = [
   {
@@ -165,8 +165,17 @@ export default function FuturisticNotebook({ onClose, initialMessage = '' }) {
   const [inputValue, setInputValue] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [signingId, setSigningId] = useState(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [model, setModel] = useState('groq');
+  const [spendingLimit, setSpendingLimit] = useState(100);
+  const [limitInput, setLimitInput] = useState('100');
   const messagesEndRef = useRef(null);
   const queryHandled = useRef(false);
+
+  // Fetch current model on mount
+  useEffect(() => {
+    getComputeProvider().then((d) => setModel(d.provider)).catch(() => {});
+  }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -187,7 +196,7 @@ export default function FuturisticNotebook({ onClose, initialMessage = '' }) {
     setIsTyping(true);
 
     try {
-      const data = await sendIntent(text, ledger.walletAddress);
+      const data = await sendIntent(text, ledger.walletAddress, { autoApproveLimit: spendingLimit });
 
       setIsTyping(false);
 
@@ -308,6 +317,20 @@ export default function FuturisticNotebook({ onClose, initialMessage = '' }) {
     }
   };
 
+  const handleModelChange = async (newModel) => {
+    setModel(newModel);
+    try { await setComputeProvider(newModel); } catch (e) { console.error('Failed to set model:', e); }
+  };
+
+  const handleLimitSave = () => {
+    const val = parseInt(limitInput, 10);
+    if (!isNaN(val) && val > 0) {
+      setSpendingLimit(val);
+      // The limit is applied server-side in the /intent handler
+      // For on-chain limit updates, user would use Safe panel
+    }
+  };
+
   const canSend = inputValue.trim() && !isTyping;
 
   return (
@@ -323,28 +346,94 @@ export default function FuturisticNotebook({ onClose, initialMessage = '' }) {
       }}
     >
       {/* Header */}
-      <div style={{ padding: '20px 24px', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid #1a1a1a' }}>
-        <div>
-          <h1 style={{ fontFamily: 'var(--font-playfair)', fontSize: 18, fontWeight: 400, color: '#E8E4DE', margin: 0 }}>
-            Orchestra
-          </h1>
-          {ledger.walletAddress ? (
-            <p style={{ fontSize: 11, color: '#555', fontFamily: 'var(--font-inter)', margin: '2px 0 0' }}>
-              {ledger.walletAddress.slice(0, 6)}...{ledger.walletAddress.slice(-4)}
-            </p>
-          ) : (
-            <p style={{ fontSize: 11, color: '#444', fontFamily: 'var(--font-inter)', margin: '2px 0 0' }}>
-              Connect Ledger to start
-            </p>
-          )}
+      <div style={{ flexShrink: 0, borderBottom: '1px solid #1a1a1a' }}>
+        <div style={{ padding: '20px 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div>
+            <h1 style={{ fontFamily: 'var(--font-playfair)', fontSize: 18, fontWeight: 400, color: '#E8E4DE', margin: 0 }}>
+              Orchestra
+            </h1>
+            {ledger.walletAddress ? (
+              <p style={{ fontSize: 11, color: '#555', fontFamily: 'var(--font-inter)', margin: '2px 0 0' }}>
+                {ledger.walletAddress.slice(0, 6)}...{ledger.walletAddress.slice(-4)}
+              </p>
+            ) : (
+              <p style={{ fontSize: 11, color: '#444', fontFamily: 'var(--font-inter)', margin: '2px 0 0' }}>
+                Connect Ledger to start
+              </p>
+            )}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <motion.button
+              onClick={() => setShowSettings((s) => !s)} aria-label="Settings"
+              whileHover={{ color: '#fff' }}
+              style={{ background: 'none', border: 'none', cursor: 'none', color: showSettings ? '#C084FC' : '#555', padding: 8 }}
+            >
+              <Settings size={18} />
+            </motion.button>
+            <motion.button
+              onClick={onClose} aria-label="Close"
+              whileHover={{ color: '#fff' }}
+              style={{ background: 'none', border: 'none', cursor: 'none', color: '#555', padding: 8 }}
+            >
+              <X size={20} />
+            </motion.button>
+          </div>
         </div>
-        <motion.button
-          onClick={onClose} aria-label="Close"
-          whileHover={{ color: '#fff' }}
-          style={{ background: 'none', border: 'none', cursor: 'none', color: '#555', padding: 8 }}
-        >
-          <X size={20} />
-        </motion.button>
+
+        {/* Settings panel */}
+        {showSettings && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            style={{ padding: '0 24px 16px', display: 'flex', gap: 24, alignItems: 'center', flexWrap: 'wrap' }}
+          >
+            {/* Model selector */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ fontSize: 11, color: '#666', fontFamily: 'var(--font-inter)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Model</span>
+              <div style={{ display: 'flex', gap: 0, borderRadius: 8, overflow: 'hidden', border: '1px solid #1a1a1a' }}>
+                {[
+                  { id: 'groq', label: 'Grok' },
+                  { id: '0g', label: '0G Compute' },
+                ].map((opt) => (
+                  <button
+                    key={opt.id}
+                    onClick={() => handleModelChange(opt.id)}
+                    style={{
+                      padding: '6px 14px', fontSize: 12, fontFamily: 'var(--font-inter)', fontWeight: 400,
+                      background: model === opt.id ? '#1a1a1a' : 'transparent',
+                      color: model === opt.id ? '#E8E4DE' : '#555',
+                      border: 'none', cursor: 'none',
+                      transition: 'all 0.15s ease',
+                    }}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Spending limit */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ fontSize: 11, color: '#666', fontFamily: 'var(--font-inter)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Auto-execute limit</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, border: '1px solid #1a1a1a', borderRadius: 8, padding: '4px 10px' }}>
+                <span style={{ fontSize: 12, color: '#555' }}>$</span>
+                <input
+                  type="number"
+                  value={limitInput}
+                  onChange={(e) => setLimitInput(e.target.value)}
+                  onBlur={handleLimitSave}
+                  onKeyDown={(e) => e.key === 'Enter' && handleLimitSave()}
+                  style={{
+                    width: 60, background: 'transparent', border: 'none', fontSize: 13,
+                    fontFamily: 'var(--font-inter)', color: '#E8E4DE', outline: 'none', cursor: 'none',
+                  }}
+                />
+              </div>
+            </div>
+          </motion.div>
+        )}
       </div>
 
       {/* Messages */}

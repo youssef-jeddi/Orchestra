@@ -302,7 +302,7 @@ function estimateUsd(symbol: string, amount: number): number {
 // ALL intents go through AI pipeline: Planner → Gatekeeper → dispatch by intent type.
 app.post("/intent", async (req, res) => {
   try {
-    const { message, walletAddress } = req.body;
+    const { message, walletAddress, autoApproveLimit: clientLimit } = req.body;
 
     if (!message) {
       res.status(400).json({ error: "message is required" });
@@ -438,7 +438,7 @@ app.post("/intent", async (req, res) => {
     const gatekeeperReasoning = gatekeeperResult.reasoning;
 
     // Server-side verdict override — use our recomputed USD value, not the AI's
-    const autoApproveLimit = 100;
+    const autoApproveLimit = typeof clientLimit === 'number' && clientLimit > 0 ? clientLimit : 100;
     let verdict = aiVerdict;
     let riskScore = aiRiskScore;
     if (intentType === "balance") {
