@@ -279,6 +279,17 @@ function symbolFromAddress(address: string, fallback: string = "UNKNOWN"): strin
   return TOKEN_SYMBOLS[address.toLowerCase()] || fallback;
 }
 
+// ─── Intent type detection (from AI plan steps) ───
+function detectIntentType(steps: any[]): "swap" | "send" | "add_liquidity" | "balance" | "unknown" {
+  if (!steps || steps.length === 0) return "unknown";
+  const action = steps[0]?.action;
+  if (action === "swap") return "swap";
+  if (action === "send") return "send";
+  if (action === "add_liquidity") return "add_liquidity";
+  if (action === "balance") return "balance";
+  return "unknown";
+}
+
 // ─── Helper: estimate USD value for risk assessment ───
 function estimateUsd(symbol: string, amount: number): number {
   const s = symbol.toUpperCase();
@@ -411,15 +422,42 @@ app.post("/intent", async (req, res) => {
     const step0 = planSteps[0] || {};
     const params = step0.params || {};
     const planSummary = latestPlan.summary as string;
-    const totalEstimatedValueUsd = (latestPlan.totalEstimatedValueUsd as number) || 0;
 
-    const verdict = (latestAssessment?.verdict as string) ?? "NEEDS_APPROVAL";
-    const riskScore = (latestAssessment?.riskScore as number) ?? 50;
+    // Recompute USD value server-side — don't trust the AI's estimate
+    let totalEstimatedValueUsd = (latestPlan.totalEstimatedValueUsd as number) || 0;
+    if (intentType === "swap") {
+      const sym = params.symbolIn || symbolFromAddress(params.tokenIn || "", "ETH");
+      totalEstimatedValueUsd = estimateUsd(sym, Number(params.amount || 0));
+    } else if (intentType === "send") {
+      totalEstimatedValueUsd = estimateUsd(params.symbol || "ETH", Number(params.amount || 0));
+    }
+
+    const aiVerdict = (latestAssessment?.verdict as string) ?? "NEEDS_APPROVAL";
+    const aiRiskScore = (latestAssessment?.riskScore as number) ?? 50;
     const plannerReasoning = plannerResult.reasoning;
     const gatekeeperReasoning = gatekeeperResult.reasoning;
 
+    // Server-side verdict override — use our recomputed USD value, not the AI's
+    const autoApproveLimit = 100;
+    let verdict = aiVerdict;
+    let riskScore = aiRiskScore;
+    if (intentType === "balance") {
+      verdict = "INFO";
+      riskScore = 0;
+    } else if (intentType === "swap" || intentType === "send") {
+      if (totalEstimatedValueUsd <= autoApproveLimit) {
+        verdict = "AUTO_EXECUTE";
+        riskScore = Math.min(riskScore, 15);
+      } else if (totalEstimatedValueUsd > autoApproveLimit && verdict === "AUTO_EXECUTE") {
+        // AI said auto-execute but value is too high — override to safe
+        verdict = "NEEDS_APPROVAL";
+        riskScore = Math.max(riskScore, 70);
+      }
+    }
+
     console.log(`[intent] Intent type: ${intentType}`);
-    console.log(`[intent] Verdict: ${verdict} (risk: ${riskScore})`);
+    console.log(`[intent] USD value (server): $${totalEstimatedValueUsd}`);
+    console.log(`[intent] Verdict: ${verdict} (AI said: ${aiVerdict}, risk: ${riskScore})`);
 
     const baseAssessment = {
       verdict,

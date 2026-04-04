@@ -7,6 +7,9 @@ import LoadingIntro   from '@/components/LoadingIntro';
 import CustomCursor   from '@/components/CustomCursor';
 import ScrollTrack    from '@/components/ScrollTrack';
 import ConnectWallet  from '@/components/ConnectWallet';
+import { OrchestraProvider } from '@/context/OrchestraContext';
+import ApprovalOverlay from '@/components/ApprovalOverlay';
+import SafePanel from '@/components/SafePanel';
 
 const PresentationFlow   = dynamic(() => import('@/components/PresentationFlow'),   { loading: () => null });
 const FuturisticNotebook = dynamic(() => import('@/components/FuturisticNotebook'), { loading: () => null });
@@ -39,7 +42,7 @@ export default function Home() {
   }, [notebookOpen]);
 
   return (
-    <>
+    <OrchestraProvider>
       {!introComplete && (
         <LoadingIntro onComplete={handleIntroComplete} />
       )}
@@ -49,6 +52,8 @@ export default function Home() {
           <CustomCursor />
           <ScrollTrack />
           <ConnectWallet />
+          <ApprovalOverlay />
+          <SafePanel />
           <motion.main
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -67,6 +72,6 @@ export default function Home() {
           </AnimatePresence>
         </>
       )}
-    </>
+    </OrchestraProvider>
   );
 }

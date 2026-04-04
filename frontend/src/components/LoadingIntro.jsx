@@ -203,7 +203,7 @@ export default function LoadingIntro({ onComplete }) {
           ],
           12
         );
-        try { new Audio('/sounds/wand-reveal.mp3').play(); } catch {}
+        try { new Audio('/sounds/wand-reveal.mp3').play().catch(() => {}); } catch {}
       }, 460);
 
       // Trigger exit after reveal completes
