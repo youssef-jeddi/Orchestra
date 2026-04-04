@@ -1,8 +1,11 @@
 import 'dotenv/config';
-import { write, readMany } from '../integrations/zero-g/storage';
+import { write, readMany, clear } from '../integrations/zero-g/storage';
 import { runWatcher } from '../agents/watcher/index';
 
 async function main() {
+  console.log('\n=== CLEARING STORAGE ===');
+  await clear();
+
   // 1. Seed previous prices from CoinGecko
   console.log('\n=== SEED: Fetching real token prices from CoinGecko ===');
   const priceRes = await fetch(
