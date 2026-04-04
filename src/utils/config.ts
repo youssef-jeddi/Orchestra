@@ -32,7 +32,7 @@ function getOptionalNumber(name: string, fallback: number): number {
 }
 
 export function getConfig(): AppConfig {
-  const agentPrivateKey = getOptionalString("AGENT_HOT_WALLET_PRIVATE_KEY");
+  const agentPrivateKey = getOptionalString("AGENT_PRIVATE_KEY");
   const agentAddress = agentPrivateKey
     ? new ethers.Wallet(agentPrivateKey).address
     : undefined;

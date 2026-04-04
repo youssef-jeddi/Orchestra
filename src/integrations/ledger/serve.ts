@@ -17,6 +17,12 @@ import { WETH_SEPOLIA, USDC_SEPOLIA, CHAIN_ID } from "../uniswap/types";
 import { runPlanner } from "../../agents/planner/index";
 import { runGatekeeper } from "../../agents/gatekeeper/index";
 import { write, read, readMany } from "../zero-g/storage";
+import { setComputeProvider, getComputeProvider } from "../zero-g/compute";
+import { deploySafe } from "../safe/deploy";
+import { detectExistingSafe } from "../safe/detect";
+import { setInitialSpendingLimits, updateSpendingLimit, buildLimitUpdateTx } from "../safe/spendingLimit";
+import { getAgentAddress } from "../safe/agentWallet";
+import { executePlan } from "../../executor";
 import { getSpendingLimit, getAllowanceTokens, updateSpendingLimit } from "../safe/spendingLimit";
 import { initSafe } from "../safe/transaction";
 import { ALLOWANCE_MODULE_ADDRESS } from "../../types/safe";
@@ -261,7 +267,7 @@ function toTokenWei(amount: string, tokenAddress: string): bigint {
 // ─── Deterministic intent parser ───
 // Catches simple swap intents without needing LLM. Returns null if it can't parse.
 const TOKEN_MAP: Record<string, { address: string; decimals: number; symbol: string }> = {
-  eth:  { address: WETH_SEPOLIA, decimals: 18, symbol: "WETH" },
+  eth: { address: WETH_SEPOLIA, decimals: 18, symbol: "WETH" },
   weth: { address: WETH_SEPOLIA, decimals: 18, symbol: "WETH" },
   usdc: { address: USDC_SEPOLIA, decimals: 6, symbol: "USDC" },
 };
@@ -311,20 +317,32 @@ app.post("/intent", async (req, res) => {
     console.log(`[intent] "${message}"`);
     console.log(`[intent] wallet: ${walletAddress || "not provided"}`);
 
-    // ── Step 0a: Fetch real on-chain balances ──
+    // ── Step 0a: Check Safe deployment ──
+    let safeAddress: string | null = null;
     if (walletAddress) {
+      const safeData = await read(`safe:${walletAddress.toLowerCase()}`);
+      if (safeData) {
+        safeAddress = (safeData as any).safeAddress;
+        console.log(`[intent] Safe detected: ${safeAddress}`);
+      } else {
+        console.log(`[intent] No Safe found — user needs onboarding`);
+      }
+    }
+
+    // ── Step 0b: Fetch on-chain balances (from Safe if available) ──
+    const balanceAddress = safeAddress || walletAddress;
+    if (balanceAddress) {
       try {
-        const ethBalance = await provider.getBalance(walletAddress);
+        const ethBalance = await provider.getBalance(balanceAddress);
         const ethFormatted = Number(ethers.formatEther(ethBalance));
 
-        // ERC-20 balanceOf(address) for USDC and WETH on Sepolia
         const erc20Abi = ["function balanceOf(address) view returns (uint256)"];
         const usdcContract = new ethers.Contract(USDC_SEPOLIA, erc20Abi, provider);
         const wethContract = new ethers.Contract(WETH_SEPOLIA, erc20Abi, provider);
 
         const [usdcRaw, wethRaw] = await Promise.all([
-          usdcContract.balanceOf(walletAddress).catch(() => 0n),
-          wethContract.balanceOf(walletAddress).catch(() => 0n),
+          usdcContract.balanceOf(balanceAddress).catch(() => 0n),
+          wethContract.balanceOf(balanceAddress).catch(() => 0n),
         ]);
 
         const usdcFormatted = Number(ethers.formatUnits(usdcRaw, 6));
@@ -334,15 +352,17 @@ app.post("/intent", async (req, res) => {
           eth: ethFormatted,
           weth: wethFormatted,
           usdc: usdcFormatted,
+          source: safeAddress ? "safe" : "eoa",
+          address: balanceAddress,
           updatedAt: new Date().toISOString(),
         });
-        console.log(`[intent] Portfolio fetched: ${ethFormatted} ETH, ${wethFormatted} WETH, ${usdcFormatted} USDC`);
+        console.log(`[intent] Portfolio (${safeAddress ? 'Safe' : 'EOA'}): ${ethFormatted} ETH, ${wethFormatted} WETH, ${usdcFormatted} USDC`);
       } catch (err: any) {
         console.warn(`[intent] Failed to fetch on-chain balances: ${err.message}`);
       }
     }
 
-    // ── Step 0b: Ensure user profile exists in storage ──
+    // ── Step 0c: Ensure user profile exists in storage ──
     const existingProfile = await read("user:profile");
     if (!existingProfile) {
       await write("user:profile", {
@@ -476,15 +496,18 @@ app.post("/intent", async (req, res) => {
         amountWei = String(rawAmount);
       }
 
+      // Use Safe as swapper when available (tokens live in Safe)
+      const swapper = safeAddress || walletAddress;
+
       console.log(`[intent] ── Quote Request ──`);
       console.log(`[intent]   tokenIn:   ${tokenIn}`);
       console.log(`[intent]   tokenOut:  ${tokenOut}`);
       console.log(`[intent]   amountWei: ${amountWei}`);
-      console.log(`[intent]   swapper:   ${walletAddress}`);
+      console.log(`[intent]   swapper:   ${swapper}${safeAddress ? ' (Safe)' : ' (Ledger)'}`);
 
       try {
         const approvalTx = await checkApproval({
-          walletAddress,
+          walletAddress: swapper,
           token: tokenIn,
           tokenOut: tokenOut,
           amount: amountWei,
@@ -492,7 +515,7 @@ app.post("/intent", async (req, res) => {
         console.log(`[intent]   approval needed: ${!!approvalTx}`);
 
         const quoteResult = await fetchQuoteWithRouting(
-          { swapper: walletAddress, tokenIn, tokenOut, amount: amountWei },
+          { swapper, tokenIn, tokenOut, amount: amountWei },
           "autonomous"
         );
 
@@ -526,10 +549,82 @@ app.post("/intent", async (req, res) => {
       }
     }
 
-    console.log(`[intent] ═══════════════════════════════════════\n`);
+    console.log(`[intent] ═════════════════════════���═════════════\n`);
+
+    // ── Auto-execute via Safe if verdict allows ──
+    if (verdict === "AUTO_EXECUTE" && safeAddress && quoteData) {
+      try {
+        console.log(`[intent] AUTO_EXECUTE — executing via Safe...`);
+
+        const agentKey = process.env.AGENT_PRIVATE_KEY;
+        if (!agentKey) throw new Error("AGENT_PRIVATE_KEY not set");
+
+        const { getApprovalTxsForSwap, executeBatchViaSafe } = await import("../safe/transaction");
+        const { submitSwap } = await import("../uniswap/api");
+
+        // Step 1: Get swap calldata first — we need the actual router address
+        // (the API may use a different router than our hardcoded constant)
+        console.log(`[intent] AUTO_EXECUTE — fetching fresh quote...`);
+        const freshQuote = await fetchQuoteWithRouting(
+          { swapper: safeAddress, tokenIn: quoteData.tokenIn, tokenOut: quoteData.tokenOut, amount: quoteData.amount },
+          "autonomous"
+        );
+        const swapTx = await submitSwap(freshQuote.quote, null, undefined);
+        console.log(`[intent] AUTO_EXECUTE swap tx: to=${swapTx.to}, value=${swapTx.value}`);
+
+        // Step 2: Check what Permit2 approvals are needed for the ACTUAL router
+        // Safe can't sign EIP-712 Permit2 messages, so we use on-chain approve() instead
+        const batch: Array<{ to: string; value: string; data: string }> = [];
+        const ETH_ADDRESS = "0x0000000000000000000000000000000000000000";
+        if (quoteData.tokenIn.toLowerCase() !== ETH_ADDRESS.toLowerCase()) {
+          const approvalTxs = await getApprovalTxsForSwap(
+            safeAddress, quoteData.tokenIn, BigInt(quoteData.amount || "0"), swapTx.to
+          );
+          batch.push(...approvalTxs);
+        }
+
+        // Normalize hex value to decimal for Safe SDK
+        const swapValue = swapTx.value?.startsWith('0x')
+          ? BigInt(swapTx.value).toString()
+          : (swapTx.value || '0');
+        batch.push({ to: swapTx.to, value: swapValue, data: swapTx.data });
+
+        // Step 3: Execute all as ONE Safe tx (approvals + swap batched atomically)
+        // When batch has multiple txs, SDK uses MultiSend — single nonce, single signature
+        // Use Uniswap's gas estimate + Safe overhead; bypass eth_estimateGas which
+        // incorrectly reverts with GS013 for complex calldata
+        const uniswapGas = parseInt(freshQuote.quote?.gasUseEstimate || '300000', 10);
+        const safeGasLimit = String(uniswapGas + 150000);
+        console.log(`[intent] AUTO_EXECUTE — executing ${batch.length} operation(s) via Safe${batch.length > 1 ? ' (MultiSend batch)' : ''}, gasLimit=${safeGasLimit}...`);
+        const txHash = await executeBatchViaSafe(safeAddress, agentKey, batch, safeGasLimit);
+
+        // Log to 0G Storage
+        const { logTradeResult } = await import("../../executor/logResult");
+        const tradeId = quoteData.tradeId || crypto.randomUUID();
+        await logTradeResult(tradeId, txHash, "success");
+
+        console.log(`[intent] AUTO_EXECUTE success: ${txHash}`);
+        res.json({
+          status: "ok",
+          autoExecuted: true,
+          txHash,
+          explorerUrl: `https://sepolia.etherscan.io/tx/${txHash}`,
+          plan: { id: tradeId, summary: planSummary, steps: planSteps, totalEstimatedValueUsd },
+          assessment: { verdict, riskScore, reasons: [gatekeeperReasoning], requiresLedger: false },
+          agentReasoning: { planner: plannerReasoning, gatekeeper: gatekeeperReasoning },
+        });
+        return;
+      } catch (err: any) {
+        console.error(`[intent] AUTO_EXECUTE failed: ${err.message}`);
+        console.error(err.stack);
+        // Fall through to manual flow
+      }
+    }
 
     res.json({
       status: "ok",
+      autoExecuted: false,
+      safeAddress,
       plan: {
         id: quoteData?.tradeId || crypto.randomUUID(),
         summary: planSummary,
@@ -554,84 +649,227 @@ app.post("/intent", async (req, res) => {
   }
 });
 
-// ─── GET /safe/status ───
-// Returns Safe address, spending limits, and remaining allowances.
-app.get("/safe/status", async (req, res) => {
+// ─── Compute provider toggle ───
+app.post("/set-compute-provider", (req, res) => {
+  const { provider } = req.body;
+  if (provider !== "groq" && provider !== "0g") {
+    res.status(400).json({ error: "provider must be 'groq' or '0g'" });
+    return;
+  }
+  setComputeProvider(provider);
+  console.log(`[serve] Compute provider set to: ${provider}`);
+  res.json({ success: true, provider });
+});
+
+app.get("/compute-provider", (_req, res) => {
+  res.json({ provider: getComputeProvider() });
+});
+
+// ─── Safe onboarding ───
+app.post("/onboard", async (req, res) => {
   try {
-    const safeAddress = process.env.SAFE_ADDRESS;
-    const agentKey = process.env.AGENT_HOT_WALLET_PRIVATE_KEY;
-    if (!safeAddress || !agentKey) {
-      res.status(400).json({ error: "SAFE_ADDRESS and AGENT_HOT_WALLET_PRIVATE_KEY must be set in .env" });
+    const { ledgerAddress, spendingLimitUSD = 100 } = req.body;
+    if (!ledgerAddress) {
+      res.status(400).json({ error: "ledgerAddress is required" });
       return;
     }
 
-    const agentAddress = new ethers.Wallet(agentKey).address;
-    const chainId = Number(req.query.chainId) || CHAIN_ID;
-    const tokens = getTokens(chainId);
-    const p = chainId === 1
-      ? new ethers.JsonRpcProvider(process.env.MAINNET_RPC_URL || "https://cloudflare-eth.com")
-      : provider;
+    console.log(`[onboard] Checking Safe for ${ledgerAddress}...`);
 
-    const limits: Record<string, any> = {};
-    for (const [symbol, address] of Object.entries(tokens)) {
-      try {
-        limits[symbol] = await getSpendingLimit(p, safeAddress, agentAddress, address);
-      } catch {
-        limits[symbol] = null;
-      }
+    // Check for existing Safe
+    const existing = await detectExistingSafe(ledgerAddress);
+    if (existing) {
+      const stored = await read(`safe:${ledgerAddress.toLowerCase()}`);
+      console.log(`[onboard] Returning user — Safe: ${existing}`);
+      res.json({
+        isNewUser: false,
+        safeAddress: existing,
+        spendingLimitUSD: (stored as any)?.spendingLimitUSD || 100,
+      });
+      return;
     }
 
-    res.json({
+    // New user — deploy Safe
+    console.log(`[onboard] New user — deploying Safe...`);
+    let agentWalletAddress: string;
+    try {
+      agentWalletAddress = getAgentAddress();
+    } catch {
+      res.status(500).json({ error: "Agent wallet not configured (AGENT_PRIVATE_KEY)" });
+      return;
+    }
+
+    const safeAddress = await deploySafe(ledgerAddress, agentWalletAddress, provider);
+
+    // Set spending limits (non-blocking — may fail on some Safe SDK versions)
+    const agentKey = process.env.AGENT_PRIVATE_KEY!;
+    try {
+      await setInitialSpendingLimits(safeAddress, agentWalletAddress, spendingLimitUSD, agentKey);
+    } catch (limitErr: any) {
+      console.warn(`[onboard] Spending limits setup deferred: ${limitErr.message}`);
+    }
+
+    // Register on OrchestraPolicy
+    let policyTxHash: string | undefined;
+    const policyAddress = process.env.ORCHESTRA_POLICY_ADDRESS;
+    if (policyAddress) {
+      const policyAbi = ['function registerSafe(address safeAddress, address agentWallet, uint256 spendingLimitUSD) external'];
+      const agentWallet = new ethers.Wallet(agentKey, provider);
+      const policy = new ethers.Contract(policyAddress, policyAbi, agentWallet);
+      const tx = await policy.registerSafe(safeAddress, agentWalletAddress, spendingLimitUSD * 100);
+      await tx.wait();
+      policyTxHash = tx.hash;
+      console.log(`[onboard] Policy registered: ${policyTxHash}`);
+    }
+
+    // Write to 0G Storage
+    await write(`safe:${ledgerAddress.toLowerCase()}`, {
       safeAddress,
-      agentAddress,
-      chainId,
-      autoExecuteLimitUsd: Number(process.env.AUTO_EXECUTE_LIMIT_USD) || 100,
-      allowances: limits,
+      agentWallet: agentWalletAddress,
+      spendingLimitUSD,
+      deployedAt: new Date().toISOString(),
+    });
+
+    await write("user:profile", {
+      address: ledgerAddress,
+      safeAddress,
+      riskTolerance: "moderate",
+      autoApproveLimit: spendingLimitUSD,
+      preferredTokens: ["USDC", "WETH", "ETH"],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    console.log(`[onboard] New user onboarded — Safe: ${safeAddress}`);
+    res.json({
+      isNewUser: true,
+      safeAddress,
+      spendingLimitUSD,
+      policyTxHash,
     });
   } catch (err: any) {
-    console.error("[serve] /safe/status error:", err.message);
+    console.error("[onboard] Error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ─── POST /safe/update-limit ───
-// Updates the spending limit both on-chain (AllowanceModule) and in the risk engine.
-app.post("/safe/update-limit", async (req, res) => {
-  try {
-    const { limitUsd, chainId: reqChainId } = req.body;
-    const safeAddress = process.env.SAFE_ADDRESS;
-    const agentKey = process.env.AGENT_HOT_WALLET_PRIVATE_KEY;
+app.get("/check-safe", async (req, res) => {
+  const address = req.query.address as string;
+  if (!address) {
+    res.status(400).json({ error: "address query param required" });
+    return;
+  }
+  const existing = await detectExistingSafe(address);
+  if (existing) {
+    const stored = await read(`safe:${address.toLowerCase()}`);
+    res.json({ hasSafe: true, safeAddress: existing, spendingLimitUSD: (stored as any)?.spendingLimitUSD || 100 });
+  } else {
+    res.json({ hasSafe: false });
+  }
+});
 
-    if (!safeAddress || !agentKey || !limitUsd) {
-      res.status(400).json({ error: "limitUsd required, SAFE_ADDRESS and AGENT_HOT_WALLET_PRIVATE_KEY must be set" });
+app.get("/safe-balances", async (req, res) => {
+  const address = req.query.address as string;
+  if (!address) {
+    res.status(400).json({ error: "address query param required" });
+    return;
+  }
+  try {
+    const ethBalance = await provider.getBalance(address);
+    const erc20Abi = ["function balanceOf(address) view returns (uint256)"];
+    const usdcContract = new ethers.Contract(USDC_SEPOLIA, erc20Abi, provider);
+    const wethContract = new ethers.Contract(WETH_SEPOLIA, erc20Abi, provider);
+    const [usdcRaw, wethRaw] = await Promise.all([
+      usdcContract.balanceOf(address).catch(() => 0n),
+      wethContract.balanceOf(address).catch(() => 0n),
+    ]);
+    res.json({
+      eth: ethers.formatEther(ethBalance),
+      usdc: ethers.formatUnits(usdcRaw, 6),
+      weth: ethers.formatEther(wethRaw),
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Step 1: Build unsigned tx for Ledger to sign (MultiSend of 3 setAllowance calls through Safe)
+app.post("/prepare-limit-update", async (req, res) => {
+  try {
+    const { newLimitUSD, ledgerAddress } = req.body;
+    if (!newLimitUSD || !ledgerAddress) {
+      res.status(400).json({ error: "newLimitUSD and ledgerAddress required" });
       return;
     }
 
-    const chainId = reqChainId || CHAIN_ID;
-    const rpcUrl = chainId === 1
-      ? (process.env.MAINNET_RPC_URL || "https://cloudflare-eth.com")
-      : (process.env.SEPOLIA_RPC_URL || "https://rpc.sepolia.org");
+    const stored = await read(`safe:${ledgerAddress.toLowerCase()}`);
+    if (!stored) {
+      res.status(400).json({ error: "No Safe found. Complete onboarding first." });
+      return;
+    }
+    const safeAddress = (stored as any).safeAddress;
+    const agentAddr = getAgentAddress();
 
-    const agentAddress = new ethers.Wallet(agentKey).address;
-    const tokens = getTokens(chainId);
+    const unsignedTx = buildLimitUpdateTx(safeAddress, ledgerAddress, agentAddr, newLimitUSD);
 
-    // Update on-chain allowances
-    const safeSdk = await initSafe(rpcUrl, agentKey, safeAddress);
-
-    const usdcAllowanceWei = ethers.parseUnits(String(limitUsd), 6);
-    const wethAllowanceWei = ethers.parseEther(String(limitUsd / 2000));
-
-    await updateSpendingLimit(safeSdk, agentAddress, tokens.USDC, usdcAllowanceWei);
-    await updateSpendingLimit(safeSdk, agentAddress, tokens.WETH, wethAllowanceWei);
-
-    // Update off-chain risk engine
-    const { setThresholds } = await import("./riskEngine");
-    setThresholds({ autoExecuteMaxUSD: limitUsd });
-
-    console.log(`[serve] ✓ Spending limit updated to $${limitUsd}`);
-    res.json({ ok: true, limitUsd, chainId });
+    console.log(`[prepare-limit-update] Built tx for $${newLimitUSD} limit (Safe: ${safeAddress})`);
+    res.json({ unsignedTx });
   } catch (err: any) {
-    console.error("[serve] /safe/update-limit error:", err.message);
+    console.error("[prepare-limit-update] Error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Step 2: After Ledger signs and tx is broadcast, update storage + OrchestraPolicy
+app.post("/finalize-limit-update", async (req, res) => {
+  try {
+    const { newLimitUSD, ledgerAddress, txHash } = req.body;
+    if (!newLimitUSD || !ledgerAddress) {
+      res.status(400).json({ error: "newLimitUSD and ledgerAddress required" });
+      return;
+    }
+
+    const stored = await read(`safe:${ledgerAddress.toLowerCase()}`);
+    if (!stored) {
+      res.status(400).json({ error: "No Safe found." });
+      return;
+    }
+
+    // Update 0G Storage
+    await write(`safe:${ledgerAddress.toLowerCase()}`, {
+      ...(stored as any),
+      spendingLimitUSD: newLimitUSD,
+    });
+    const profile = await read("user:profile");
+    if (profile) {
+      await write("user:profile", {
+        ...(profile as any),
+        autoApproveLimit: newLimitUSD,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    // Update OrchestraPolicy on-chain (agent wallet signs — it's just a registry write)
+    const policyAddress = process.env.ORCHESTRA_POLICY_ADDRESS;
+    if (policyAddress) {
+      try {
+        const agentKey = process.env.AGENT_PRIVATE_KEY!;
+        const wallet = new ethers.Wallet(agentKey, provider);
+        const policy = new ethers.Contract(policyAddress, [
+          'function updateSpendingLimit(uint256 newLimitUSD) external',
+        ], wallet);
+        const policyTx = await policy.updateSpendingLimit(newLimitUSD * 100);
+        await policyTx.wait();
+        console.log(`[finalize-limit-update] OrchestraPolicy updated: ${policyTx.hash}`);
+      } catch (policyErr: any) {
+        console.warn(`[finalize-limit-update] OrchestraPolicy update failed (non-critical): ${policyErr.message}`);
+      }
+    }
+
+    console.log(`[finalize-limit-update] Limit updated to $${newLimitUSD}, on-chain tx: ${txHash}`);
+    res.json({ success: true });
+  } catch (err: any) {
+    console.error("[finalize-limit-update] Error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });

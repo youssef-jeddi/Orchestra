@@ -352,6 +352,22 @@
     <span class="subtitle">test console</span>
   </header>
 
+  <!-- Onboarding Overlay -->
+  <div id="onboarding-screen" style="display:none;position:fixed;inset:0;z-index:1000;background:var(--bg);display:none;flex-direction:column;align-items:center;justify-content:center;padding:32px">
+    <div style="max-width:420px;text-align:center">
+      <h1 style="font-size:24px;margin-bottom:8px">Welcome to Orchestra</h1>
+      <p style="color:var(--text-dim);margin-bottom:24px">Your AI financial agent. Set your auto-approve limit — transactions below this amount will execute automatically:</p>
+      <div id="limit-buttons" style="display:flex;gap:8px;justify-content:center;margin-bottom:16px">
+        <button class="btn btn-secondary limit-btn" data-limit="50" style="flex:1;padding:12px">$50</button>
+        <button class="btn btn-primary limit-btn" data-limit="100" style="flex:1;padding:12px">$100</button>
+        <button class="btn btn-secondary limit-btn" data-limit="500" style="flex:1;padding:12px">$500</button>
+      </div>
+      <p style="font-size:11px;color:var(--text-dim);margin-bottom:24px">Larger transactions will always require your Ledger approval.</p>
+      <button id="deploy-safe-btn" class="btn btn-primary" style="width:100%;padding:14px;font-size:14px">Deploy My Safe Account</button>
+      <div id="onboard-status" style="margin-top:12px;font-size:12px;font-family:'JetBrains Mono',monospace;color:var(--text-dim)"></div>
+    </div>
+  </div>
+
   <main>
     <!-- Device Panel -->
     <section id="device-panel">
@@ -366,10 +382,42 @@
           <span id="device-address">—</span>
         </div>
       </div>
+      <div id="safe-status" style="display:none;margin-top:8px;padding:8px 12px;border-radius:6px;font-size:11px;font-family:'JetBrains Mono',monospace;background:rgba(0,255,128,0.08);border:1px solid rgba(0,255,128,0.2);color:#0f8">
+        <span id="safe-status-text">Safe: detecting...</span>
+      </div>
       <button id="connect-btn" class="btn btn-primary">Connect Ledger</button>
       <button id="disconnect-btn" class="btn btn-danger" style="display:none">Disconnect</button>
 
       <hr style="border: none; border-top: 1px solid var(--border); margin: 16px 0;" />
+
+      <div id="settings-section" style="display:none">
+        <h2>Spending Limit</h2>
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px">Swaps below this limit auto-execute without Ledger.</div>
+        <div style="display:flex;gap:6px;margin-bottom:8px">
+          <span id="current-limit" style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--green);line-height:32px;min-width:50px">$100</span>
+          <input id="new-limit-input" type="number" placeholder="New limit" class="input-field" style="flex:1" />
+          <button id="update-limit-btn" class="btn btn-primary" style="width:auto;margin-bottom:0;padding:8px 14px;font-size:12px">Update</button>
+        </div>
+        <div id="limit-status" style="font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text-dim)"></div>
+        <hr style="border: none; border-top: 1px solid var(--border); margin: 16px 0;" />
+      </div>
+
+      <div id="deposit-section" style="display:none">
+        <h2>Deposit to Safe</h2>
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px">Send tokens from your Ledger to your Safe account.</div>
+        <div style="display:flex;gap:6px;margin-bottom:8px">
+          <select id="deposit-token" class="input-field" style="flex:1;padding:8px;font-size:12px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px">
+            <option value="eth">ETH</option>
+            <option value="usdc">USDC</option>
+            <option value="weth">WETH</option>
+          </select>
+          <input id="deposit-amount" type="text" placeholder="Amount" class="input-field" style="flex:2" />
+        </div>
+        <button id="deposit-btn" class="btn btn-primary" style="width:100%">Deposit to Safe</button>
+        <div id="deposit-status" style="font-size:11px;font-family:'JetBrains Mono',monospace;margin-top:4px;color:var(--text-dim)"></div>
+        <div id="safe-balances" style="margin-top:8px;font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text-dim)"></div>
+        <hr style="border: none; border-top: 1px solid var(--border); margin: 16px 0;" />
+      </div>
 
       <h2>Intent</h2>
       <div class="intent-form">
@@ -391,6 +439,15 @@
         <button id="quote-btn" class="btn btn-primary">Get Quote</button>
         <div id="quote-result" class="quote-result" style="display:none"></div>
       </div>
+
+      <hr style="border: none; border-top: 1px solid var(--border); margin: 16px 0;" />
+
+      <h2>Compute Provider</h2>
+      <div style="display:flex;gap:6px;margin-bottom:8px">
+        <button id="provider-groq" class="btn btn-primary" style="flex:1;font-size:11px;padding:7px 4px">Groq (Fast)</button>
+        <button id="provider-0g" class="btn btn-secondary" style="flex:1;font-size:11px;padding:7px 4px">0G (Decentralized)</button>
+      </div>
+      <div id="provider-status" style="font-size:10px;font-family:'JetBrains Mono',monospace;color:var(--text-dim);margin-bottom:12px">Active: Groq</div>
 
       <hr style="border: none; border-top: 1px solid var(--border); margin: 16px 0;" />
 

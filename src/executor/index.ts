@@ -1,1 +1,2 @@
-// Executor entry point: receives approved plans, submits transactions
+export { executePlan } from './submitTransaction';
+export { logTradeResult } from './logResult';
