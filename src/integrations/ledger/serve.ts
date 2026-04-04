@@ -316,12 +316,16 @@ app.post("/intent", async (req, res) => {
     // ── Step 0a: Check Safe deployment ──
     let safeAddress: string | null = null;
     if (walletAddress) {
-      const safeData = await read(`safe:${walletAddress.toLowerCase()}`);
-      if (safeData) {
-        safeAddress = (safeData as any).safeAddress;
-        console.log(`[intent] Safe detected: ${safeAddress}`);
-      } else {
-        console.log(`[intent] No Safe found — user needs onboarding`);
+      try {
+        const safeData = await read(`safe:${walletAddress.toLowerCase()}`);
+        if (safeData) {
+          safeAddress = (safeData as any).safeAddress;
+          console.log(`[intent] Safe detected: ${safeAddress}`);
+        } else {
+          console.log(`[intent] No Safe found — user needs onboarding`);
+        }
+      } catch (safeReadErr: any) {
+        console.warn(`[intent] Safe read from 0G failed (non-critical): ${safeReadErr.message}`);
       }
     }
 
@@ -404,15 +408,26 @@ app.post("/intent", async (req, res) => {
     // ── Step 2: Run Gatekeeper ──
     // ═══════════════════════════════════════════
     console.log(`[intent] Running Gatekeeper…`);
-    const gatekeeperResult = await runGatekeeper();
+    let gatekeeperResult: { reasoning: string };
+    try {
+      gatekeeperResult = await runGatekeeper();
+    } catch (gkErr: any) {
+      console.warn(`[intent] Gatekeeper run failed (non-critical): ${gkErr.message}`);
+      gatekeeperResult = { reasoning: "Gatekeeper encountered an error — falling back to server-side assessment." };
+    }
     console.log(`[intent] Gatekeeper reasoning: ${gatekeeperResult.reasoning}`);
 
-    const assessments = (await readMany("assessments")) as Record<string, unknown>[];
-    const latestAssessment = assessments.sort((a, b) =>
-      (b.assessedAt as string).localeCompare(a.assessedAt as string)
-    )[0];
+    let latestAssessment: Record<string, unknown> | undefined;
+    try {
+      const assessments = (await readMany("assessments")) as Record<string, unknown>[];
+      latestAssessment = assessments.sort((a, b) =>
+        (b.assessedAt as string).localeCompare(a.assessedAt as string)
+      )[0];
+    } catch (readErr: any) {
+      console.warn(`[intent] Failed to read assessments from 0G (non-critical): ${readErr.message}`);
+    }
 
-    await write("messages:latest", { message: null, timestamp: null });
+    try { await write("messages:latest", { message: null, timestamp: null }); } catch {};
 
     // ═══════════════════════════════════════════
     // ── Step 3: Detect intent type from AI plan steps ──
@@ -448,8 +463,8 @@ app.post("/intent", async (req, res) => {
       if (totalEstimatedValueUsd <= autoApproveLimit) {
         verdict = "AUTO_EXECUTE";
         riskScore = Math.min(riskScore, 15);
-      } else if (totalEstimatedValueUsd > autoApproveLimit && verdict === "AUTO_EXECUTE") {
-        // AI said auto-execute but value is too high — override to safe
+      } else {
+        // Over the limit — always require Ledger approval regardless of AI verdict
         verdict = "NEEDS_APPROVAL";
         riskScore = Math.max(riskScore, 70);
       }
