@@ -3,10 +3,10 @@ import { read } from '../../../integrations/zero-g/storage';
 
 const DEFAULT_TOKENS = [
   { symbol: 'ETH', address: '0x0000000000000000000000000000000000000000', verified: true },
-  { symbol: 'USDC', address: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', verified: true },
-  { symbol: 'USDT', address: '0xdAC17F958D2ee523a2206206994597C13D831ec7', verified: true },
-  { symbol: 'WBTC', address: '0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599', verified: true },
-  { symbol: 'WETH', address: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2', verified: true },
+  { symbol: 'WETH', address: '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14', verified: true },
+  { symbol: 'USDC', address: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238', verified: true },
+  { symbol: 'USDT', address: '0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0', verified: true },
+  { symbol: 'WBTC', address: '0x29f2D40B0605204364af54EC677bD022dA425d03', verified: true },
 ];
 
 const tokenRegistryProvider: Provider = {

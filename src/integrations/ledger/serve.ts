@@ -18,7 +18,7 @@ import { runPlanner } from "../../agents/planner/index";
 import { runGatekeeper } from "../../agents/gatekeeper/index";
 import { write, read, readMany } from "../zero-g/storage";
 
-const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || "https://rpc.sepolia.org";
+const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || "https://eth-sepolia.g.alchemy.com/v2/demo";
 const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC);
 const PORT = Number(process.env.LEDGER_BRIDGE_PORT) || 3001;
 
@@ -241,6 +241,19 @@ app.get("/nonce/:address", async (req, res) => {
   }
 });
 
+// ─── Token decimal map (case-insensitive lookup) ───
+const TOKEN_DECIMALS: Record<string, number> = {
+  [USDC_SEPOLIA.toLowerCase()]: 6,                                        // USDC Sepolia
+  ['0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0'.toLowerCase()]: 6,        // USDT Sepolia
+  [WETH_SEPOLIA.toLowerCase()]: 18,                                       // WETH Sepolia
+  ['0xC558DBdd856501FCd9aaF1E62eae57A9F0629a3c'.toLowerCase()]: 18,       // WETH alt Sepolia
+};
+
+function toTokenWei(amount: string, tokenAddress: string): bigint {
+  const decimals = TOKEN_DECIMALS[tokenAddress.toLowerCase()] ?? 18;
+  return ethers.parseUnits(amount, decimals);
+}
+
 // ─── Deterministic intent parser ───
 // Catches simple swap intents without needing LLM. Returns null if it can't parse.
 const TOKEN_MAP: Record<string, { address: string; decimals: number; symbol: string }> = {
@@ -293,6 +306,50 @@ app.post("/intent", async (req, res) => {
     console.log(`\n[intent] ═══════════════════════════════════════`);
     console.log(`[intent] "${message}"`);
     console.log(`[intent] wallet: ${walletAddress || "not provided"}`);
+
+    // ── Step 0a: Fetch real on-chain balances ──
+    if (walletAddress) {
+      try {
+        const ethBalance = await provider.getBalance(walletAddress);
+        const ethFormatted = Number(ethers.formatEther(ethBalance));
+
+        // ERC-20 balanceOf(address) for USDC and WETH on Sepolia
+        const erc20Abi = ["function balanceOf(address) view returns (uint256)"];
+        const usdcContract = new ethers.Contract(USDC_SEPOLIA, erc20Abi, provider);
+        const wethContract = new ethers.Contract(WETH_SEPOLIA, erc20Abi, provider);
+
+        const [usdcRaw, wethRaw] = await Promise.all([
+          usdcContract.balanceOf(walletAddress).catch(() => 0n),
+          wethContract.balanceOf(walletAddress).catch(() => 0n),
+        ]);
+
+        const usdcFormatted = Number(ethers.formatUnits(usdcRaw, 6));
+        const wethFormatted = Number(ethers.formatEther(wethRaw));
+
+        await write("portfolio:current", {
+          eth: ethFormatted,
+          weth: wethFormatted,
+          usdc: usdcFormatted,
+          updatedAt: new Date().toISOString(),
+        });
+        console.log(`[intent] Portfolio fetched: ${ethFormatted} ETH, ${wethFormatted} WETH, ${usdcFormatted} USDC`);
+      } catch (err: any) {
+        console.warn(`[intent] Failed to fetch on-chain balances: ${err.message}`);
+      }
+    }
+
+    // ── Step 0b: Ensure user profile exists in storage ──
+    const existingProfile = await read("user:profile");
+    if (!existingProfile) {
+      await write("user:profile", {
+        address: walletAddress || "",
+        autoApproveLimit: 100,
+        currency: "USD",
+        knownAddresses: walletAddress ? [walletAddress] : [],
+        createdAt: new Date().toISOString(),
+      });
+      console.log(`[intent] Seeded default user profile`);
+    }
 
     // ── Step 1: Try deterministic parser ──
     const parsed = parseSwapIntent(message);
@@ -405,12 +462,12 @@ app.post("/intent", async (req, res) => {
       const tokenOut = params.tokenOut || params.to || (parsed?.tokenOut ?? USDC_SEPOLIA);
       const rawAmount = params.amount || params.value || parsed?.amount || "0";
 
-      // Convert to wei if it looks like a human-readable amount
+      // Convert to wei using correct decimals per token
       let amountWei: string;
       if (parsed) {
         amountWei = parsed.amountWei;
       } else if (!String(rawAmount).match(/^\d{10,}$/)) {
-        amountWei = ethers.parseEther(String(rawAmount)).toString();
+        amountWei = toTokenWei(String(rawAmount), tokenIn).toString();
       } else {
         amountWei = String(rawAmount);
       }

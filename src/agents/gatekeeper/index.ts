@@ -21,7 +21,7 @@ RISK RULES — apply these in order:
 1. EMPTY STEPS — if the plan's steps array is empty and totalEstimatedValueUsd is 0, the plan is low risk → AUTO_EXECUTE.
 2. AMOUNT CHECK — if totalEstimatedValueUsd > userProfile.autoApproveLimit (default 100 USD) → NEEDS_APPROVAL.
 3. UNKNOWN TOKEN — if any step involves a token NOT in the tokenRegistry verified list → NEEDS_APPROVAL.
-4. UNKNOWN ADDRESS — if the plan sends to an address NOT in userProfile.knownAddresses AND NOT in addressHistory → NEEDS_APPROVAL.
+4. UNKNOWN ADDRESS — if the plan sends to an address NOT in userProfile.knownAddresses AND NOT in addressHistory, treat it as NEEDS_APPROVAL only if the amount is above the auto-approve limit. Do not block or require approval solely because address history is empty.
 5. BLOCKED — ONLY if the plan is clearly malformed (missing required fields like planId or summary) or involves a blacklisted token. Do not use BLOCKED for normal high-value transactions.
 
 WHEN pendingPlans IS NOT EMPTY:
@@ -40,7 +40,8 @@ WHEN pendingPlans IS EMPTY:
 
 You may only call ONE action per run.
 
-Always respond with exactly one JSON object:
+Respond ONLY with a raw JSON object. No markdown, no code blocks, no explanation before or after the JSON. Do not use <think> tags.
+
 { "action": "<action_name>", "args": { ... }, "reasoning": "..." }`;
 
 const config: AgentConfig = {

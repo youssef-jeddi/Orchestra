@@ -11,7 +11,10 @@ function parseResponse(raw: string): AgentResponse {
     let cleaned = raw.trim();
 
     // Strip <think>...</think> blocks (Qwen3 thinking mode)
-    cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    // Handle closed tags first, then unclosed <think> that runs to end of string
+    cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/g, '');
+    cleaned = cleaned.replace(/<think>[\s\S]*/g, '');
+    cleaned = cleaned.trim();
 
     // Strip markdown code fences
     if (cleaned.startsWith('```json')) {
@@ -24,6 +27,8 @@ function parseResponse(raw: string): AgentResponse {
     }
     cleaned = cleaned.trim();
 
+    console.log('[0G Compute] Cleaned response for parsing:', cleaned.slice(0, 500));
+
     // Try direct parse first
     try {
       const parsed = JSON.parse(cleaned);
@@ -33,7 +38,24 @@ function parseResponse(raw: string): AgentResponse {
         reasoning: parsed.reasoning ?? '',
       };
     } catch {
-      // Fall through to regex extraction
+      // Fall through to extraction
+    }
+
+    // Extract first { to last } from cleaned string
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+      const candidate = cleaned.slice(firstBrace, lastBrace + 1);
+      try {
+        const parsed = JSON.parse(candidate);
+        return {
+          action: parsed.action ?? null,
+          args: parsed.args ?? {},
+          reasoning: parsed.reasoning ?? '',
+        };
+      } catch {
+        // Fall through to balanced brace extraction
+      }
     }
 
     // Extract JSON object containing "action" key (find balanced braces)
@@ -56,17 +78,6 @@ function parseResponse(raw: string): AgentResponse {
           }
         }
       }
-    }
-
-    // Fallback: greedy regex for any JSON object
-    const match = cleaned.match(/\{[\s\S]*\}/);
-    if (match) {
-      const parsed = JSON.parse(match[0]);
-      return {
-        action: parsed.action ?? null,
-        args: parsed.args ?? {},
-        reasoning: parsed.reasoning ?? '',
-      };
     }
 
     console.warn('[0G Compute] Could not extract JSON from LLM response, using fallback');

@@ -619,12 +619,10 @@ async function handleSignAndSwap(quoteData: any, amountEth: string): Promise<voi
     log(`  maxFee:   ${maxFeePerGas} (${(BigInt(maxFeePerGas) / 1000000000n).toString()} gwei)`);
     log(`  maxPrio:  ${maxPriorityFeePerGas}`);
 
-    // Cap gas limit — Uniswap API can return very high estimates that Sepolia rejects
-    let gasLimit = Number(unsignedTx.gasLimit || unsignedTx.gas || 350000);
-    if (gasLimit > 500000) {
-      log(`⚠ Gas limit ${gasLimit} too high — capping at 500000`);
-      gasLimit = 500000;
-    }
+    // Use Uniswap API's gas estimate with a 20% buffer for safety
+    const rawGasLimit = Number(unsignedTx.gasLimit || unsignedTx.gas || 350000);
+    const gasLimit = Math.ceil(rawGasLimit * 1.2);
+    log(`  gasLimit: ${rawGasLimit} (buffered to ${gasLimit})`);
 
     status("Sign swap transaction on Ledger…");
     setDeviceStatus("signing");
