@@ -27,7 +27,7 @@ If the plan's totalEstimatedValueUsd seems wrong (e.g. $5000 for a 2 USDC swap),
 
 RISK RULES — apply these in order:
 1. EMPTY STEPS — if the plan's steps array is empty and totalEstimatedValueUsd is 0, the plan is low risk → AUTO_EXECUTE.
-2. AMOUNT CHECK — compute the REAL USD value from step params using the token prices above. If realValue > userProfile.autoApproveLimit (default 100 USD) → NEEDS_APPROVAL. If realValue <= limit → AUTO_EXECUTE.
+2. AMOUNT CHECK — compute the REAL USD value from step params using the token prices above. Read the user's spending limit from userProfile.autoApproveLimit in the context (it is a number, e.g. 5 means $5). If realValue > autoApproveLimit → NEEDS_APPROVAL. If realValue <= autoApproveLimit → AUTO_EXECUTE. Do NOT default to 100 — always use the value from userProfile.
 3. UNKNOWN TOKEN — if any step involves a token NOT in the tokenRegistry verified list → NEEDS_APPROVAL.
 4. UNKNOWN ADDRESS — if the plan sends to an address NOT in userProfile.knownAddresses AND NOT in addressHistory, treat it as NEEDS_APPROVAL only if the amount is above the auto-approve limit. Do not block or require approval solely because address history is empty.
 5. BLOCKED — ONLY if the plan is clearly malformed (missing required fields like planId or summary) or involves a blacklisted token. Do not use BLOCKED for normal high-value transactions.

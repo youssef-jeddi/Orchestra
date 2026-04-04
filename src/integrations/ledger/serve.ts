@@ -415,10 +415,51 @@ app.post("/intent", async (req, res) => {
     console.log(`[intent] Plan: ${JSON.stringify(latestPlan, null, 2)}`);
 
     // ═══════════════════════════════════════════
-    // ── Step 2: Deterministic risk assessment (no AI) ──
+    // ── Step 2: Sync spending limit to 0G, then run AI Gatekeeper ──
     // ═══════════════════════════════════════════
+    const autoApproveLimit = typeof clientLimit === 'number' && clientLimit > 0 ? clientLimit : 100;
+
+    // Write the user's current limit to 0G so the Gatekeeper AI can read it
+    try {
+      const existingProfile = await read("user:profile");
+      const profileData = (existingProfile as any) || {};
+      if (profileData.autoApproveLimit !== autoApproveLimit) {
+        await write("user:profile", {
+          ...profileData,
+          autoApproveLimit,
+          updatedAt: new Date().toISOString(),
+        });
+        console.log(`[intent] Synced autoApproveLimit=$${autoApproveLimit} to 0G user:profile`);
+      }
+    } catch (syncErr: any) {
+      console.warn(`[intent] Failed to sync limit to 0G (non-critical): ${syncErr.message}`);
+    }
+
+    console.log(`[intent] Running Gatekeeper AI…`);
+    let gatekeeperResult: { reasoning: string };
+    try {
+      gatekeeperResult = await runGatekeeper();
+    } catch (gkErr: any) {
+      console.warn(`[intent] Gatekeeper run failed (non-critical): ${gkErr.message}`);
+      gatekeeperResult = { reasoning: "Gatekeeper encountered an error — falling back to server-side assessment." };
+    }
+    console.log(`[intent] Gatekeeper reasoning: ${gatekeeperResult.reasoning}`);
+
+    let latestAssessment: Record<string, unknown> | undefined;
+    try {
+      const assessments = (await readMany("assessments")) as Record<string, unknown>[];
+      latestAssessment = assessments.sort((a, b) =>
+        (b.assessedAt as string).localeCompare(a.assessedAt as string)
+      )[0];
+    } catch (readErr: any) {
+      console.warn(`[intent] Failed to read assessments from 0G (non-critical): ${readErr.message}`);
+    }
+
     try { await write("messages:latest", { message: null, timestamp: null }); } catch {};
 
+    // ═══════════════════════════════════════════
+    // ── Step 3: Detect intent type + server-side safety net ──
+    // ═══════════════════════════════════════════
     const planSteps = (latestPlan.steps as any[]) || [];
     const intentType = detectIntentType(planSteps);
     const step0 = planSteps[0] || {};
@@ -434,35 +475,31 @@ app.post("/intent", async (req, res) => {
       totalEstimatedValueUsd = estimateUsd(params.symbol || "ETH", Number(params.amount || 0));
     }
 
+    const aiVerdict = (latestAssessment?.verdict as string) ?? "NEEDS_APPROVAL";
+    const aiRiskScore = (latestAssessment?.riskScore as number) ?? 50;
     const plannerReasoning = plannerResult.reasoning;
-    const autoApproveLimit = typeof clientLimit === 'number' && clientLimit > 0 ? clientLimit : 100;
+    const gatekeeperReasoning = gatekeeperResult.reasoning;
 
-    // Deterministic verdict — pure math, no AI hallucinations
-    let verdict: string;
-    let riskScore: number;
-    let gatekeeperReasoning: string;
-
+    // Server-side safety net — override AI only when it's clearly wrong
+    let verdict = aiVerdict;
+    let riskScore = aiRiskScore;
     if (intentType === "balance") {
       verdict = "INFO";
       riskScore = 0;
-      gatekeeperReasoning = "Balance check — no risk.";
     } else if (intentType === "swap" || intentType === "send") {
-      if (totalEstimatedValueUsd <= autoApproveLimit) {
-        verdict = "AUTO_EXECUTE";
-        riskScore = Math.round((totalEstimatedValueUsd / autoApproveLimit) * 15);
-        gatekeeperReasoning = `$${totalEstimatedValueUsd} is within the $${autoApproveLimit} auto-execute limit — approved.`;
-      } else {
+      // If AI says AUTO_EXECUTE but amount is over the limit → override
+      if (totalEstimatedValueUsd > autoApproveLimit && verdict === "AUTO_EXECUTE") {
         verdict = "NEEDS_APPROVAL";
-        riskScore = Math.min(100, 70 + Math.round((totalEstimatedValueUsd / autoApproveLimit) * 5));
-        gatekeeperReasoning = `$${totalEstimatedValueUsd} exceeds the $${autoApproveLimit} auto-execute limit — Ledger approval required.`;
+        riskScore = Math.max(riskScore, 70);
+        console.log(`[intent] Safety net: overrode AUTO_EXECUTE → NEEDS_APPROVAL ($${totalEstimatedValueUsd} > $${autoApproveLimit})`);
       }
-    } else {
-      verdict = "NEEDS_APPROVAL";
-      riskScore = 50;
-      gatekeeperReasoning = `Unknown intent type "${intentType}" — requiring approval as a precaution.`;
+      // If AI says NEEDS_APPROVAL but amount is under the limit → override
+      if (totalEstimatedValueUsd <= autoApproveLimit && verdict === "NEEDS_APPROVAL") {
+        verdict = "AUTO_EXECUTE";
+        riskScore = Math.min(riskScore, 15);
+        console.log(`[intent] Safety net: overrode NEEDS_APPROVAL → AUTO_EXECUTE ($${totalEstimatedValueUsd} <= $${autoApproveLimit})`);
+      }
     }
-
-    console.log(`[intent] Gatekeeper (deterministic): ${gatekeeperReasoning}`);
 
     console.log(`[intent] Intent type: ${intentType}`);
     console.log(`[intent] USD value (server): $${totalEstimatedValueUsd}`);
