@@ -6,8 +6,34 @@
   "scripts": {
     "dev": "ts-node src/orchestrator/index.ts",
     "build": "tsc",
-    "start": "node dist/orchestrator/index.js"
+    "start": "node dist/orchestrator/index.js",
+    "ledger:bridge": "npx tsx src/integrations/ledger/serve.ts",
+    "ledger:ui": "npx vite src/integrations/ledger/ui"
   },
-  "keywords": ["0g", "uniswap", "ledger", "safe", "elizaos", "ai-agents"],
-  "license": "MIT"
+  "keywords": [
+    "0g",
+    "uniswap",
+    "ledger",
+    "safe",
+    "elizaos",
+    "ai-agents"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@ledgerhq/device-management-kit": "^1.2.0",
+    "@ledgerhq/device-signer-kit-ethereum": "^1.13.0",
+    "@ledgerhq/device-transport-kit-web-ble": "^1.3.2",
+    "dotenv": "^17.4.0",
+    "ethers": "^6.16.0",
+    "express": "^5.2.1",
+    "rxjs": "^7.8.2",
+    "ws": "^8.20.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2",
+    "vite": "^8.0.3"
+  }
 }
