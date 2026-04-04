@@ -8,6 +8,16 @@
     "build": "tsc",
     "start": "node dist/orchestrator/index.js"
   },
-  "keywords": ["0g", "uniswap", "ledger", "safe", "elizaos", "ai-agents"],
-  "license": "MIT"
+  "keywords": [
+    "0g",
+    "uniswap",
+    "ledger",
+    "safe",
+    "elizaos",
+    "ai-agents"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^6.0.2"
+  }
 }
