@@ -352,7 +352,8 @@ app.post("/intent", async (req, res) => {
 
         balances = { eth: ethFormatted, weth: wethFormatted, usdc: usdcFormatted, totalUsd };
 
-        await write("portfolio:current", {
+        // Fire-and-forget — don't let 0G write failure block the intent pipeline
+        write("portfolio:current", {
           eth: ethFormatted,
           weth: wethFormatted,
           usdc: usdcFormatted,
@@ -360,7 +361,7 @@ app.post("/intent", async (req, res) => {
           source: safeAddress ? "safe" : "eoa",
           address: balanceAddress,
           updatedAt: new Date().toISOString(),
-        });
+        }).catch((e: any) => console.warn(`[intent] Portfolio write failed (non-critical): ${e.message}`));
         console.log(`[intent] Portfolio (${safeAddress ? 'Safe' : 'EOA'}): ${ethFormatted} ETH, ${wethFormatted} WETH, ${usdcFormatted} USDC ($${totalUsd.toFixed(2)})`);
       } catch (err: any) {
         console.warn(`[intent] Failed to fetch on-chain balances: ${err.message}`);
@@ -368,35 +369,44 @@ app.post("/intent", async (req, res) => {
     }
 
     // ── Step 0c: Ensure user profile exists in storage ──
-    const existingProfile = await read("user:profile");
-    if (!existingProfile) {
-      await write("user:profile", {
-        address: walletAddress || "",
-        autoApproveLimit: 100,
-        currency: "USD",
-        knownAddresses: walletAddress ? [walletAddress] : [],
-        createdAt: new Date().toISOString(),
-      });
-      console.log(`[intent] Seeded default user profile`);
+    try {
+      const existingProfile = await read("user:profile");
+      if (!existingProfile) {
+        await write("user:profile", {
+          address: walletAddress || "",
+          autoApproveLimit: 100,
+          currency: "USD",
+          knownAddresses: walletAddress ? [walletAddress] : [],
+          createdAt: new Date().toISOString(),
+        });
+        console.log(`[intent] Seeded default user profile`);
+      }
+    } catch (profileErr: any) {
+      console.warn(`[intent] User profile read/write failed (non-critical): ${profileErr.message}`);
     }
 
     // ═══════════════════════════════════════════
     // ── Step 1: Run AI Planner ──
     // ═══════════════════════════════════════════
-    await write("messages:latest", { message, walletAddress, timestamp: new Date().toISOString() });
+    try { await write("messages:latest", { message, walletAddress, timestamp: new Date().toISOString() }); } catch {}
 
     console.log(`[intent] Running Planner…`);
     const plannerResult = await runPlanner(message);
     console.log(`[intent] Planner action: ${plannerResult.action}`);
     console.log(`[intent] Planner reasoning: ${plannerResult.reasoning}`);
 
-    const plans = (await readMany("plans")) as Record<string, unknown>[];
-    const latestPlan = plans.sort((a, b) =>
-      (b.createdAt as string).localeCompare(a.createdAt as string)
-    )[0];
+    let latestPlan: Record<string, unknown> | undefined;
+    try {
+      const plans = (await readMany("plans")) as Record<string, unknown>[];
+      latestPlan = plans.sort((a, b) =>
+        (b.createdAt as string).localeCompare(a.createdAt as string)
+      )[0];
+    } catch (planReadErr: any) {
+      console.warn(`[intent] Failed to read plans from 0G (non-critical): ${planReadErr.message}`);
+    }
 
     if (!latestPlan) {
-      await write("messages:latest", { message: null, timestamp: null });
+      try { await write("messages:latest", { message: null, timestamp: null }); } catch {}
       console.log(`[intent] No plan written by Planner`);
       res.json({ status: "no_action", intentType: "unknown", reasoning: plannerResult.reasoning });
       return;
@@ -405,33 +415,10 @@ app.post("/intent", async (req, res) => {
     console.log(`[intent] Plan: ${JSON.stringify(latestPlan, null, 2)}`);
 
     // ═══════════════════════════════════════════
-    // ── Step 2: Run Gatekeeper ──
+    // ── Step 2: Deterministic risk assessment (no AI) ──
     // ═══════════════════════════════════════════
-    console.log(`[intent] Running Gatekeeper…`);
-    let gatekeeperResult: { reasoning: string };
-    try {
-      gatekeeperResult = await runGatekeeper();
-    } catch (gkErr: any) {
-      console.warn(`[intent] Gatekeeper run failed (non-critical): ${gkErr.message}`);
-      gatekeeperResult = { reasoning: "Gatekeeper encountered an error — falling back to server-side assessment." };
-    }
-    console.log(`[intent] Gatekeeper reasoning: ${gatekeeperResult.reasoning}`);
-
-    let latestAssessment: Record<string, unknown> | undefined;
-    try {
-      const assessments = (await readMany("assessments")) as Record<string, unknown>[];
-      latestAssessment = assessments.sort((a, b) =>
-        (b.assessedAt as string).localeCompare(a.assessedAt as string)
-      )[0];
-    } catch (readErr: any) {
-      console.warn(`[intent] Failed to read assessments from 0G (non-critical): ${readErr.message}`);
-    }
-
     try { await write("messages:latest", { message: null, timestamp: null }); } catch {};
 
-    // ═══════════════════════════════════════════
-    // ── Step 3: Detect intent type from AI plan steps ──
-    // ═══════════════════════════════════════════
     const planSteps = (latestPlan.steps as any[]) || [];
     const intentType = detectIntentType(planSteps);
     const step0 = planSteps[0] || {};
@@ -447,28 +434,35 @@ app.post("/intent", async (req, res) => {
       totalEstimatedValueUsd = estimateUsd(params.symbol || "ETH", Number(params.amount || 0));
     }
 
-    const aiVerdict = (latestAssessment?.verdict as string) ?? "NEEDS_APPROVAL";
-    const aiRiskScore = (latestAssessment?.riskScore as number) ?? 50;
     const plannerReasoning = plannerResult.reasoning;
-    const gatekeeperReasoning = gatekeeperResult.reasoning;
-
-    // Server-side verdict override — use our recomputed USD value, not the AI's
     const autoApproveLimit = typeof clientLimit === 'number' && clientLimit > 0 ? clientLimit : 100;
-    let verdict = aiVerdict;
-    let riskScore = aiRiskScore;
+
+    // Deterministic verdict — pure math, no AI hallucinations
+    let verdict: string;
+    let riskScore: number;
+    let gatekeeperReasoning: string;
+
     if (intentType === "balance") {
       verdict = "INFO";
       riskScore = 0;
+      gatekeeperReasoning = "Balance check — no risk.";
     } else if (intentType === "swap" || intentType === "send") {
       if (totalEstimatedValueUsd <= autoApproveLimit) {
         verdict = "AUTO_EXECUTE";
-        riskScore = Math.min(riskScore, 15);
+        riskScore = Math.round((totalEstimatedValueUsd / autoApproveLimit) * 15);
+        gatekeeperReasoning = `$${totalEstimatedValueUsd} is within the $${autoApproveLimit} auto-execute limit — approved.`;
       } else {
-        // Over the limit — always require Ledger approval regardless of AI verdict
         verdict = "NEEDS_APPROVAL";
-        riskScore = Math.max(riskScore, 70);
+        riskScore = Math.min(100, 70 + Math.round((totalEstimatedValueUsd / autoApproveLimit) * 5));
+        gatekeeperReasoning = `$${totalEstimatedValueUsd} exceeds the $${autoApproveLimit} auto-execute limit — Ledger approval required.`;
       }
+    } else {
+      verdict = "NEEDS_APPROVAL";
+      riskScore = 50;
+      gatekeeperReasoning = `Unknown intent type "${intentType}" — requiring approval as a precaution.`;
     }
+
+    console.log(`[intent] Gatekeeper (deterministic): ${gatekeeperReasoning}`);
 
     console.log(`[intent] Intent type: ${intentType}`);
     console.log(`[intent] USD value (server): $${totalEstimatedValueUsd}`);
