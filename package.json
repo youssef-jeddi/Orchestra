@@ -10,6 +10,18 @@
     "ledger:bridge": "npx tsx src/integrations/ledger/serve.ts",
     "ledger:ui": "npx vite src/integrations/ledger/ui"
   },
+  "keywords": ["0g", "uniswap", "ledger", "safe", "elizaos", "ai-agents"],
+  "license": "MIT",
+  "dependencies": {
+    "@0gfoundation/0g-ts-sdk": "latest",
+    "@0glabs/0g-serving-broker": "latest",
+    "ethers": "^6.13.0",
+    "groq-sdk": "^0.8.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "ts-node": "^10.9.0",
+    "@types/node": "^22.0.0"
   "keywords": [
     "0g",
     "uniswap",
