@@ -40,10 +40,12 @@ export function requestSignature(
 ): Promise<SignatureResult> {
   // Parse hex to Uint8Array for the signer
   const txBytes = ethers.getBytes(unsignedTxHex);
+  console.log("Unsigned tx hex : ", unsignedTxHex)
 
   return new Promise<SignatureResult>((resolve, reject) => {
     // signTransaction(derivationPath, transaction, options?)
-    const { observable } = signer.signTransaction(derivationPath, txBytes);
+    // skipOpenApp: the Uniswap app is already open for clear signing
+    const { observable } = signer.signTransaction(derivationPath, txBytes, { skipOpenApp: true });
 
     observable.subscribe({
       next: (state: any) => {
@@ -74,7 +76,8 @@ export function signTypedData(
   derivationPath: string = "44'/60'/0'/0/0"
 ): Promise<SignatureResult> {
   return new Promise<SignatureResult>((resolve, reject) => {
-    const { observable } = signer.signTypedData(derivationPath, typedData);
+    // skipOpenApp: the Uniswap app is already open for clear signing
+    const { observable } = signer.signTypedData(derivationPath, typedData, { skipOpenApp: true });
 
     observable.subscribe({
       next: (state: any) => {
