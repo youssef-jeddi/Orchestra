@@ -87,11 +87,11 @@ export async function submitSwap(
   permitData: PermitData | null,
   signature?: string
 ): Promise<SwapResponse["swap"]> {
-  const res = await post<SwapResponse>("/swap", {
-    quote,
-    permitData,
-    signature,
-  });
+  const body: Record<string, any> = { quote };
+  if (permitData) body.permitData = permitData;
+  if (signature) body.signature = signature;
+
+  const res = await post<SwapResponse>("/swap", body);
   return res.swap;
 }
 

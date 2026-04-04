@@ -10,18 +10,6 @@
     "ledger:bridge": "npx tsx src/integrations/ledger/serve.ts",
     "ledger:ui": "npx vite src/integrations/ledger/ui"
   },
-  "keywords": ["0g", "uniswap", "ledger", "safe", "elizaos", "ai-agents"],
-  "license": "MIT",
-  "dependencies": {
-    "@0gfoundation/0g-ts-sdk": "latest",
-    "@0glabs/0g-serving-broker": "latest",
-    "ethers": "^6.13.0",
-    "groq-sdk": "^0.8.0"
-  },
-  "devDependencies": {
-    "typescript": "^5.4.0",
-    "ts-node": "^10.9.0",
-    "@types/node": "^22.0.0"
   "keywords": [
     "0g",
     "uniswap",
@@ -32,18 +20,24 @@
   ],
   "license": "MIT",
   "dependencies": {
+    "@0gfoundation/0g-ts-sdk": "latest",
+    "@0glabs/0g-serving-broker": "latest",
+    "@ledgerhq/context-module": "^1.15.0",
     "@ledgerhq/device-management-kit": "^1.2.0",
     "@ledgerhq/device-signer-kit-ethereum": "^1.13.0",
     "@ledgerhq/device-transport-kit-web-ble": "^1.3.2",
     "dotenv": "^17.4.0",
     "ethers": "^6.16.0",
     "express": "^5.2.1",
+    "groq-sdk": "^0.8.0",
     "rxjs": "^7.8.2",
     "ws": "^8.20.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
+    "@types/node": "^22.0.0",
     "@types/ws": "^8.18.1",
+    "ts-node": "^10.9.0",
     "tsx": "^4.21.0",
     "typescript": "^6.0.2",
     "vite": "^8.0.3"
