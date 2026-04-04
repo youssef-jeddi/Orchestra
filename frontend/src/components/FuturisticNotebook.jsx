@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import { X, Send, Feather, Bot, ShieldCheck, Zap, ExternalLink, Settings, ChevronDown } from 'lucide-react';
 import { useOrchestra } from '@/context/OrchestraContext';
-import { sendIntent, broadcast, submitSwap, getNonce, setComputeProvider, getComputeProvider } from '@/lib/bridge';
+import { sendIntent, broadcast, submitSwap, getNonce, setComputeProvider, getComputeProvider, prepareLimitUpdate, finalizeLimitUpdate } from '@/lib/bridge';
 
 const DEFAULT_MESSAGES = [
   {
@@ -169,6 +169,7 @@ export default function FuturisticNotebook({ onClose, initialMessage = '' }) {
   const [model, setModel] = useState('groq');
   const [spendingLimit, setSpendingLimit] = useState(100);
   const [limitInput, setLimitInput] = useState('100');
+  const [limitUpdating, setLimitUpdating] = useState(false);
   const messagesEndRef = useRef(null);
   const queryHandled = useRef(false);
 
@@ -322,12 +323,54 @@ export default function FuturisticNotebook({ onClose, initialMessage = '' }) {
     try { await setComputeProvider(newModel); } catch (e) { console.error('Failed to set model:', e); }
   };
 
-  const handleLimitSave = () => {
+  const handleLimitSave = async () => {
     const val = parseInt(limitInput, 10);
-    if (!isNaN(val) && val > 0) {
+    if (!val || val <= 0 || val === spendingLimit || !ledger.walletAddress) return;
+    if (limitUpdating) return;
+
+    setLimitUpdating(true);
+    try {
+      // Step 1: Get unsigned tx from backend
+      const { unsignedTx } = await prepareLimitUpdate(val, ledger.walletAddress);
+
+      // Step 2: Send to Ledger for signing
+      const { ethers } = await import('ethers');
+      const nonceData = await getNonce(ledger.walletAddress);
+      const tx = ethers.Transaction.from({
+        to: unsignedTx.to,
+        data: unsignedTx.data,
+        value: unsignedTx.value || '0x0',
+        chainId: 11155111,
+        gasLimit: unsignedTx.gasLimit || 300000,
+        type: 2,
+        maxFeePerGas: BigInt(nonceData.maxFeePerGas),
+        maxPriorityFeePerGas: BigInt(nonceData.maxPriorityFeePerGas),
+        nonce: nonceData.nonce,
+      });
+
+      const signature = await ledger.sign(tx.unsignedSerialized);
+      const signedTx = tx.clone();
+      signedTx.signature = ethers.Signature.from(signature);
+
+      // Step 3: Broadcast
+      const broadcastResult = await broadcast(signedTx.serialized);
+      const txHash = broadcastResult.txHash || broadcastResult.hash;
+
+      // Step 4: Finalize — update storage + on-chain policy
+      await finalizeLimitUpdate(val, ledger.walletAddress, txHash);
+
       setSpendingLimit(val);
-      // The limit is applied server-side in the /intent handler
-      // For on-chain limit updates, user would use Safe panel
+      setMessages((prev) => [...prev, {
+        id: Date.now(), role: 'scholar', text: `✓ Spending limit updated to $${val}. On-chain tx confirmed.`, isNew: true,
+      }]);
+    } catch (err) {
+      console.error('Limit update failed:', err);
+      setMessages((prev) => [...prev, {
+        id: Date.now(), role: 'scholar', text: `Failed to update limit: ${err.message}`, isNew: true,
+      }]);
+      setLimitInput(String(spendingLimit)); // revert input
+    } finally {
+      setLimitUpdating(false);
     }
   };
 
@@ -423,14 +466,28 @@ export default function FuturisticNotebook({ onClose, initialMessage = '' }) {
                   type="number"
                   value={limitInput}
                   onChange={(e) => setLimitInput(e.target.value)}
-                  onBlur={handleLimitSave}
                   onKeyDown={(e) => e.key === 'Enter' && handleLimitSave()}
+                  disabled={limitUpdating}
                   style={{
                     width: 60, background: 'transparent', border: 'none', fontSize: 13,
                     fontFamily: 'var(--font-inter)', color: '#E8E4DE', outline: 'none', cursor: 'none',
+                    opacity: limitUpdating ? 0.5 : 1,
                   }}
                 />
               </div>
+              {parseInt(limitInput, 10) !== spendingLimit && (
+                <button
+                  onClick={handleLimitSave}
+                  disabled={limitUpdating || !ledger.walletAddress}
+                  style={{
+                    padding: '5px 12px', fontSize: 11, fontFamily: 'var(--font-inter)',
+                    background: limitUpdating ? '#1a1a1a' : '#C084FC', color: limitUpdating ? '#555' : '#000',
+                    border: 'none', borderRadius: 6, cursor: 'none', fontWeight: 500,
+                  }}
+                >
+                  {limitUpdating ? 'Signing...' : 'Update (Ledger)'}
+                </button>
+              )}
             </div>
           </motion.div>
         )}
