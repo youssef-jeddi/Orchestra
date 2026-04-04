@@ -264,46 +264,31 @@ function toTokenWei(amount: string, tokenAddress: string): bigint {
   return ethers.parseUnits(amount, decimals);
 }
 
-// ─── Deterministic intent parser ───
-// Catches simple swap intents without needing LLM. Returns null if it can't parse.
-const TOKEN_MAP: Record<string, { address: string; decimals: number; symbol: string }> = {
-  eth: { address: WETH_SEPOLIA, decimals: 18, symbol: "WETH" },
-  weth: { address: WETH_SEPOLIA, decimals: 18, symbol: "WETH" },
-  usdc: { address: USDC_SEPOLIA, decimals: 6, symbol: "USDC" },
+// ─── Address → symbol lookup ───
+const TOKEN_SYMBOLS: Record<string, string> = {
+  [WETH_SEPOLIA.toLowerCase()]: "ETH",
+  ['0xC558DBdd856501FCd9aaF1E62eae57A9F0629a3c'.toLowerCase()]: "ETH",
+  [USDC_SEPOLIA.toLowerCase()]: "USDC",
+  ['0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0'.toLowerCase()]: "USDT",
+  // Mainnet
+  ['0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'.toLowerCase()]: "ETH",
+  ['0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'.toLowerCase()]: "USDC",
 };
 
-function parseSwapIntent(message: string): {
-  tokenIn: string; tokenOut: string; amount: string; amountWei: string;
-  symbolIn: string; symbolOut: string; decimalsIn: number;
-} | null {
-  // Match patterns like: "swap 0.01 ETH to USDC", "swap 100 USDC for ETH"
-  const match = message.match(
-    /swap\s+([\d.]+)\s+(\w+)\s+(?:to|for|into|→)\s+(\w+)/i
-  );
-  if (!match) return null;
+function symbolFromAddress(address: string, fallback: string = "UNKNOWN"): string {
+  return TOKEN_SYMBOLS[address.toLowerCase()] || fallback;
+}
 
-  const [, amountStr, fromSymbol, toSymbol] = match;
-  const from = TOKEN_MAP[fromSymbol.toLowerCase()];
-  const to = TOKEN_MAP[toSymbol.toLowerCase()];
-  if (!from || !to) return null;
-
-  const amountWei = ethers.parseUnits(amountStr, from.decimals).toString();
-
-  return {
-    tokenIn: from.address,
-    tokenOut: to.address,
-    amount: amountStr,
-    amountWei,
-    symbolIn: from.symbol,
-    symbolOut: to.symbol,
-    decimalsIn: from.decimals,
-  };
+// ─── Helper: estimate USD value for risk assessment ───
+function estimateUsd(symbol: string, amount: number): number {
+  const s = symbol.toUpperCase();
+  if (s === "USDC" || s === "USDT") return amount;
+  if (s === "ETH" || s === "WETH") return amount * 2500;
+  return amount;
 }
 
 // ─── POST /intent ───
-// Process a natural-language intent:
-//   1. Try deterministic parser first (fast, reliable for simple swaps)
-//   2. Fall back to AI agent pipeline (Planner → Gatekeeper) for complex intents
+// ALL intents go through AI pipeline: Planner → Gatekeeper → dispatch by intent type.
 app.post("/intent", async (req, res) => {
   try {
     const { message, walletAddress } = req.body;
@@ -331,6 +316,7 @@ app.post("/intent", async (req, res) => {
 
     // ── Step 0b: Fetch on-chain balances (from Safe if available) ──
     const balanceAddress = safeAddress || walletAddress;
+    let balances: { eth: number; weth: number; usdc: number; totalUsd: number } | null = null;
     if (balanceAddress) {
       try {
         const ethBalance = await provider.getBalance(balanceAddress);
@@ -347,16 +333,20 @@ app.post("/intent", async (req, res) => {
 
         const usdcFormatted = Number(ethers.formatUnits(usdcRaw, 6));
         const wethFormatted = Number(ethers.formatEther(wethRaw));
+        const totalUsd = (ethFormatted + wethFormatted) * 2500 + usdcFormatted;
+
+        balances = { eth: ethFormatted, weth: wethFormatted, usdc: usdcFormatted, totalUsd };
 
         await write("portfolio:current", {
           eth: ethFormatted,
           weth: wethFormatted,
           usdc: usdcFormatted,
+          totalUsd,
           source: safeAddress ? "safe" : "eoa",
           address: balanceAddress,
           updatedAt: new Date().toISOString(),
         });
-        console.log(`[intent] Portfolio (${safeAddress ? 'Safe' : 'EOA'}): ${ethFormatted} ETH, ${wethFormatted} WETH, ${usdcFormatted} USDC`);
+        console.log(`[intent] Portfolio (${safeAddress ? 'Safe' : 'EOA'}): ${ethFormatted} ETH, ${wethFormatted} WETH, ${usdcFormatted} USDC ($${totalUsd.toFixed(2)})`);
       } catch (err: any) {
         console.warn(`[intent] Failed to fetch on-chain balances: ${err.message}`);
       }
@@ -375,273 +365,316 @@ app.post("/intent", async (req, res) => {
       console.log(`[intent] Seeded default user profile`);
     }
 
-    // ── Step 1: Try deterministic parser ──
-    const parsed = parseSwapIntent(message);
+    // ═══════════════════════════════════════════
+    // ── Step 1: Run AI Planner ──
+    // ═══════════════════════════════════════════
+    await write("messages:latest", { message, walletAddress, timestamp: new Date().toISOString() });
 
-    let planSummary: string;
-    let planSteps: any[];
-    let totalEstimatedValueUsd: number;
-    let plannerReasoning: string;
-    let gatekeeperReasoning: string;
-    let verdict: string;
-    let riskScore: number;
+    console.log(`[intent] Running Planner…`);
+    const plannerResult = await runPlanner(message);
+    console.log(`[intent] Planner action: ${plannerResult.action}`);
+    console.log(`[intent] Planner reasoning: ${plannerResult.reasoning}`);
 
-    if (parsed) {
-      console.log(`[intent] ✓ Deterministic parse succeeded`);
-      console.log(`[intent]   ${parsed.amount} ${parsed.symbolIn} → ${parsed.symbolOut}`);
-      console.log(`[intent]   tokenIn:  ${parsed.tokenIn}`);
-      console.log(`[intent]   tokenOut: ${parsed.tokenOut}`);
-      console.log(`[intent]   amountWei: ${parsed.amountWei}`);
+    const plans = (await readMany("plans")) as Record<string, unknown>[];
+    const latestPlan = plans.sort((a, b) =>
+      (b.createdAt as string).localeCompare(a.createdAt as string)
+    )[0];
 
-      planSummary = `Swap ${parsed.amount} ${parsed.symbolIn} for ${parsed.symbolOut} on Uniswap`;
-      planSteps = [{
-        protocol: "uniswap",
-        action: "swap",
-        params: {
-          tokenIn: parsed.tokenIn,
-          tokenOut: parsed.tokenOut,
-          amount: parsed.amount,
-        },
-        estimatedGasWei: "300000",
-        order: 0,
-      }];
-
-      // Rough USD estimate (ETH ≈ $2000, USDC ≈ $1)
-      const ethAmount = parsed.symbolIn === "WETH" ? Number(parsed.amount) : 0;
-      totalEstimatedValueUsd = ethAmount > 0 ? ethAmount * 2000 : Number(parsed.amount);
-
-      plannerReasoning = `Deterministic parser: swap ${parsed.amount} ${parsed.symbolIn} → ${parsed.symbolOut}`;
-      gatekeeperReasoning = totalEstimatedValueUsd > 100
-        ? `Value $${totalEstimatedValueUsd} exceeds auto-approve limit → NEEDS_APPROVAL`
-        : `Value $${totalEstimatedValueUsd} within auto-approve limit, verified tokens → AUTO_EXECUTE`;
-      verdict = totalEstimatedValueUsd > 100 ? "NEEDS_APPROVAL" : "AUTO_EXECUTE";
-      riskScore = totalEstimatedValueUsd > 100 ? 70 : 10;
-    } else {
-      // ── Step 2: Fall back to AI agent pipeline ──
-      console.log(`[intent] Deterministic parse failed, falling back to AI agents…`);
-
-      await write("messages:latest", {
-        message,
-        walletAddress,
-        timestamp: new Date().toISOString(),
-      });
-
-      console.log(`[intent] Running Planner…`);
-      const plannerResult = await runPlanner(message);
-      console.log(`[intent] Planner action: ${plannerResult.action}`);
-      console.log(`[intent] Planner args: ${JSON.stringify(plannerResult.args)}`);
-      console.log(`[intent] Planner reasoning: ${plannerResult.reasoning}`);
-
-      const plans = (await readMany("plans")) as Record<string, unknown>[];
-      const latestPlan = plans.sort((a, b) =>
-        (b.createdAt as string).localeCompare(a.createdAt as string)
-      )[0];
-
-      if (!latestPlan) {
-        console.log(`[intent] No plan written by Planner`);
-        res.json({ status: "no_action", reasoning: plannerResult.reasoning });
-        return;
-      }
-
-      console.log(`[intent] Plan written: ${JSON.stringify(latestPlan, null, 2)}`);
-
-      console.log(`[intent] Running Gatekeeper…`);
-      const gatekeeperResult = await runGatekeeper();
-      console.log(`[intent] Gatekeeper action: ${gatekeeperResult.action}`);
-      console.log(`[intent] Gatekeeper args: ${JSON.stringify(gatekeeperResult.args)}`);
-      console.log(`[intent] Gatekeeper reasoning: ${gatekeeperResult.reasoning}`);
-
-      const assessments = (await readMany("assessments")) as Record<string, unknown>[];
-      const latestAssessment = assessments.sort((a, b) =>
-        (b.assessedAt as string).localeCompare(a.assessedAt as string)
-      )[0];
-
-      console.log(`[intent] Assessment: ${JSON.stringify(latestAssessment, null, 2)}`);
-
-      planSummary = latestPlan.summary as string;
-      planSteps = (latestPlan.steps as any[]) || [];
-      totalEstimatedValueUsd = (latestPlan.totalEstimatedValueUsd as number) || 0;
-      plannerReasoning = plannerResult.reasoning;
-      gatekeeperReasoning = gatekeeperResult.reasoning;
-      verdict = (latestAssessment?.verdict as string) ?? "NEEDS_APPROVAL";
-      riskScore = (latestAssessment?.riskScore as number) ?? 50;
-
+    if (!latestPlan) {
       await write("messages:latest", { message: null, timestamp: null });
+      console.log(`[intent] No plan written by Planner`);
+      res.json({ status: "no_action", intentType: "unknown", reasoning: plannerResult.reasoning });
+      return;
     }
 
-    console.log(`[intent] ── Summary ──`);
-    console.log(`[intent] Plan: ${planSummary}`);
-    console.log(`[intent] Steps: ${planSteps.length}`);
+    console.log(`[intent] Plan: ${JSON.stringify(latestPlan, null, 2)}`);
+
+    // ═══════════════════════════════════════════
+    // ── Step 2: Run Gatekeeper ──
+    // ═══════════════════════════════════════════
+    console.log(`[intent] Running Gatekeeper…`);
+    const gatekeeperResult = await runGatekeeper();
+    console.log(`[intent] Gatekeeper reasoning: ${gatekeeperResult.reasoning}`);
+
+    const assessments = (await readMany("assessments")) as Record<string, unknown>[];
+    const latestAssessment = assessments.sort((a, b) =>
+      (b.assessedAt as string).localeCompare(a.assessedAt as string)
+    )[0];
+
+    await write("messages:latest", { message: null, timestamp: null });
+
+    // ═══════════════════════════════════════════
+    // ── Step 3: Detect intent type from AI plan steps ──
+    // ═══════════════════════════════════════════
+    const planSteps = (latestPlan.steps as any[]) || [];
+    const intentType = detectIntentType(planSteps);
+    const step0 = planSteps[0] || {};
+    const params = step0.params || {};
+    const planSummary = latestPlan.summary as string;
+    const totalEstimatedValueUsd = (latestPlan.totalEstimatedValueUsd as number) || 0;
+
+    const verdict = (latestAssessment?.verdict as string) ?? "NEEDS_APPROVAL";
+    const riskScore = (latestAssessment?.riskScore as number) ?? 50;
+    const plannerReasoning = plannerResult.reasoning;
+    const gatekeeperReasoning = gatekeeperResult.reasoning;
+
+    console.log(`[intent] Intent type: ${intentType}`);
     console.log(`[intent] Verdict: ${verdict} (risk: ${riskScore})`);
 
-    // ── Step 3: Fetch real Uniswap quote ──
-    let quoteData = null;
-    const swapStep = planSteps.find((s: any) =>
-      s.action === "swap" || s.protocol === "uniswap" || s.protocol === "Uniswap"
-    );
+    const baseAssessment = {
+      verdict,
+      riskScore,
+      reasons: [gatekeeperReasoning],
+      requiresLedger: verdict === "NEEDS_APPROVAL",
+    };
+    const agentReasoning = { planner: plannerReasoning, gatekeeper: gatekeeperReasoning };
 
-    if (swapStep && walletAddress) {
-      const params = swapStep.params || {};
-      const tokenIn = params.tokenIn || params.from || (parsed?.tokenIn ?? WETH_SEPOLIA);
-      const tokenOut = params.tokenOut || params.to || (parsed?.tokenOut ?? USDC_SEPOLIA);
-      const rawAmount = params.amount || params.value || parsed?.amount || "0";
-
-      // Convert to wei using correct decimals per token
-      let amountWei: string;
-      if (parsed) {
-        amountWei = parsed.amountWei;
-      } else if (!String(rawAmount).match(/^\d{10,}$/)) {
-        amountWei = toTokenWei(String(rawAmount), tokenIn).toString();
-      } else {
-        amountWei = String(rawAmount);
-      }
-
-      // Use Safe as swapper when available (tokens live in Safe)
-      const swapper = safeAddress || walletAddress;
-
-      console.log(`[intent] ── Quote Request ──`);
-      console.log(`[intent]   tokenIn:   ${tokenIn}`);
-      console.log(`[intent]   tokenOut:  ${tokenOut}`);
-      console.log(`[intent]   amountWei: ${amountWei}`);
-      console.log(`[intent]   swapper:   ${swapper}${safeAddress ? ' (Safe)' : ' (Ledger)'}`);
-
-      try {
-        const approvalTx = await checkApproval({
-          walletAddress: swapper,
-          token: tokenIn,
-          tokenOut: tokenOut,
-          amount: amountWei,
-        });
-        console.log(`[intent]   approval needed: ${!!approvalTx}`);
-
-        const quoteResult = await fetchQuoteWithRouting(
-          { swapper, tokenIn, tokenOut, amount: amountWei },
-          "autonomous"
-        );
-
-        console.log(`[intent] ── Quote Response ──`);
-        console.log(`[intent]   routing:      ${quoteResult.routing}`);
-        console.log(`[intent]   mevProtected: ${quoteResult.isMevProtected}`);
-        console.log(`[intent]   permitData:   ${quoteResult.permitData ? "yes" : "no"}`);
-        console.log(`[intent]   quote keys:   ${Object.keys(quoteResult.quote).join(", ")}`);
-
-        quoteData = {
-          tradeId: crypto.randomUUID(),
-          quote: quoteResult.quote,
-          permitData: quoteResult.permitData,
-          routing: quoteResult.routing,
-          isMevProtected: quoteResult.isMevProtected,
-          isGasless: quoteResult.isGasless,
-          riskLevel: "autonomous",
-          approvalNeeded: !!approvalTx,
-          approvalTx,
-          tokenIn,
-          tokenOut,
-          amount: amountWei,
-        };
-      } catch (err: any) {
-        console.error(`[intent] Quote error: ${err.message}`);
-      }
-    } else {
-      console.log(`[intent] No swap step found or no wallet — skipping quote`);
-      if (planSteps.length > 0) {
-        console.log(`[intent] Steps: ${JSON.stringify(planSteps, null, 2)}`);
-      }
-    }
-
-    console.log(`[intent] ═════════════════════════���═════════════\n`);
-
-    // ── Auto-execute via Safe if verdict allows ──
-    if (verdict === "AUTO_EXECUTE" && safeAddress && quoteData) {
-      try {
-        console.log(`[intent] AUTO_EXECUTE — executing via Safe...`);
-
-        const agentKey = process.env.AGENT_PRIVATE_KEY;
-        if (!agentKey) throw new Error("AGENT_PRIVATE_KEY not set");
-
-        const { getApprovalTxsForSwap, executeBatchViaSafe } = await import("../safe/transaction");
-        const { submitSwap } = await import("../uniswap/api");
-
-        // Step 1: Get swap calldata first — we need the actual router address
-        // (the API may use a different router than our hardcoded constant)
-        console.log(`[intent] AUTO_EXECUTE — fetching fresh quote...`);
-        const freshQuote = await fetchQuoteWithRouting(
-          { swapper: safeAddress, tokenIn: quoteData.tokenIn, tokenOut: quoteData.tokenOut, amount: quoteData.amount },
-          "autonomous"
-        );
-        const swapTx = await submitSwap(freshQuote.quote, null, undefined);
-        console.log(`[intent] AUTO_EXECUTE swap tx: to=${swapTx.to}, value=${swapTx.value}`);
-
-        // Step 2: Check what Permit2 approvals are needed for the ACTUAL router
-        // Safe can't sign EIP-712 Permit2 messages, so we use on-chain approve() instead
-        const batch: Array<{ to: string; value: string; data: string }> = [];
-        const ETH_ADDRESS = "0x0000000000000000000000000000000000000000";
-        if (quoteData.tokenIn.toLowerCase() !== ETH_ADDRESS.toLowerCase()) {
-          const approvalTxs = await getApprovalTxsForSwap(
-            safeAddress, quoteData.tokenIn, BigInt(quoteData.amount || "0"), swapTx.to
-          );
-          batch.push(...approvalTxs);
-        }
-
-        // Normalize hex value to decimal for Safe SDK
-        const swapValue = swapTx.value?.startsWith('0x')
-          ? BigInt(swapTx.value).toString()
-          : (swapTx.value || '0');
-        batch.push({ to: swapTx.to, value: swapValue, data: swapTx.data });
-
-        // Step 3: Execute all as ONE Safe tx (approvals + swap batched atomically)
-        // When batch has multiple txs, SDK uses MultiSend — single nonce, single signature
-        // Use Uniswap's gas estimate + Safe overhead; bypass eth_estimateGas which
-        // incorrectly reverts with GS013 for complex calldata
-        const uniswapGas = parseInt(freshQuote.quote?.gasUseEstimate || '300000', 10);
-        const safeGasLimit = String(uniswapGas + 150000);
-        console.log(`[intent] AUTO_EXECUTE — executing ${batch.length} operation(s) via Safe${batch.length > 1 ? ' (MultiSend batch)' : ''}, gasLimit=${safeGasLimit}...`);
-        const txHash = await executeBatchViaSafe(safeAddress, agentKey, batch, safeGasLimit);
-
-        // Log to 0G Storage
-        const { logTradeResult } = await import("../../executor/logResult");
-        const tradeId = quoteData.tradeId || crypto.randomUUID();
-        await logTradeResult(tradeId, txHash, "success");
-
-        console.log(`[intent] AUTO_EXECUTE success: ${txHash}`);
-        res.json({
-          status: "ok",
-          autoExecuted: true,
-          txHash,
-          explorerUrl: `https://sepolia.etherscan.io/tx/${txHash}`,
-          plan: { id: tradeId, summary: planSummary, steps: planSteps, totalEstimatedValueUsd },
-          assessment: { verdict, riskScore, reasons: [gatekeeperReasoning], requiresLedger: false },
-          agentReasoning: { planner: plannerReasoning, gatekeeper: gatekeeperReasoning },
-        });
+    // ═══════════════════════════════════════════
+    // ── BALANCE — instant on-chain read ──
+    // ═══════════════════════════════════════════
+    if (intentType === "balance") {
+      if (!walletAddress) {
+        res.status(400).json({ error: "Connect wallet first" });
         return;
-      } catch (err: any) {
-        console.error(`[intent] AUTO_EXECUTE failed: ${err.message}`);
-        console.error(err.stack);
-        // Fall through to manual flow
       }
+      if (!balances) {
+        const ethBal = await provider.getBalance(balanceAddress!);
+        balances = { eth: Number(ethers.formatEther(ethBal)), weth: 0, usdc: 0, totalUsd: Number(ethers.formatEther(ethBal)) * 2500 };
+      }
+
+      console.log(`[intent] ✓ Balance query answered`);
+      res.json({
+        status: "ok",
+        intentType: "balance",
+        autoExecuted: false,
+        safeAddress,
+        plan: {
+          id: crypto.randomUUID(),
+          summary: `Portfolio: ${balances.eth.toFixed(4)} ETH, ${balances.weth.toFixed(4)} WETH, ${balances.usdc.toFixed(2)} USDC`,
+          steps: [],
+          totalEstimatedValueUsd: balances.totalUsd,
+        },
+        assessment: { verdict: "INFO", riskScore: 0, reasons: ["Read-only query"], requiresLedger: false },
+        balances,
+        agentReasoning,
+      });
+      return;
     }
+
+    // ═══════════════════════════════════════════
+    // ── SEND — build unsigned transfer tx ──
+    // ═══════════════════════════════════════════
+    if (intentType === "send") {
+      const symbol = params.symbol || "ETH";
+      const amount = String(params.amount || "0");
+      const to = params.to || "";
+      const token = params.token || WETH_SEPOLIA;
+
+      console.log(`[intent] ✓ Send: ${amount} ${symbol} → ${to}`);
+
+      let unsignedTx: { to: string; data: string; value: string };
+      if (symbol.toUpperCase() === "ETH") {
+        unsignedTx = { to, data: "0x", value: ethers.parseEther(amount).toString() };
+      } else {
+        const tokenAddr = token;
+        const decimals = TOKEN_DECIMALS[tokenAddr.toLowerCase()] ?? 18;
+        const amountWei = ethers.parseUnits(amount, decimals);
+        const erc20Iface = new ethers.Interface(["function transfer(address to, uint256 amount)"]);
+        unsignedTx = { to: tokenAddr, data: erc20Iface.encodeFunctionData("transfer", [to, amountWei]), value: "0" };
+      }
+
+      res.json({
+        status: "ok",
+        intentType: "send",
+        autoExecuted: false,
+        safeAddress,
+        plan: { id: crypto.randomUUID(), summary: planSummary, steps: planSteps, totalEstimatedValueUsd },
+        assessment: baseAssessment,
+        sendData: { unsignedTx, token, symbol, amount, to },
+        agentReasoning,
+      });
+      return;
+    }
+
+    // ═══════════════════════════════════════════
+    // ── ADD LIQUIDITY — check approvals ──
+    // ═══════════════════════════════════════════
+    if (intentType === "add_liquidity") {
+      const tokenA = params.tokenA || WETH_SEPOLIA;
+      const tokenB = params.tokenB || USDC_SEPOLIA;
+      const amountA = String(params.amountA || "0");
+      const amountB = String(params.amountB || "0");
+      const symbolA = params.symbolA || symbolFromAddress(tokenA, "WETH");
+      const symbolB = params.symbolB || symbolFromAddress(tokenB, "USDC");
+      const feeTier = params.feeTier || 3000;
+
+      console.log(`[intent] ✓ Add liquidity: ${amountA} ${symbolA} + ${amountB} ${symbolB} (fee: ${feeTier / 10000}%)`);
+
+      let quoteData = null;
+      const swapper = safeAddress || walletAddress;
+      if (swapper) {
+        try {
+          const amountAWei = toTokenWei(amountA, tokenA).toString();
+          const amountBWei = toTokenWei(amountB, tokenB).toString();
+          const [approvalA, approvalB] = await Promise.all([
+            checkApproval({ walletAddress: swapper, token: tokenA, tokenOut: tokenB, amount: amountAWei }),
+            checkApproval({ walletAddress: swapper, token: tokenB, tokenOut: tokenA, amount: amountBWei }),
+          ]);
+          quoteData = {
+            tradeId: crypto.randomUUID(), routing: "CLASSIC", riskLevel: "autonomous",
+            approvalNeeded: !!(approvalA || approvalB),
+            approvalTxA: approvalA, approvalTxB: approvalB,
+            tokenA, tokenB, amountA: amountAWei, amountB: amountBWei, feeTier,
+          };
+        } catch (err: any) {
+          console.error(`[intent] Liquidity approval check error: ${err.message}`);
+        }
+      }
+
+      res.json({
+        status: "ok",
+        intentType: "add_liquidity",
+        autoExecuted: false,
+        safeAddress,
+        plan: { id: crypto.randomUUID(), summary: planSummary, steps: planSteps, totalEstimatedValueUsd },
+        assessment: baseAssessment,
+        quoteData,
+        agentReasoning,
+      });
+      return;
+    }
+
+    // ═══════════════════════════════════════════
+    // ── SWAP — fetch Uniswap quote ──
+    // ═══════════════════════════════════════════
+    if (intentType === "swap") {
+      const tokenIn = params.tokenIn || WETH_SEPOLIA;
+      const tokenOut = params.tokenOut || USDC_SEPOLIA;
+      const rawAmount = String(params.amount || "0");
+      const symbolIn = params.symbolIn || symbolFromAddress(tokenIn, "ETH");
+      const symbolOut = params.symbolOut || symbolFromAddress(tokenOut, "USDC");
+
+      // Convert to wei using correct decimals
+      const amountWei = String(rawAmount).match(/^\d{10,}$/)
+        ? rawAmount
+        : toTokenWei(rawAmount, tokenIn).toString();
+
+      console.log(`[intent] ✓ Swap: ${rawAmount} ${symbolIn} → ${symbolOut} (${amountWei} wei)`);
+
+      let quoteData = null;
+      const swapper = safeAddress || walletAddress;
+      if (swapper) {
+        try {
+          const approvalTx = await checkApproval({ walletAddress: swapper, token: tokenIn, tokenOut, amount: amountWei });
+          console.log(`[intent]   approval needed: ${!!approvalTx}`);
+
+          const quoteResult = await fetchQuoteWithRouting(
+            { swapper, tokenIn, tokenOut, amount: amountWei }, "autonomous"
+          );
+
+          console.log(`[intent]   routing: ${quoteResult.routing}, permit: ${quoteResult.permitData ? "yes" : "no"}`);
+
+          quoteData = {
+            tradeId: crypto.randomUUID(),
+            quote: quoteResult.quote, permitData: quoteResult.permitData,
+            routing: quoteResult.routing, isMevProtected: quoteResult.isMevProtected,
+            isGasless: quoteResult.isGasless, riskLevel: "autonomous",
+            approvalNeeded: !!approvalTx, approvalTx,
+            tokenIn, tokenOut, amount: amountWei,
+          };
+        } catch (err: any) {
+          console.error(`[intent] Quote error: ${err.message}`);
+        }
+      }
+
+      // ── Auto-execute via Safe if verdict allows ──
+      if (verdict === "AUTO_EXECUTE" && safeAddress && quoteData) {
+        try {
+          console.log(`[intent] AUTO_EXECUTE — executing via Safe...`);
+
+          const agentKey = process.env.AGENT_PRIVATE_KEY;
+          if (!agentKey) throw new Error("AGENT_PRIVATE_KEY not set");
+
+          const { getApprovalTxsForSwap, executeBatchViaSafe } = await import("../safe/transaction");
+          const { submitSwap } = await import("../uniswap/api");
+
+          console.log(`[intent] AUTO_EXECUTE — fetching fresh quote...`);
+          const freshQuote = await fetchQuoteWithRouting(
+            { swapper: safeAddress, tokenIn: quoteData.tokenIn, tokenOut: quoteData.tokenOut, amount: quoteData.amount },
+            "autonomous"
+          );
+          const swapTx = await submitSwap(freshQuote.quote, null, undefined);
+          console.log(`[intent] AUTO_EXECUTE swap tx: to=${swapTx.to}, value=${swapTx.value}`);
+
+          const batch: Array<{ to: string; value: string; data: string }> = [];
+          const ETH_ADDRESS = "0x0000000000000000000000000000000000000000";
+          if (quoteData.tokenIn.toLowerCase() !== ETH_ADDRESS.toLowerCase()) {
+            const approvalTxs = await getApprovalTxsForSwap(
+              safeAddress, quoteData.tokenIn, BigInt(quoteData.amount || "0"), swapTx.to
+            );
+            batch.push(...approvalTxs);
+          }
+
+          const swapValue = swapTx.value?.startsWith('0x')
+            ? BigInt(swapTx.value).toString()
+            : (swapTx.value || '0');
+          batch.push({ to: swapTx.to, value: swapValue, data: swapTx.data });
+
+          const uniswapGas = parseInt(freshQuote.quote?.gasUseEstimate || '300000', 10);
+          const safeGasLimit = String(uniswapGas + 150000);
+          console.log(`[intent] AUTO_EXECUTE — executing ${batch.length} op(s) via Safe, gasLimit=${safeGasLimit}...`);
+          const txHash = await executeBatchViaSafe(safeAddress, agentKey, batch, safeGasLimit);
+
+          const { logTradeResult } = await import("../../executor/logResult");
+          const tradeId = quoteData.tradeId || crypto.randomUUID();
+          await logTradeResult(tradeId, txHash, "success");
+
+          console.log(`[intent] AUTO_EXECUTE success: ${txHash}`);
+          res.json({
+            status: "ok",
+            intentType: "swap",
+            autoExecuted: true,
+            txHash,
+            explorerUrl: `https://sepolia.etherscan.io/tx/${txHash}`,
+            plan: { id: tradeId, summary: planSummary, steps: planSteps, totalEstimatedValueUsd },
+            assessment: { verdict, riskScore, reasons: [gatekeeperReasoning], requiresLedger: false },
+            agentReasoning,
+          });
+          return;
+        } catch (err: any) {
+          console.error(`[intent] AUTO_EXECUTE failed: ${err.message}`);
+          console.error(err.stack);
+          // Fall through to manual flow
+        }
+      }
+
+      res.json({
+        status: "ok",
+        intentType: "swap",
+        autoExecuted: false,
+        safeAddress,
+        plan: { id: quoteData?.tradeId || crypto.randomUUID(), summary: planSummary, steps: planSteps, totalEstimatedValueUsd },
+        assessment: baseAssessment,
+        quoteData,
+        agentReasoning,
+      });
+      return;
+    }
+
+    // ═══════════════════════════════════════════
+    // ── UNKNOWN — return AI plan as-is ──
+    // ═══════════════════════════════════════════
+    console.log(`[intent] Unknown intent type, returning raw AI plan`);
+    console.log(`[intent] ═══════════════════════════════════════\n`);
 
     res.json({
       status: "ok",
+      intentType: "unknown",
       autoExecuted: false,
       safeAddress,
-      plan: {
-        id: quoteData?.tradeId || crypto.randomUUID(),
-        summary: planSummary,
-        steps: planSteps,
-        totalEstimatedValueUsd,
-      },
-      assessment: {
-        verdict,
-        riskScore,
-        reasons: [gatekeeperReasoning],
-        requiresLedger: verdict === "NEEDS_APPROVAL",
-      },
-      quoteData,
-      agentReasoning: {
-        planner: plannerReasoning,
-        gatekeeper: gatekeeperReasoning,
-      },
+      plan: { id: crypto.randomUUID(), summary: planSummary, steps: planSteps, totalEstimatedValueUsd },
+      assessment: baseAssessment,
+      agentReasoning,
     });
   } catch (err: any) {
     console.error("[intent] Pipeline error:", err);

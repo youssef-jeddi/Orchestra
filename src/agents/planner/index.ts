@@ -33,8 +33,11 @@ WHEN YOU SEE A USER MESSAGE (message is not null in context):
 3. If the intent involves a swap, you can directly write the plan (the system will fetch the real quote afterward). Do NOT call getUniswapQuote — just write the plan with the swap details.
 4. Call writeActionPlan with:
    - intent: a clear summary of what the plan does (e.g. "Swap 0.01 WETH for USDC on Uniswap")
-   - steps: array with one TransactionStep per action. For swaps, use: { protocol: "uniswap", action: "swap", params: { tokenIn: "<address>", tokenOut: "<address>", amount: "<human amount like 0.01>" }, estimatedGasWei: "300000", order: 0 }
-   - totalEstimatedValueUsd: estimated USD value (use rough estimate, e.g. ETH ≈ $2000)
+   - steps: array with one TransactionStep per action. For swaps, use: { protocol: "uniswap", action: "swap", params: { tokenIn: "<address>", tokenOut: "<address>", amount: "<human amount like 0.01>", symbolIn: "WETH", symbolOut: "USDC" }, estimatedGasWei: "300000", order: 0 }
+   - For sends, use: { protocol: "native", action: "send", params: { token: "<address or 0x0>", to: "<recipient>", amount: "<human amount>", symbol: "ETH" }, estimatedGasWei: "21000", order: 0 }
+   - For balance queries, use: { protocol: "native", action: "balance", params: {}, estimatedGasWei: "0", order: 0 }
+   - For liquidity, use: { protocol: "uniswap", action: "add_liquidity", params: { tokenA: "<address>", tokenB: "<address>", amountA: "<amount>", amountB: "<amount>", symbolA: "WETH", symbolB: "USDC", feeTier: 3000 }, estimatedGasWei: "500000", order: 0 }
+   - totalEstimatedValueUsd: estimated USD value. Use: ETH/WETH ≈ $2500 per token, USDC ≈ $1 per token. For "swap 2 USDC for ETH", the value is $2 (the INPUT amount matters). For "swap 0.01 ETH for USDC", the value is $25.
    - flagId: "user-message"
 5. If you need more information before writing the plan, call the appropriate action first (getUniswapQuote, estimateGas)
 
