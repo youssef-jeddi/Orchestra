@@ -1006,10 +1006,16 @@ app.get("/health", (_req, res) => {
 
 // ─── Start ───
 server.listen(PORT, "0.0.0.0", () => {
+  const addr = server.address();
   console.log(`\n  ⚡ SafeSwarm Ledger Bridge`);
   console.log(`  ─────────────────────────`);
-  console.log(`  HTTP:  http://localhost:${PORT}`);
-  console.log(`  WS:    ws://localhost:${PORT}/ws`);
+  console.log(`  Bound:  ${JSON.stringify(addr)}`);
+  console.log(`  HTTP:  http://0.0.0.0:${PORT}`);
+  console.log(`  WS:    ws://0.0.0.0:${PORT}/ws`);
   console.log(`  Mock:  curl -X POST http://localhost:${PORT}/mock-trade -H "Content-Type: application/json" -d '{"summary":"Swap 1 ETH → USDC"}'`);
   console.log();
+});
+
+server.on("error", (err) => {
+  console.error("Server error:", err);
 });
