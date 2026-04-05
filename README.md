@@ -2,7 +2,7 @@
 
 An AI financial agent that manages your onchain portfolio via natural language. Talk to it like an assistant — *"swap 10 USDC for ETH"*, *"send 0.5 ETH to vitalik.eth"*, *"check my balance"* — and it handles everything autonomously. High-value transactions require physical Ledger hardware approval; small ones execute instantly.
 
-Built for **ETHGlobal Cannes 2025**.
+Built for **ETHGlobal Cannes 2026**.
 
 ---
 
