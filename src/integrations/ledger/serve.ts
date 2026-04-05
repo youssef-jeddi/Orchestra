@@ -35,11 +35,15 @@ const PORT = Number(process.env.PORT) || Number(process.env.LEDGER_BRIDGE_PORT) 
 const app = express();
 app.use(express.json());
 
-// CORS — allow Vite dev server (port 3000) to call us
+// CORS — allow cross-origin requests from Vercel frontend
 app.use((_req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Headers", "Content-Type");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  if (_req.method === "OPTIONS") {
+    res.sendStatus(204);
+    return;
+  }
   next();
 });
 
