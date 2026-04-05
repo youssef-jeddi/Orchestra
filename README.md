@@ -1,6 +1,6 @@
 # Orchestra
 
-An AI financial agent that manages your onchain portfolio via natural language. Talk to it like an assistant — *"swap 10 USDC for ETH"*, *"send 0.5 ETH to vitalik.eth"*, *"check my balance"* — and it handles everything autonomously. High-value transactions require physical Ledger hardware approval; small ones execute instantly.
+An AI financial agent that manages your onchain portfolio via natural language. Talk to it like an assistant, *"swap 10 USDC for ETH"*, *"send 0.5 ETH to vitalik.eth"*, *"check my balance"*, and it handles everything autonomously. High-value transactions require physical Ledger hardware approval; small ones execute instantly.
 
 Built for **ETHGlobal Cannes 2026**.
 
@@ -225,4 +225,4 @@ If the limit had been $100, step 3 would return `AUTO_EXECUTE` and the swap woul
 
 ## Team
 
-Built by the Orchestra team at ETHGlobal Cannes 2025.
+Built by the Orchestra team at ETHGlobal Cannes 2026.
