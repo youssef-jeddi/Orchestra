@@ -30,7 +30,7 @@ import { getTokens } from "../uniswap/types";
 
 const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || "https://eth-sepolia.g.alchemy.com/v2/demo";
 const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC);
-const PORT = Number(process.env.LEDGER_BRIDGE_PORT) || 3001;
+const PORT = Number(process.env.PORT) || Number(process.env.LEDGER_BRIDGE_PORT) || 3001;
 
 const app = express();
 app.use(express.json());

@@ -1,8 +1,9 @@
 // ─── Bridge HTTP + WebSocket helpers ───
-// All communication with the backend bridge server (localhost:3001)
+// All communication with the backend bridge server
 
-export const BRIDGE_HTTP = 'http://localhost:3001';
-export const BRIDGE_WS = 'ws://localhost:3001/ws';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+export const BRIDGE_HTTP = API_URL;
+export const BRIDGE_WS = API_URL.replace(/^http/, 'ws') + '/ws';
 
 export async function bridgeFetch(path, options = {}) {
   const res = await fetch(`${BRIDGE_HTTP}${path}`, {
