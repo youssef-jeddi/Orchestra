@@ -1005,7 +1005,7 @@ app.get("/health", (_req, res) => {
 });
 
 // ─── Start ───
-server.listen(PORT, () => {
+server.listen(PORT, "0.0.0.0", () => {
   console.log(`\n  ⚡ SafeSwarm Ledger Bridge`);
   console.log(`  ─────────────────────────`);
   console.log(`  HTTP:  http://localhost:${PORT}`);
