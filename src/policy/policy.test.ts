@@ -175,4 +175,127 @@ test("decide: add_liquidity respects limit", () => {
   assert.equal(decide({ intentType: "add_liquidity", valueUsd: 300, autoApproveLimit: 100, plan }).verdict, "NEEDS_APPROVAL");
 });
 
+// ── decide: extended policy rules (Axis-3) ──
+const swapPlan = (tokenIn: string, tokenOut: string) => ({
+  summary: "swap",
+  steps: [{ action: "swap", params: { tokenIn, tokenOut } }],
+});
+const sendPlan = (to: string) => ({ summary: "send", steps: [{ action: "send", params: { to } }] });
+
+test("decide: base behaviour unchanged when no profile/history", () => {
+  const d = decide({ intentType: "swap", valueUsd: 25, autoApproveLimit: 100, plan: okPlan });
+  assert.equal(d.verdict, "AUTO_EXECUTE");
+  assert.deepEqual(d.triggered, []);
+});
+
+test("decide: unverified token → escalates", () => {
+  const d = decide({
+    intentType: "swap", valueUsd: 10, autoApproveLimit: 100,
+    plan: swapPlan(WETH_SEPOLIA, "0xBADtoken"),
+    profile: { verifiedTokens: [WETH_SEPOLIA, USDC_SEPOLIA] },
+  });
+  assert.equal(d.verdict, "NEEDS_APPROVAL");
+  assert.deepEqual(d.triggered, ["unverified-token"]);
+});
+test("decide: verified token under limit → AUTO_EXECUTE", () => {
+  const d = decide({
+    intentType: "swap", valueUsd: 10, autoApproveLimit: 100,
+    plan: swapPlan(WETH_SEPOLIA, USDC_SEPOLIA),
+    profile: { verifiedTokens: [WETH_SEPOLIA, USDC_SEPOLIA] },
+  });
+  assert.equal(d.verdict, "AUTO_EXECUTE");
+});
+
+test("decide: unknown recipient → escalates (send)", () => {
+  const known = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045";
+  const d = decide({
+    intentType: "send", valueUsd: 5, autoApproveLimit: 100,
+    plan: sendPlan("0xStranger"), profile: { knownAddresses: [known] },
+  });
+  assert.equal(d.verdict, "NEEDS_APPROVAL");
+  assert.deepEqual(d.triggered, ["unknown-recipient"]);
+});
+test("decide: known recipient (case-insensitive) → AUTO_EXECUTE", () => {
+  const known = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045";
+  const d = decide({
+    intentType: "send", valueUsd: 5, autoApproveLimit: 100,
+    plan: sendPlan(known.toLowerCase()), profile: { knownAddresses: [known] },
+  });
+  assert.equal(d.verdict, "AUTO_EXECUTE");
+});
+
+test("decide: daily USD velocity cap → escalates", () => {
+  const now = Date.parse("2026-07-20T12:00:00Z");
+  const history = [
+    { valueUsd: 40, at: "2026-07-20T09:00:00Z" },
+    { valueUsd: 40, at: "2026-07-20T10:00:00Z" },
+  ];
+  const d = decide({
+    intentType: "swap", valueUsd: 30, autoApproveLimit: 100, plan: okPlan,
+    profile: { dailyLimitUsd: 100 }, history, now,
+  });
+  assert.equal(d.verdict, "NEEDS_APPROVAL"); // 80 + 30 > 100
+  assert.deepEqual(d.triggered, ["daily-usd-velocity"]);
+});
+test("decide: velocity ignores activity older than 24h", () => {
+  const now = Date.parse("2026-07-20T12:00:00Z");
+  const history = [{ valueUsd: 500, at: "2026-07-18T12:00:00Z" }]; // 2 days old
+  const d = decide({
+    intentType: "swap", valueUsd: 30, autoApproveLimit: 100, plan: okPlan,
+    profile: { dailyLimitUsd: 100 }, history, now,
+  });
+  assert.equal(d.verdict, "AUTO_EXECUTE"); // old spend excluded
+});
+test("decide: daily count velocity cap → escalates", () => {
+  const now = Date.parse("2026-07-20T12:00:00Z");
+  const history = [
+    { valueUsd: 1, at: "2026-07-20T09:00:00Z" },
+    { valueUsd: 1, at: "2026-07-20T10:00:00Z" },
+    { valueUsd: 1, at: "2026-07-20T11:00:00Z" },
+  ];
+  const d = decide({
+    intentType: "swap", valueUsd: 1, autoApproveLimit: 100, plan: okPlan,
+    profile: { maxAutoTxPerDay: 3 }, history, now,
+  });
+  assert.equal(d.verdict, "NEEDS_APPROVAL");
+  assert.deepEqual(d.triggered, ["daily-count-velocity"]);
+});
+
+test("decide: habit anomaly → escalates", () => {
+  const d = decide({
+    intentType: "swap", valueUsd: 600, autoApproveLimit: 1000, plan: okPlan,
+    profile: { typicalMaxUsd: 50 }, // 600 > 50*10
+  });
+  assert.equal(d.verdict, "NEEDS_APPROVAL");
+  assert.deepEqual(d.triggered, ["habit-anomaly"]);
+});
+test("decide: within habit range → AUTO_EXECUTE", () => {
+  const d = decide({
+    intentType: "swap", valueUsd: 400, autoApproveLimit: 1000, plan: okPlan,
+    profile: { typicalMaxUsd: 50 }, // 400 < 50*10
+  });
+  assert.equal(d.verdict, "AUTO_EXECUTE");
+});
+
+test("decide: multiple escalations combine, max risk + all rules", () => {
+  const d = decide({
+    intentType: "send", valueUsd: 5000, autoApproveLimit: 100,
+    plan: sendPlan("0xStranger"),
+    profile: { knownAddresses: ["0xknown"], typicalMaxUsd: 10 },
+  });
+  assert.equal(d.verdict, "NEEDS_APPROVAL");
+  assert.equal(d.riskScore, 70); // max(over-limit 70, unknown-recipient 60, habit 55)
+  assert.ok(d.triggered.includes("over-limit"));
+  assert.ok(d.triggered.includes("unknown-recipient"));
+  assert.ok(d.triggered.includes("habit-anomaly"));
+});
+test("decide: escalation never weakens a block/info", () => {
+  // denylist still wins even with a permissive profile
+  const d = decide({
+    intentType: "swap", valueUsd: 1, autoApproveLimit: 100,
+    plan: okPlan, profile: { verifiedTokens: [], dailyLimitUsd: 999999 },
+  });
+  assert.equal(d.verdict, "AUTO_EXECUTE"); // empty verifiedTokens disables that rule
+});
+
 console.log(`\n${passed} passed`);

@@ -124,14 +124,59 @@ export interface DecisionInput {
   valueUsd: number;
   autoApproveLimit: number;
   plan: PlanShape;
+  /** Optional per-user policy for the extended deterministic rules. */
+  profile?: PolicyProfile;
+  /** Recent auto-approved/executed activity, for velocity + habit rules. */
+  history?: ActivityRecord[];
+  /** Injectable clock (ms) for deterministic velocity tests. Defaults to Date.now(). */
+  now?: number;
+}
+
+/**
+ * Per-user deterministic policy. Every field is optional — an absent field
+ * disables its rule, so a bare profile (or no profile) reproduces the original
+ * amount-vs-limit behaviour exactly.
+ */
+export interface PolicyProfile {
+  /** Destination allow-list for `send` (any case; compared lowercased). */
+  knownAddresses?: string[];
+  /** Token allow-list. If non-empty, any token NOT listed forces approval. */
+  verifiedTokens?: string[];
+  /** Rolling 24h cap on auto-approved USD. Exceeding it forces approval. */
+  dailyLimitUsd?: number;
+  /** Rolling 24h cap on number of auto-approvals. Reaching it forces approval. */
+  maxAutoTxPerDay?: number;
+  /** Habit baseline: the user's typical max single-tx USD. */
+  typicalMaxUsd?: number;
+}
+
+/** One past auto-approved/executed action, used by velocity + habit rules. */
+export interface ActivityRecord {
+  valueUsd: number;
+  /** ISO timestamp. */
+  at: string;
+  to?: string;
+  token?: string;
 }
 
 export interface PolicyDecision {
   verdict: Verdict;
   riskScore: number;
-  /** Deterministic, human-readable explanation of the rule that fired. */
+  /** Deterministic, human-readable explanation of the rule(s) that fired. */
   reason: string;
   requiresLedger: boolean;
+  /** Machine-readable slugs of every rule that pushed toward approval. */
+  triggered: string[];
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** A tx this many times the user's typical max is flagged as anomalous. */
+const HABIT_ANOMALY_MULTIPLE = 10;
+
+interface Escalation {
+  rule: string;
+  reason: string;
+  risk: number;
 }
 
 /** Scan plan steps for any token address on the denylist. Returns it, or null. */
@@ -147,62 +192,164 @@ function findDenylistedToken(steps: any[]): string | null {
   return null;
 }
 
+/** First token in the plan not present in the verified allow-list, or null. */
+function findUnverifiedToken(steps: any[], verified: string[]): string | null {
+  const allow = new Set(verified.map((a) => a.toLowerCase()));
+  for (const step of steps) {
+    const p = step?.params || {};
+    for (const addr of [p.tokenIn, p.tokenOut, p.token, p.tokenA, p.tokenB]) {
+      if (typeof addr === "string" && !allow.has(addr.toLowerCase())) {
+        return addr;
+      }
+    }
+  }
+  return null;
+}
+
+/** Recipient address of a `send` plan, or null. */
+function sendRecipient(steps: any[]): string | null {
+  const to = steps?.[0]?.params?.to;
+  return typeof to === "string" && to ? to : null;
+}
+
 /**
  * The authoritative verdict. Deterministic, explainable, fail-closed.
- * Rule order mirrors the old Gatekeeper prompt, but as code:
- *   1. balance          → INFO (read-only)
- *   2. malformed plan    → BLOCKED
- *   3. denylisted token  → BLOCKED
- *   4. value vs limit    → AUTO_EXECUTE / NEEDS_APPROVAL
- *   5. unrecognized      → NEEDS_APPROVAL (fail closed)
+ *
+ * Order:
+ *   1. balance                 → INFO (read-only)
+ *   2. malformed plan          → BLOCKED
+ *   3. denylisted token        → BLOCKED
+ *   4. unrecognized action     → NEEDS_APPROVAL (fail closed)
+ *   5. escalation rules        → each can force NEEDS_APPROVAL, none can weaken:
+ *        · amount over limit
+ *        · unverified token        (profile.verifiedTokens)
+ *        · unknown recipient       (profile.knownAddresses, send only)
+ *        · daily USD velocity      (profile.dailyLimitUsd + history)
+ *        · daily count velocity    (profile.maxAutoTxPerDay + history)
+ *        · habit anomaly           (profile.typicalMaxUsd)
+ *   6. otherwise               → AUTO_EXECUTE
  */
 export function decide(input: DecisionInput): PolicyDecision {
-  const { intentType, valueUsd, autoApproveLimit, plan } = input;
+  const { intentType, valueUsd, autoApproveLimit, plan, profile, history, now } = input;
 
   // 1. Read-only query.
   if (intentType === "balance") {
-    return { verdict: "INFO", riskScore: 0, reason: "Read-only query — no funds move.", requiresLedger: false };
+    return { verdict: "INFO", riskScore: 0, reason: "Read-only query — no funds move.", requiresLedger: false, triggered: [] };
   }
 
   // 2. Malformed plan.
   if (!plan || typeof plan.summary !== "string" || plan.summary.trim() === "") {
-    return { verdict: "BLOCKED", riskScore: 100, reason: "Plan is malformed (missing summary).", requiresLedger: false };
+    return { verdict: "BLOCKED", riskScore: 100, reason: "Plan is malformed (missing summary).", requiresLedger: false, triggered: ["malformed"] };
   }
   const steps = Array.isArray(plan.steps) ? plan.steps : [];
   if (intentType !== "unknown" && steps.length === 0) {
-    return { verdict: "BLOCKED", riskScore: 100, reason: "Plan has no executable steps.", requiresLedger: false };
+    return { verdict: "BLOCKED", riskScore: 100, reason: "Plan has no executable steps.", requiresLedger: false, triggered: ["malformed"] };
   }
 
   // 3. Denylisted token.
   const denied = findDenylistedToken(steps);
   if (denied) {
-    return { verdict: "BLOCKED", riskScore: 100, reason: `Token ${denied} is denylisted.`, requiresLedger: false };
+    return { verdict: "BLOCKED", riskScore: 100, reason: `Token ${denied} is denylisted.`, requiresLedger: false, triggered: ["denylist"] };
   }
 
-  // 4. Value-bearing intents — amount vs the user's auto-approve limit.
-  if (intentType === "swap" || intentType === "send" || intentType === "add_liquidity") {
-    if (valueUsd > autoApproveLimit) {
-      return {
-        verdict: "NEEDS_APPROVAL",
-        riskScore: 70,
-        reason: `$${valueUsd} exceeds your $${autoApproveLimit} auto-approve limit — approval required.`,
-        requiresLedger: true,
-      };
+  // 4. Unrecognized action — fail closed.
+  if (intentType === "unknown") {
+    return { verdict: "NEEDS_APPROVAL", riskScore: 60, reason: "Unrecognized action type — requires manual approval.", requiresLedger: true, triggered: ["unknown-intent"] };
+  }
+
+  // 5. Value-bearing intents (swap / send / add_liquidity): accumulate escalations.
+  const escalations: Escalation[] = [];
+
+  // 5a. Amount vs auto-approve limit.
+  if (valueUsd > autoApproveLimit) {
+    escalations.push({
+      rule: "over-limit",
+      reason: `$${valueUsd} exceeds your $${autoApproveLimit} auto-approve limit — approval required.`,
+      risk: 70,
+    });
+  }
+
+  if (profile) {
+    // 5b. Token allow-list.
+    if (profile.verifiedTokens && profile.verifiedTokens.length > 0) {
+      const unverified = findUnverifiedToken(steps, profile.verifiedTokens);
+      if (unverified) {
+        escalations.push({
+          rule: "unverified-token",
+          reason: `Token ${unverified} is not in your verified list — approval required.`,
+          risk: 65,
+        });
+      }
     }
+
+    // 5c. Destination allow-list (send only).
+    if (intentType === "send" && profile.knownAddresses && profile.knownAddresses.length > 0) {
+      const to = sendRecipient(steps);
+      const allow = new Set(profile.knownAddresses.map((a) => a.toLowerCase()));
+      if (to && !allow.has(to.toLowerCase())) {
+        escalations.push({
+          rule: "unknown-recipient",
+          reason: `Recipient ${to} is not a known address — approval required.`,
+          risk: 60,
+        });
+      }
+    }
+
+    // 5d + 5e. Velocity (needs history).
+    if (history && history.length > 0) {
+      const cutoff = (now ?? Date.now()) - DAY_MS;
+      const recent = history.filter((h) => {
+        const t = Date.parse(h.at);
+        return !Number.isNaN(t) && t >= cutoff;
+      });
+
+      if (profile.dailyLimitUsd != null) {
+        const spent = recent.reduce((s, h) => s + (h.valueUsd || 0), 0);
+        if (spent + valueUsd > profile.dailyLimitUsd) {
+          escalations.push({
+            rule: "daily-usd-velocity",
+            reason: `This would exceed your $${profile.dailyLimitUsd} daily auto-approve limit ($${spent} already used today) — approval required.`,
+            risk: 68,
+          });
+        }
+      }
+
+      if (profile.maxAutoTxPerDay != null && recent.length >= profile.maxAutoTxPerDay) {
+        escalations.push({
+          rule: "daily-count-velocity",
+          reason: `You've reached your ${profile.maxAutoTxPerDay} auto-approvals per day — approval required.`,
+          risk: 60,
+        });
+      }
+    }
+
+    // 5f. Habit anomaly — unusually large vs the user's typical tx size.
+    if (profile.typicalMaxUsd != null && profile.typicalMaxUsd > 0 && valueUsd > profile.typicalMaxUsd * HABIT_ANOMALY_MULTIPLE) {
+      escalations.push({
+        rule: "habit-anomaly",
+        reason: `$${valueUsd} is unusually large versus your typical $${profile.typicalMaxUsd} — approval required.`,
+        risk: 55,
+      });
+    }
+  }
+
+  // 6. Verdict.
+  if (escalations.length > 0) {
     return {
-      verdict: "AUTO_EXECUTE",
-      riskScore: 15,
-      reason: `$${valueUsd} is within your $${autoApproveLimit} auto-approve limit.`,
-      requiresLedger: false,
+      verdict: "NEEDS_APPROVAL",
+      riskScore: Math.max(...escalations.map((e) => e.risk)),
+      reason: escalations.map((e) => e.reason).join(" "),
+      requiresLedger: true,
+      triggered: escalations.map((e) => e.rule),
     };
   }
 
-  // 5. Unrecognized action — fail closed.
   return {
-    verdict: "NEEDS_APPROVAL",
-    riskScore: 60,
-    reason: "Unrecognized action type — requires manual approval.",
-    requiresLedger: true,
+    verdict: "AUTO_EXECUTE",
+    riskScore: 15,
+    reason: `$${valueUsd} is within your $${autoApproveLimit} auto-approve limit.`,
+    requiresLedger: false,
+    triggered: [],
   };
 }
 

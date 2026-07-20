@@ -35,7 +35,10 @@ import {
   resolveAutoApproveLimit,
   computePlanValueUsd,
   decide,
+  type PolicyProfile,
+  type ActivityRecord,
 } from "../../policy";
+import { getPolicyProfile, getRecentActivity, recordActivity, _resetPolicyStoreCache } from "../../policy/store";
 
 const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || "https://eth-sepolia.g.alchemy.com/v2/demo";
 const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC);
@@ -407,17 +410,44 @@ app.post("/intent", async (req, res) => {
       (latestPlan.totalEstimatedValueUsd as number) || 0
     );
 
+    // Load the user's extended policy + recent activity (cached — see policy/store).
+    // These stay undefined without a wallet, and every extended rule is off until
+    // `user:profile.policy` is configured, so today this changes no verdicts.
+    let profile: PolicyProfile | undefined;
+    let history: ActivityRecord[] | undefined;
+    if (walletAddress) {
+      try { profile = await getPolicyProfile(); } catch {}
+      try { history = await getRecentActivity(walletAddress); } catch {}
+    }
+
     // Authoritative deterministic decision.
     const decision = decide({
       intentType,
       valueUsd: totalEstimatedValueUsd,
       autoApproveLimit,
       plan: { summary: planSummary, steps: planSteps },
+      profile,
+      history,
     });
     const verdict = decision.verdict;
     const riskScore = decision.riskScore;
     const plannerReasoning = plannerResult.reasoning;
     const gatekeeperReasoning = decision.reason;
+
+    // Record auto-approved value-bearing actions so velocity/habit rules can see
+    // them (write-through cache + async 0G). Off the hot path.
+    if (
+      walletAddress &&
+      verdict === "AUTO_EXECUTE" &&
+      (intentType === "swap" || intentType === "send" || intentType === "add_liquidity")
+    ) {
+      recordActivity(walletAddress, {
+        valueUsd: totalEstimatedValueUsd,
+        at: new Date().toISOString(),
+        to: params.to,
+        token: params.tokenIn || params.token,
+      }).catch(() => {});
+    }
 
     // Persist the assessment to 0G for audit/history — off the hot path.
     write("user:profile:limit", { autoApproveLimit, updatedAt: new Date().toISOString() }).catch(() => {});
@@ -709,6 +739,40 @@ app.post("/set-compute-provider", (req, res) => {
 
 app.get("/compute-provider", (_req, res) => {
   res.json({ provider: getComputeProvider() });
+});
+
+// ─── Policy config ───
+// Read/merge the user's deterministic policy (user:profile.policy in 0G).
+// Fields: verifiedTokens, knownAddresses, dailyLimitUsd, maxAutoTxPerDay, typicalMaxUsd.
+app.get("/policy", async (_req, res) => {
+  try {
+    const p = (await read("user:profile")) as any;
+    res.json({ policy: (p && p.policy) || {} });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/policy", async (req, res) => {
+  try {
+    const patch = req.body?.policy;
+    if (!patch || typeof patch !== "object") {
+      res.status(400).json({ error: "body must be { policy: { ... } }" });
+      return;
+    }
+    const existing = ((await read("user:profile")) as any) || {};
+    const updated = {
+      ...existing,
+      policy: { ...(existing.policy || {}), ...patch },
+      updatedAt: new Date().toISOString(),
+    };
+    await write("user:profile", updated);
+    _resetPolicyStoreCache(); // pick up the new policy immediately
+    console.log(`[policy] Updated: ${JSON.stringify(updated.policy)}`);
+    res.json({ status: "ok", policy: updated.policy });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ─── Safe onboarding ───
