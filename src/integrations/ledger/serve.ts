@@ -15,7 +15,8 @@ import { fetchQuoteWithRouting } from "../uniswap/routing";
 import { executeSwap } from "../uniswap/execution";
 import { WETH_SEPOLIA, USDC_SEPOLIA, CHAIN_ID } from "../uniswap/types";
 import { runPlanner } from "../../agents/planner/index";
-import { write, read, readMany, append } from "../zero-g/storage";
+import { buildActionPlan } from "../../agents/planner/actions/writeActionPlan";
+import { write, read, append } from "../zero-g/storage";
 import { setComputeProvider, getComputeProvider } from "../zero-g/compute";
 import { deploySafe } from "../safe/deploy";
 import { detectExistingSafe } from "../safe/detect";
@@ -364,14 +365,12 @@ app.post("/intent", async (req, res) => {
     console.log(`[intent] Planner action: ${plannerResult.action}`);
     console.log(`[intent] Planner reasoning: ${plannerResult.reasoning}`);
 
+    // Reconstruct the plan in-process from the Planner's return value — no 0G
+    // read-back. This removes a network round-trip and a concurrency race where
+    // parallel intents could read each other's most-recent plan.
     let latestPlan: Record<string, unknown> | undefined;
-    try {
-      const plans = (await readMany("plans")) as Record<string, unknown>[];
-      latestPlan = plans.sort((a, b) =>
-        (b.createdAt as string).localeCompare(a.createdAt as string)
-      )[0];
-    } catch (planReadErr: any) {
-      console.warn(`[intent] Failed to read plans from 0G (non-critical): ${planReadErr.message}`);
+    if (plannerResult.action === "writeActionPlan") {
+      latestPlan = buildActionPlan(plannerResult.args) as unknown as Record<string, unknown>;
     }
 
     if (!latestPlan) {
