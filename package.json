@@ -9,7 +9,8 @@
     "start": "node dist/orchestrator/index.js",
     "ledger:bridge": "npx tsx src/integrations/ledger/serve.ts",
     "ledger:ui": "npx vite src/integrations/ledger/ui",
-    "safe:deploy": "npx tsx src/integrations/safe/deploy.ts"
+    "safe:deploy": "npx tsx src/integrations/safe/deploy.ts",
+    "test:policy": "npx tsx src/policy/policy.test.ts"
   },
   "keywords": [
     "0g",

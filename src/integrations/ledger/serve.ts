@@ -15,8 +15,7 @@ import { fetchQuoteWithRouting } from "../uniswap/routing";
 import { executeSwap } from "../uniswap/execution";
 import { WETH_SEPOLIA, USDC_SEPOLIA, CHAIN_ID } from "../uniswap/types";
 import { runPlanner } from "../../agents/planner/index";
-import { runGatekeeper } from "../../agents/gatekeeper/index";
-import { write, read, readMany } from "../zero-g/storage";
+import { write, read, readMany, append } from "../zero-g/storage";
 import { setComputeProvider, getComputeProvider } from "../zero-g/compute";
 import { deploySafe } from "../safe/deploy";
 import { detectExistingSafe } from "../safe/detect";
@@ -27,6 +26,15 @@ import { getSpendingLimit, getAllowanceTokens, updateSpendingLimit } from "../sa
 import { initSafe } from "../safe/transaction";
 import { ALLOWANCE_MODULE_ADDRESS } from "../../types/safe";
 import { getTokens } from "../uniswap/types";
+import {
+  TOKEN_DECIMALS,
+  toTokenWei,
+  symbolFromAddress,
+  detectIntentType,
+  resolveAutoApproveLimit,
+  computePlanValueUsd,
+  decide,
+} from "../../policy";
 
 const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || "https://eth-sepolia.g.alchemy.com/v2/demo";
 const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC);
@@ -256,51 +264,8 @@ app.get("/nonce/:address", async (req, res) => {
 });
 
 // ─── Token decimal map (case-insensitive lookup) ───
-const TOKEN_DECIMALS: Record<string, number> = {
-  [USDC_SEPOLIA.toLowerCase()]: 6,                                        // USDC Sepolia
-  ['0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0'.toLowerCase()]: 6,        // USDT Sepolia
-  [WETH_SEPOLIA.toLowerCase()]: 18,                                       // WETH Sepolia
-  ['0xC558DBdd856501FCd9aaF1E62eae57A9F0629a3c'.toLowerCase()]: 18,       // WETH alt Sepolia
-};
-
-function toTokenWei(amount: string, tokenAddress: string): bigint {
-  const decimals = TOKEN_DECIMALS[tokenAddress.toLowerCase()] ?? 18;
-  return ethers.parseUnits(amount, decimals);
-}
-
-// ─── Address → symbol lookup ───
-const TOKEN_SYMBOLS: Record<string, string> = {
-  [WETH_SEPOLIA.toLowerCase()]: "ETH",
-  ['0xC558DBdd856501FCd9aaF1E62eae57A9F0629a3c'.toLowerCase()]: "ETH",
-  [USDC_SEPOLIA.toLowerCase()]: "USDC",
-  ['0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0'.toLowerCase()]: "USDT",
-  // Mainnet
-  ['0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'.toLowerCase()]: "ETH",
-  ['0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'.toLowerCase()]: "USDC",
-};
-
-function symbolFromAddress(address: string, fallback: string = "UNKNOWN"): string {
-  return TOKEN_SYMBOLS[address.toLowerCase()] || fallback;
-}
-
-// ─── Intent type detection (from AI plan steps) ───
-function detectIntentType(steps: any[]): "swap" | "send" | "add_liquidity" | "balance" | "unknown" {
-  if (!steps || steps.length === 0) return "unknown";
-  const action = steps[0]?.action;
-  if (action === "swap") return "swap";
-  if (action === "send") return "send";
-  if (action === "add_liquidity") return "add_liquidity";
-  if (action === "balance") return "balance";
-  return "unknown";
-}
-
-// ─── Helper: estimate USD value for risk assessment ───
-function estimateUsd(symbol: string, amount: number): number {
-  const s = symbol.toUpperCase();
-  if (s === "USDC" || s === "USDT") return amount;
-  if (s === "ETH" || s === "WETH") return amount * 2500;
-  return amount;
-}
+// Token metadata, USD estimation, intent classification and the deterministic
+// safety net now live in the pure, tested policy module (src/policy).
 
 // ─── POST /intent ───
 // ALL intents go through AI pipeline: Planner → Gatekeeper → dispatch by intent type.
@@ -419,95 +384,56 @@ app.post("/intent", async (req, res) => {
     console.log(`[intent] Plan: ${JSON.stringify(latestPlan, null, 2)}`);
 
     // ═══════════════════════════════════════════
-    // ── Step 2: Sync spending limit to 0G, then run AI Gatekeeper ──
+    // ── Step 2: Deterministic Gatekeeper (no second LLM call) ──
     // ═══════════════════════════════════════════
-    const autoApproveLimit = typeof clientLimit === 'number' && clientLimit > 0 ? clientLimit : 100;
+    // The risk verdict is now computed by the pure `decide` policy engine — the
+    // Planner LLM stays the single interpretation call, the verdict is code.
+    // This removes ~1 full LLM round-trip and the associated 0G read/writes from
+    // the hot path, and makes the verdict deterministic + explainable.
+    const autoApproveLimit = resolveAutoApproveLimit(clientLimit);
 
-    // Write the user's current limit to 0G so the Gatekeeper AI can read it
-    try {
-      const existingProfile = await read("user:profile");
-      const profileData = (existingProfile as any) || {};
-      if (profileData.autoApproveLimit !== autoApproveLimit) {
-        await write("user:profile", {
-          ...profileData,
-          autoApproveLimit,
-          updatedAt: new Date().toISOString(),
-        });
-        console.log(`[intent] Synced autoApproveLimit=$${autoApproveLimit} to 0G user:profile`);
-      }
-    } catch (syncErr: any) {
-      console.warn(`[intent] Failed to sync limit to 0G (non-critical): ${syncErr.message}`);
-    }
+    // Clear the consumed user message (fire-and-forget — not on the critical path).
+    write("messages:latest", { message: null, timestamp: null }).catch(() => {});
 
-    console.log(`[intent] Running Gatekeeper AI…`);
-    let gatekeeperResult: { reasoning: string };
-    try {
-      gatekeeperResult = await runGatekeeper();
-    } catch (gkErr: any) {
-      console.warn(`[intent] Gatekeeper run failed (non-critical): ${gkErr.message}`);
-      gatekeeperResult = { reasoning: "Gatekeeper encountered an error — falling back to server-side assessment." };
-    }
-    console.log(`[intent] Gatekeeper reasoning: ${gatekeeperResult.reasoning}`);
-
-    let latestAssessment: Record<string, unknown> | undefined;
-    try {
-      const assessments = (await readMany("assessments")) as Record<string, unknown>[];
-      latestAssessment = assessments.sort((a, b) =>
-        (b.assessedAt as string).localeCompare(a.assessedAt as string)
-      )[0];
-    } catch (readErr: any) {
-      console.warn(`[intent] Failed to read assessments from 0G (non-critical): ${readErr.message}`);
-    }
-
-    try { await write("messages:latest", { message: null, timestamp: null }); } catch {};
-
-    // ═══════════════════════════════════════════
-    // ── Step 3: Detect intent type + server-side safety net ──
-    // ═══════════════════════════════════════════
     const planSteps = (latestPlan.steps as any[]) || [];
     const intentType = detectIntentType(planSteps);
     const step0 = planSteps[0] || {};
     const params = step0.params || {};
     const planSummary = latestPlan.summary as string;
 
-    // Recompute USD value server-side — don't trust the AI's estimate
-    let totalEstimatedValueUsd = (latestPlan.totalEstimatedValueUsd as number) || 0;
-    if (intentType === "swap") {
-      const sym = params.symbolIn || symbolFromAddress(params.tokenIn || "", "ETH");
-      totalEstimatedValueUsd = estimateUsd(sym, Number(params.amount || 0));
-    } else if (intentType === "send") {
-      totalEstimatedValueUsd = estimateUsd(params.symbol || "ETH", Number(params.amount || 0));
-    }
+    // Recompute USD value server-side — never trust the AI's estimate.
+    const totalEstimatedValueUsd = computePlanValueUsd(
+      intentType,
+      params,
+      (latestPlan.totalEstimatedValueUsd as number) || 0
+    );
 
-    const aiVerdict = (latestAssessment?.verdict as string) ?? "NEEDS_APPROVAL";
-    const aiRiskScore = (latestAssessment?.riskScore as number) ?? 50;
+    // Authoritative deterministic decision.
+    const decision = decide({
+      intentType,
+      valueUsd: totalEstimatedValueUsd,
+      autoApproveLimit,
+      plan: { summary: planSummary, steps: planSteps },
+    });
+    const verdict = decision.verdict;
+    const riskScore = decision.riskScore;
     const plannerReasoning = plannerResult.reasoning;
-    const gatekeeperReasoning = gatekeeperResult.reasoning;
+    const gatekeeperReasoning = decision.reason;
 
-    // Server-side safety net — override AI only when it's clearly wrong
-    let verdict = aiVerdict;
-    let riskScore = aiRiskScore;
-    if (intentType === "balance") {
-      verdict = "INFO";
-      riskScore = 0;
-    } else if (intentType === "swap" || intentType === "send") {
-      // If AI says AUTO_EXECUTE but amount is over the limit → override
-      if (totalEstimatedValueUsd > autoApproveLimit && verdict === "AUTO_EXECUTE") {
-        verdict = "NEEDS_APPROVAL";
-        riskScore = Math.max(riskScore, 70);
-        console.log(`[intent] Safety net: overrode AUTO_EXECUTE → NEEDS_APPROVAL ($${totalEstimatedValueUsd} > $${autoApproveLimit})`);
-      }
-      // If AI says NEEDS_APPROVAL but amount is under the limit → override
-      if (totalEstimatedValueUsd <= autoApproveLimit && verdict === "NEEDS_APPROVAL") {
-        verdict = "AUTO_EXECUTE";
-        riskScore = Math.min(riskScore, 15);
-        console.log(`[intent] Safety net: overrode NEEDS_APPROVAL → AUTO_EXECUTE ($${totalEstimatedValueUsd} <= $${autoApproveLimit})`);
-      }
-    }
+    // Persist the assessment to 0G for audit/history — off the hot path.
+    write("user:profile:limit", { autoApproveLimit, updatedAt: new Date().toISOString() }).catch(() => {});
+    append("assessments", {
+      planId: (latestPlan.id as string) || null,
+      verdict,
+      riskScore,
+      reasons: [gatekeeperReasoning],
+      requiresLedger: decision.requiresLedger,
+      assessedAt: new Date().toISOString(),
+    }).catch(() => {});
 
     console.log(`[intent] Intent type: ${intentType}`);
     console.log(`[intent] USD value (server): $${totalEstimatedValueUsd}`);
-    console.log(`[intent] Verdict: ${verdict} (AI said: ${aiVerdict}, risk: ${riskScore})`);
+    console.log(`[intent] Verdict: ${verdict} (deterministic, risk: ${riskScore}) — ${gatekeeperReasoning}`);
 
     const baseAssessment = {
       verdict,
