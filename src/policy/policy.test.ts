@@ -10,6 +10,8 @@ import {
   computePlanValueUsd,
   evaluatePolicy,
   decide,
+  computeHabitProfile,
+  HABIT_MIN_SAMPLES,
   estimateUsd,
   symbolFromAddress,
   toTokenWei,
@@ -296,6 +298,50 @@ test("decide: escalation never weakens a block/info", () => {
     plan: okPlan, profile: { verifiedTokens: [], dailyLimitUsd: 999999 },
   });
   assert.equal(d.verdict, "AUTO_EXECUTE"); // empty verifiedTokens disables that rule
+});
+
+// ── computeHabitProfile (Axis-3: learns habits) ──
+const rec = (valueUsd: number) => ({ valueUsd, at: new Date().toISOString() });
+
+test("computeHabitProfile: empty history → all null", () => {
+  const h = computeHabitProfile([]);
+  assert.equal(h.sampleSize, 0);
+  assert.equal(h.typicalMaxUsd, null);
+});
+test("computeHabitProfile: below min samples → no baseline", () => {
+  const h = computeHabitProfile([rec(10), rec(20)]);
+  assert.equal(h.sampleSize, 2);
+  assert.equal(h.medianUsd, 15);
+  assert.equal(h.typicalMaxUsd, null); // < HABIT_MIN_SAMPLES
+});
+test("computeHabitProfile: median (odd), enough samples → baseline set", () => {
+  const h = computeHabitProfile([rec(10), rec(10), rec(10), rec(10), rec(10)]);
+  assert.equal(h.sampleSize, 5);
+  assert.equal(h.medianUsd, 10);
+  assert.equal(h.maxUsd, 10);
+  assert.equal(h.typicalMaxUsd, 10);
+});
+test("computeHabitProfile: median (even) averages middle two", () => {
+  const h = computeHabitProfile([rec(10), rec(20), rec(30), rec(40), rec(50), rec(60)]);
+  assert.equal(h.medianUsd, 35); // (30+40)/2
+  assert.equal(h.meanUsd, 35);
+  assert.equal(h.maxUsd, 60);
+});
+test("computeHabitProfile: ignores non-positive/invalid values", () => {
+  const h = computeHabitProfile([rec(10), rec(0), rec(-5), rec(10), rec(10), rec(10), rec(10)]);
+  assert.equal(h.sampleSize, 5); // only the five 10s
+  assert.equal(h.typicalMaxUsd, 10);
+});
+test("computeHabitProfile: derived baseline feeds the anomaly rule", () => {
+  const history = [rec(10), rec(10), rec(10), rec(10), rec(10)];
+  const habit = computeHabitProfile(history);
+  // A $150 tx is 15× the $10 baseline → over the 10× anomaly threshold.
+  const d = decide({
+    intentType: "swap", valueUsd: 150, autoApproveLimit: 1000, plan: okPlan,
+    profile: { typicalMaxUsd: habit.typicalMaxUsd ?? undefined },
+  });
+  assert.equal(d.verdict, "NEEDS_APPROVAL");
+  assert.deepEqual(d.triggered, ["habit-anomaly"]);
 });
 
 console.log(`\n${passed} passed`);

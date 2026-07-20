@@ -353,4 +353,48 @@ export function decide(input: DecisionInput): PolicyDecision {
   };
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Habit profile — derive a baseline from recorded activity ("learns habits")
+// ═══════════════════════════════════════════════════════════════════════
+// Boring statistics, deliberately: no ML, no training. The median of recent
+// tx sizes is a robust "typical" value; the habit-anomaly rule then flags
+// anything HABIT_ANOMALY_MULTIPLE× above it. Because that rule only escalates,
+// an auto-derived baseline is always safe (fail-closed).
+
+/** Minimum samples before we trust a derived baseline (avoids overfitting). */
+export const HABIT_MIN_SAMPLES = 5;
+
+export interface HabitProfile {
+  sampleSize: number;
+  medianUsd: number | null;
+  meanUsd: number | null;
+  maxUsd: number | null;
+  /** Baseline for the habit-anomaly rule; null until there's enough data. */
+  typicalMaxUsd: number | null;
+}
+
+export function computeHabitProfile(history: ActivityRecord[]): HabitProfile {
+  const vals = (history || [])
+    .map((h) => h.valueUsd)
+    .filter((v) => typeof v === "number" && v > 0)
+    .sort((a, b) => a - b);
+
+  const n = vals.length;
+  if (n === 0) {
+    return { sampleSize: 0, medianUsd: null, meanUsd: null, maxUsd: null, typicalMaxUsd: null };
+  }
+
+  const median = n % 2 ? vals[(n - 1) / 2] : (vals[n / 2 - 1] + vals[n / 2]) / 2;
+  const mean = vals.reduce((s, v) => s + v, 0) / n;
+  const max = vals[n - 1];
+
+  return {
+    sampleSize: n,
+    medianUsd: median,
+    meanUsd: mean,
+    maxUsd: max,
+    typicalMaxUsd: n >= HABIT_MIN_SAMPLES ? median : null,
+  };
+}
+
 export * from "./prices";

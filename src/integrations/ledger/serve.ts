@@ -35,6 +35,7 @@ import {
   resolveAutoApproveLimit,
   computePlanValueUsd,
   decide,
+  computeHabitProfile,
   type PolicyProfile,
   type ActivityRecord,
 } from "../../policy";
@@ -418,6 +419,16 @@ app.post("/intent", async (req, res) => {
     if (walletAddress) {
       try { profile = await getPolicyProfile(); } catch {}
       try { history = await getRecentActivity(walletAddress); } catch {}
+
+      // Learn the habit baseline from activity when not explicitly configured.
+      // Fail-closed: the anomaly rule only escalates, so a derived baseline is safe.
+      if (profile && history && profile.typicalMaxUsd == null) {
+        const habit = computeHabitProfile(history);
+        if (habit.typicalMaxUsd != null) {
+          profile = { ...profile, typicalMaxUsd: habit.typicalMaxUsd };
+          console.log(`[intent] Habit baseline: typicalMaxUsd=$${habit.typicalMaxUsd} (n=${habit.sampleSize})`);
+        }
+      }
     }
 
     // Authoritative deterministic decision.
@@ -753,6 +764,21 @@ app.get("/policy", async (_req, res) => {
   }
 });
 
+// The habit profile the engine has learned from recorded activity.
+app.get("/habit", async (req, res) => {
+  try {
+    const wallet = String(req.query.wallet || "");
+    if (!wallet) {
+      res.status(400).json({ error: "wallet query param required" });
+      return;
+    }
+    const history = await getRecentActivity(wallet);
+    res.json({ wallet, ...computeHabitProfile(history) });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post("/policy", async (req, res) => {
   try {
     const patch = req.body?.policy;
@@ -761,9 +787,15 @@ app.post("/policy", async (req, res) => {
       return;
     }
     const existing = ((await read("user:profile")) as any) || {};
+    // Merge; a null value clears that field (lets you disable a rule).
+    const mergedPolicy: Record<string, unknown> = { ...(existing.policy || {}) };
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === null) delete mergedPolicy[k];
+      else mergedPolicy[k] = v;
+    }
     const updated = {
       ...existing,
-      policy: { ...(existing.policy || {}), ...patch },
+      policy: mergedPolicy,
       updatedAt: new Date().toISOString(),
     };
     await write("user:profile", updated);
