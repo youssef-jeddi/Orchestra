@@ -10,6 +10,7 @@ import ConnectWallet  from '@/components/ConnectWallet';
 import { OrchestraProvider } from '@/context/OrchestraContext';
 import ApprovalOverlay from '@/components/ApprovalOverlay';
 import SafePanel from '@/components/SafePanel';
+import PolicyPanel from '@/components/PolicyPanel';
 
 const PresentationFlow   = dynamic(() => import('@/components/PresentationFlow'),   { loading: () => null });
 const FuturisticNotebook = dynamic(() => import('@/components/FuturisticNotebook'), { loading: () => null });
@@ -54,6 +55,7 @@ export default function Home() {
           <ConnectWallet />
           <ApprovalOverlay />
           <SafePanel />
+          <PolicyPanel />
           <motion.main
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}

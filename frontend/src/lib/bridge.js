@@ -98,3 +98,21 @@ export async function setComputeProvider(provider) {
 export async function getComputeProvider() {
   return bridgeFetch('/compute-provider');
 }
+
+// ── Policy config + learned habit profile ──
+
+export async function getPolicy() {
+  return bridgeFetch('/policy');
+}
+
+// patch: { dailyLimitUsd, maxAutoTxPerDay, typicalMaxUsd, ... }; null clears a field.
+export async function setPolicy(policy) {
+  return bridgeFetch('/policy', {
+    method: 'POST',
+    body: JSON.stringify({ policy }),
+  });
+}
+
+export async function getHabit(walletAddress) {
+  return bridgeFetch(`/habit?wallet=${walletAddress}`);
+}
