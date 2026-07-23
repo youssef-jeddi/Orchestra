@@ -10,9 +10,9 @@ const ACCENT = '#C084FC';
 
 // The tunable deterministic guardrails, mirrored from the policy engine.
 const FIELDS = [
-  { key: 'dailyLimitUsd',   label: 'Daily auto-approve cap',   suffix: '$',   hint: 'Max USD auto-approved in a rolling 24h.' },
-  { key: 'maxAutoTxPerDay', label: 'Auto-approvals per day',   suffix: 'txs', hint: 'Max number of auto-approvals in 24h.' },
-  { key: 'typicalMaxUsd',   label: 'Typical tx size override', suffix: '$',   hint: 'Leave blank to let the agent learn it.' },
+  { key: 'dailyLimitUsd',   label: 'Daily auto-approve limit',  suffix: '$',   hint: 'Total USD the agent can auto-approve in a rolling 24h. Defaults to $100.' },
+  { key: 'maxAutoTxPerDay', label: 'Auto-approvals per day',    suffix: 'txs', hint: 'Max number of auto-approvals in 24h.' },
+  { key: 'typicalMaxUsd',   label: 'Typical tx size override',  suffix: '$',   hint: 'Leave blank to let the agent learn it.' },
 ];
 
 export default function PolicyPanel() {
@@ -103,8 +103,8 @@ export default function PolicyPanel() {
             transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
             style={{
               position: 'fixed', top: 0, right: 0, bottom: 0, width: 360,
-              zIndex: 9997, background: '#111114',
-              borderLeft: '1px solid #222', overflowY: 'auto',
+              zIndex: 9997, background: '#111114', boxSizing: 'border-box',
+              borderLeft: '1px solid #222', overflowY: 'auto', overflowX: 'hidden',
               fontFamily: 'var(--font-inter)', scrollbarWidth: 'none',
             }}
           >
@@ -128,17 +128,17 @@ export default function PolicyPanel() {
               {FIELDS.map((f) => (
                 <div key={f.key} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                   <label style={{ fontSize: 12, color: '#BBB', fontWeight: 400 }}>{f.label}</label>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, border: '1px solid #333', borderRadius: 8, padding: '0 12px' }}>
-                    <span style={{ fontSize: 12, color: '#666' }}>{f.suffix}</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, border: '1px solid #333', borderRadius: 8, padding: '0 12px', minWidth: 0, boxSizing: 'border-box' }}>
+                    <span style={{ fontSize: 12, color: '#666', flexShrink: 0 }}>{f.suffix}</span>
                     <input
                       type="number"
                       value={values[f.key] ?? ''}
                       onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
                       placeholder="—"
                       style={{
-                        flex: 1, background: 'transparent', border: 'none', outline: 'none',
+                        flex: 1, minWidth: 0, width: '100%', background: 'transparent', border: 'none', outline: 'none',
                         color: '#E8E4DE', fontSize: 14, fontFamily: 'var(--font-inter)',
-                        padding: '10px 0', cursor: 'none',
+                        padding: '10px 0', cursor: 'none', boxSizing: 'border-box',
                       }}
                     />
                   </div>

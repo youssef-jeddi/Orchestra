@@ -16,7 +16,7 @@ export type Verdict = "AUTO_EXECUTE" | "NEEDS_APPROVAL" | "BLOCKED" | "INFO";
 
 export type IntentType = "swap" | "send" | "add_liquidity" | "balance" | "unknown";
 
-export const DEFAULT_AUTO_APPROVE_LIMIT = 100;
+export const DEFAULT_DAILY_LIMIT = 100;
 
 // ─── Intent classification (from AI plan steps) ───
 export function detectIntentType(steps: any[]): IntentType {
@@ -29,12 +29,12 @@ export function detectIntentType(steps: any[]): IntentType {
   return "unknown";
 }
 
-// ─── Spending limit resolution ───
-// Trust a positive numeric client limit; otherwise fall back to the default.
-export function resolveAutoApproveLimit(clientLimit: unknown): number {
-  return typeof clientLimit === "number" && clientLimit > 0
-    ? clientLimit
-    : DEFAULT_AUTO_APPROVE_LIMIT;
+// ─── Daily limit resolution ───
+// Trust a positive numeric configured limit; otherwise fall back to the default.
+export function resolveDailyLimit(configured: unknown): number {
+  return typeof configured === "number" && configured > 0
+    ? configured
+    : DEFAULT_DAILY_LIMIT;
 }
 
 // ─── Server-side USD recomputation ───
@@ -55,61 +55,16 @@ export function computePlanValueUsd(
   return fallbackUsd || 0;
 }
 
-export interface PolicyInput {
-  intentType: IntentType;
-  valueUsd: number;
-  autoApproveLimit: number;
-  aiVerdict: Verdict;
-  aiRiskScore: number;
-}
-
-export interface PolicyResult {
-  verdict: Verdict;
-  riskScore: number;
-  /** Human-readable note when the deterministic engine overrode the AI, else null. */
-  override: string | null;
-}
-
-// ─── The safety net ───
-// Deterministic rules that override the AI verdict when it's clearly wrong.
-export function evaluatePolicy(input: PolicyInput): PolicyResult {
-  const { intentType, valueUsd, autoApproveLimit, aiVerdict, aiRiskScore } = input;
-
-  let verdict: Verdict = aiVerdict;
-  let riskScore = aiRiskScore;
-  let override: string | null = null;
-
-  if (intentType === "balance") {
-    verdict = "INFO";
-    riskScore = 0;
-  } else if (intentType === "swap" || intentType === "send") {
-    // AI said AUTO_EXECUTE but amount is over the limit → override up.
-    if (valueUsd > autoApproveLimit && verdict === "AUTO_EXECUTE") {
-      verdict = "NEEDS_APPROVAL";
-      riskScore = Math.max(riskScore, 70);
-      override = `overrode AUTO_EXECUTE → NEEDS_APPROVAL ($${valueUsd} > $${autoApproveLimit})`;
-    }
-    // AI said NEEDS_APPROVAL but amount is under the limit → override down.
-    if (valueUsd <= autoApproveLimit && verdict === "NEEDS_APPROVAL") {
-      verdict = "AUTO_EXECUTE";
-      riskScore = Math.min(riskScore, 15);
-      override = `overrode NEEDS_APPROVAL → AUTO_EXECUTE ($${valueUsd} <= $${autoApproveLimit})`;
-    }
-  }
-
-  return { verdict, riskScore, override };
-}
-
 // ═══════════════════════════════════════════════════════════════════════
-// STEP 2 — Authoritative deterministic decision
+// Authoritative deterministic decision
 // ═══════════════════════════════════════════════════════════════════════
 // `decide` computes the verdict from scratch — no AI verdict as input. This is
 // what lets the /intent pipeline drop the second (Gatekeeper) LLM call entirely:
 // interpretation stays with the Planner LLM, the verdict is pure code.
 //
-// `evaluatePolicy` above is retained as the "reconcile an advisory AI verdict"
-// helper (and to pin the original safety-net semantics under test). The hot path
-// uses `decide`.
+// The single spending control is a DAILY limit: the sum of auto-approved value in
+// a rolling 24h must stay within it. There is no per-transaction limit — a daily
+// cap already covers both one large tx and many small ones.
 
 /** Denylisted token addresses (lowercased). Hook for a future threat feed. */
 export const DENYLISTED_TOKENS = new Set<string>([]);
@@ -122,7 +77,8 @@ export interface PlanShape {
 export interface DecisionInput {
   intentType: IntentType;
   valueUsd: number;
-  autoApproveLimit: number;
+  /** The rolling-24h auto-approve limit (already resolved with a default). */
+  dailyLimitUsd: number;
   plan: PlanShape;
   /** Optional per-user policy for the extended deterministic rules. */
   profile?: PolicyProfile;
@@ -142,7 +98,11 @@ export interface PolicyProfile {
   knownAddresses?: string[];
   /** Token allow-list. If non-empty, any token NOT listed forces approval. */
   verifiedTokens?: string[];
-  /** Rolling 24h cap on auto-approved USD. Exceeding it forces approval. */
+  /**
+   * The user's daily auto-approve limit (rolling 24h USD). This is the stored
+   * source; the caller resolves it into DecisionInput.dailyLimitUsd (with a
+   * default) — `decide` reads the resolved value, not this field.
+   */
   dailyLimitUsd?: number;
   /** Rolling 24h cap on number of auto-approvals. Reaching it forces approval. */
   maxAutoTxPerDay?: number;
@@ -221,16 +181,15 @@ function sendRecipient(steps: any[]): string | null {
  *   3. denylisted token        → BLOCKED
  *   4. unrecognized action     → NEEDS_APPROVAL (fail closed)
  *   5. escalation rules        → each can force NEEDS_APPROVAL, none can weaken:
- *        · amount over limit
+ *        · daily limit             (dailyLimitUsd — rolling 24h spend, always on)
  *        · unverified token        (profile.verifiedTokens)
  *        · unknown recipient       (profile.knownAddresses, send only)
- *        · daily USD velocity      (profile.dailyLimitUsd + history)
  *        · daily count velocity    (profile.maxAutoTxPerDay + history)
  *        · habit anomaly           (profile.typicalMaxUsd)
  *   6. otherwise               → AUTO_EXECUTE
  */
 export function decide(input: DecisionInput): PolicyDecision {
-  const { intentType, valueUsd, autoApproveLimit, plan, profile, history, now } = input;
+  const { intentType, valueUsd, dailyLimitUsd, plan, profile, history, now } = input;
 
   // 1. Read-only query.
   if (intentType === "balance") {
@@ -260,11 +219,20 @@ export function decide(input: DecisionInput): PolicyDecision {
   // 5. Value-bearing intents (swap / send / add_liquidity): accumulate escalations.
   const escalations: Escalation[] = [];
 
-  // 5a. Amount vs auto-approve limit.
-  if (valueUsd > autoApproveLimit) {
+  // Rolling-24h spend so far (drives the daily limit + the count rule).
+  const cutoff = (now ?? Date.now()) - DAY_MS;
+  const recent = (history || []).filter((h) => {
+    const t = Date.parse(h.at);
+    return !Number.isNaN(t) && t >= cutoff;
+  });
+  const spentToday = recent.reduce((s, h) => s + (h.valueUsd || 0), 0);
+
+  // 5a. Daily limit (always applies). A single tx over the limit, or cumulative
+  // spend crossing it, requires approval.
+  if (spentToday + valueUsd > dailyLimitUsd) {
     escalations.push({
-      rule: "over-limit",
-      reason: `$${valueUsd} exceeds your $${autoApproveLimit} auto-approve limit — approval required.`,
+      rule: "daily-limit",
+      reason: `This would exceed your $${dailyLimitUsd} daily auto-approve limit ($${spentToday} used today) — approval required.`,
       risk: 70,
     });
   }
@@ -295,32 +263,13 @@ export function decide(input: DecisionInput): PolicyDecision {
       }
     }
 
-    // 5d + 5e. Velocity (needs history).
-    if (history && history.length > 0) {
-      const cutoff = (now ?? Date.now()) - DAY_MS;
-      const recent = history.filter((h) => {
-        const t = Date.parse(h.at);
-        return !Number.isNaN(t) && t >= cutoff;
+    // 5d. Daily count velocity — reached the max auto-approvals in 24h.
+    if (profile.maxAutoTxPerDay != null && recent.length >= profile.maxAutoTxPerDay) {
+      escalations.push({
+        rule: "daily-count-velocity",
+        reason: `You've reached your ${profile.maxAutoTxPerDay} auto-approvals per day — approval required.`,
+        risk: 60,
       });
-
-      if (profile.dailyLimitUsd != null) {
-        const spent = recent.reduce((s, h) => s + (h.valueUsd || 0), 0);
-        if (spent + valueUsd > profile.dailyLimitUsd) {
-          escalations.push({
-            rule: "daily-usd-velocity",
-            reason: `This would exceed your $${profile.dailyLimitUsd} daily auto-approve limit ($${spent} already used today) — approval required.`,
-            risk: 68,
-          });
-        }
-      }
-
-      if (profile.maxAutoTxPerDay != null && recent.length >= profile.maxAutoTxPerDay) {
-        escalations.push({
-          rule: "daily-count-velocity",
-          reason: `You've reached your ${profile.maxAutoTxPerDay} auto-approvals per day — approval required.`,
-          risk: 60,
-        });
-      }
     }
 
     // 5f. Habit anomaly — unusually large vs the user's typical tx size.
@@ -347,7 +296,7 @@ export function decide(input: DecisionInput): PolicyDecision {
   return {
     verdict: "AUTO_EXECUTE",
     riskScore: 15,
-    reason: `$${valueUsd} is within your $${autoApproveLimit} auto-approve limit.`,
+    reason: `$${valueUsd} is within your $${dailyLimitUsd} daily auto-approve limit ($${spentToday} used today).`,
     requiresLedger: false,
     triggered: [],
   };

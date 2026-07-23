@@ -28,11 +28,10 @@ import { initSafe } from "../safe/transaction";
 import { ALLOWANCE_MODULE_ADDRESS } from "../../types/safe";
 import { getTokens } from "../uniswap/types";
 import {
-  TOKEN_DECIMALS,
   toTokenWei,
   symbolFromAddress,
   detectIntentType,
-  resolveAutoApproveLimit,
+  resolveDailyLimit,
   computePlanValueUsd,
   decide,
   computeHabitProfile,
@@ -40,6 +39,7 @@ import {
   type ActivityRecord,
 } from "../../policy";
 import { getPolicyProfile, getRecentActivity, recordActivity, _resetPolicyStoreCache } from "../../policy/store";
+import { getAdapter } from "../../executor/adapters";
 
 const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || "https://eth-sepolia.g.alchemy.com/v2/demo";
 const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC);
@@ -276,7 +276,7 @@ app.get("/nonce/:address", async (req, res) => {
 // ALL intents go through AI pipeline: Planner → Gatekeeper → dispatch by intent type.
 app.post("/intent", async (req, res) => {
   try {
-    const { message, walletAddress, autoApproveLimit: clientLimit } = req.body;
+    const { message, walletAddress } = req.body;
 
     if (!message) {
       res.status(400).json({ error: "message is required" });
@@ -393,7 +393,6 @@ app.post("/intent", async (req, res) => {
     // Planner LLM stays the single interpretation call, the verdict is code.
     // This removes ~1 full LLM round-trip and the associated 0G read/writes from
     // the hot path, and makes the verdict deterministic + explainable.
-    const autoApproveLimit = resolveAutoApproveLimit(clientLimit);
 
     // Clear the consumed user message (fire-and-forget — not on the critical path).
     write("messages:latest", { message: null, timestamp: null }).catch(() => {});
@@ -411,13 +410,14 @@ app.post("/intent", async (req, res) => {
       (latestPlan.totalEstimatedValueUsd as number) || 0
     );
 
-    // Load the user's extended policy + recent activity (cached — see policy/store).
-    // These stay undefined without a wallet, and every extended rule is off until
-    // `user:profile.policy` is configured, so today this changes no verdicts.
+    // Load the user's policy (cached) + recent activity. The single spending
+    // control is the DAILY limit — resolved from the stored policy with a default.
     let profile: PolicyProfile | undefined;
     let history: ActivityRecord[] | undefined;
+    try { profile = await getPolicyProfile(); } catch {}
+    const dailyLimitUsd = resolveDailyLimit(profile?.dailyLimitUsd);
+
     if (walletAddress) {
-      try { profile = await getPolicyProfile(); } catch {}
       try { history = await getRecentActivity(walletAddress); } catch {}
 
       // Learn the habit baseline from activity when not explicitly configured.
@@ -435,7 +435,7 @@ app.post("/intent", async (req, res) => {
     const decision = decide({
       intentType,
       valueUsd: totalEstimatedValueUsd,
-      autoApproveLimit,
+      dailyLimitUsd,
       plan: { summary: planSummary, steps: planSteps },
       profile,
       history,
@@ -461,7 +461,6 @@ app.post("/intent", async (req, res) => {
     }
 
     // Persist the assessment to 0G for audit/history — off the hot path.
-    write("user:profile:limit", { autoApproveLimit, updatedAt: new Date().toISOString() }).catch(() => {});
     append("assessments", {
       planId: (latestPlan.id as string) || null,
       verdict,
@@ -480,119 +479,35 @@ app.post("/intent", async (req, res) => {
       riskScore,
       reasons: [gatekeeperReasoning],
       requiresLedger: verdict === "NEEDS_APPROVAL",
+      triggered: decision.triggered,
     };
     const agentReasoning = { planner: plannerReasoning, gatekeeper: gatekeeperReasoning };
 
     // ═══════════════════════════════════════════
-    // ── BALANCE — instant on-chain read ──
+    // ── Adapter dispatch (balance / send / add_liquidity) ──
     // ═══════════════════════════════════════════
-    if (intentType === "balance") {
-      if (!walletAddress) {
+    // Each of these intents is handled by a self-contained IntentAdapter. The
+    // swap path (below) keeps its bespoke Safe auto-execution for now and will
+    // move behind an adapter `execute()` in a follow-up.
+    const adapter = getAdapter(intentType);
+    if (adapter) {
+      if (intentType === "balance" && !walletAddress) {
         res.status(400).json({ error: "Connect wallet first" });
         return;
       }
-      if (!balances) {
-        const ethBal = await provider.getBalance(balanceAddress!);
-        balances = { eth: Number(ethers.formatEther(ethBal)), weth: 0, usdc: 0, totalUsd: Number(ethers.formatEther(ethBal)) * 2500 };
-      }
-
-      console.log(`[intent] ✓ Balance query answered`);
-      res.json({
-        status: "ok",
-        intentType: "balance",
-        autoExecuted: false,
-        safeAddress,
-        plan: {
-          id: crypto.randomUUID(),
-          summary: `Portfolio: ${balances.eth.toFixed(4)} ETH, ${balances.weth.toFixed(4)} WETH, ${balances.usdc.toFixed(2)} USDC`,
-          steps: [],
-          totalEstimatedValueUsd: balances.totalUsd,
-        },
-        assessment: { verdict: "INFO", riskScore: 0, reasons: ["Read-only query"], requiresLedger: false },
-        balances,
-        agentReasoning,
+      const result = await adapter.build({
+        walletAddress, safeAddress, balanceAddress, provider,
+        params, planSummary, planSteps, totalEstimatedValueUsd, balances,
       });
-      return;
-    }
-
-    // ═══════════════════════════════════════════
-    // ── SEND — build unsigned transfer tx ──
-    // ═══════════════════════════════════════════
-    if (intentType === "send") {
-      const symbol = params.symbol || "ETH";
-      const amount = String(params.amount || "0");
-      const to = params.to || "";
-      const token = params.token || WETH_SEPOLIA;
-
-      console.log(`[intent] ✓ Send: ${amount} ${symbol} → ${to}`);
-
-      let unsignedTx: { to: string; data: string; value: string };
-      if (symbol.toUpperCase() === "ETH") {
-        unsignedTx = { to, data: "0x", value: ethers.parseEther(amount).toString() };
-      } else {
-        const tokenAddr = token;
-        const decimals = TOKEN_DECIMALS[tokenAddr.toLowerCase()] ?? 18;
-        const amountWei = ethers.parseUnits(amount, decimals);
-        const erc20Iface = new ethers.Interface(["function transfer(address to, uint256 amount)"]);
-        unsignedTx = { to: tokenAddr, data: erc20Iface.encodeFunctionData("transfer", [to, amountWei]), value: "0" };
-      }
-
+      console.log(`[intent] ✓ ${intentType} via adapter`);
       res.json({
         status: "ok",
-        intentType: "send",
+        intentType,
         autoExecuted: false,
         safeAddress,
-        plan: { id: crypto.randomUUID(), summary: planSummary, steps: planSteps, totalEstimatedValueUsd },
-        assessment: baseAssessment,
-        sendData: { unsignedTx, token, symbol, amount, to },
-        agentReasoning,
-      });
-      return;
-    }
-
-    // ═══════════════════════════════════════════
-    // ── ADD LIQUIDITY — check approvals ──
-    // ═══════════════════════════════════════════
-    if (intentType === "add_liquidity") {
-      const tokenA = params.tokenA || WETH_SEPOLIA;
-      const tokenB = params.tokenB || USDC_SEPOLIA;
-      const amountA = String(params.amountA || "0");
-      const amountB = String(params.amountB || "0");
-      const symbolA = params.symbolA || symbolFromAddress(tokenA, "WETH");
-      const symbolB = params.symbolB || symbolFromAddress(tokenB, "USDC");
-      const feeTier = params.feeTier || 3000;
-
-      console.log(`[intent] ✓ Add liquidity: ${amountA} ${symbolA} + ${amountB} ${symbolB} (fee: ${feeTier / 10000}%)`);
-
-      let quoteData = null;
-      const swapper = safeAddress || walletAddress;
-      if (swapper) {
-        try {
-          const amountAWei = toTokenWei(amountA, tokenA).toString();
-          const amountBWei = toTokenWei(amountB, tokenB).toString();
-          const [approvalA, approvalB] = await Promise.all([
-            checkApproval({ walletAddress: swapper, token: tokenA, tokenOut: tokenB, amount: amountAWei }),
-            checkApproval({ walletAddress: swapper, token: tokenB, tokenOut: tokenA, amount: amountBWei }),
-          ]);
-          quoteData = {
-            tradeId: crypto.randomUUID(), routing: "CLASSIC", riskLevel: "autonomous",
-            approvalNeeded: !!(approvalA || approvalB),
-            approvalTxA: approvalA, approvalTxB: approvalB,
-            tokenA, tokenB, amountA: amountAWei, amountB: amountBWei, feeTier,
-          };
-        } catch (err: any) {
-          console.error(`[intent] Liquidity approval check error: ${err.message}`);
-        }
-      }
-
-      res.json({
-        status: "ok",
-        intentType: "add_liquidity",
-        autoExecuted: false,
-        safeAddress,
-        plan: { id: crypto.randomUUID(), summary: planSummary, steps: planSteps, totalEstimatedValueUsd },
-        assessment: baseAssessment,
-        quoteData,
+        plan: result.plan ?? { id: crypto.randomUUID(), summary: planSummary, steps: planSteps, totalEstimatedValueUsd },
+        assessment: result.assessment ?? baseAssessment,
+        ...(result.payload || {}),
         agentReasoning,
       });
       return;
@@ -691,7 +606,7 @@ app.post("/intent", async (req, res) => {
             txHash,
             explorerUrl: `https://sepolia.etherscan.io/tx/${txHash}`,
             plan: { id: tradeId, summary: planSummary, steps: planSteps, totalEstimatedValueUsd },
-            assessment: { verdict, riskScore, reasons: [gatekeeperReasoning], requiresLedger: false },
+            assessment: { verdict, riskScore, reasons: [gatekeeperReasoning], requiresLedger: false, triggered: decision.triggered },
             agentReasoning,
           });
           return;
