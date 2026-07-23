@@ -50,6 +50,18 @@ function TypewriterText({ text, onComplete }) {
   );
 }
 
+// Friendly labels for the deterministic guardrail slugs the engine returns.
+const RULE_LABELS = {
+  'daily-limit': 'Daily limit',
+  'daily-count-velocity': 'Daily tx count',
+  'unverified-token': 'Unverified token',
+  'unknown-recipient': 'Unknown recipient',
+  'habit-anomaly': 'Unusual size',
+  'unknown-intent': 'Unrecognized action',
+  'malformed': 'Malformed plan',
+  'denylist': 'Denylisted token',
+};
+
 // ── Agent reasoning block (rendered inside chat) ──
 function AgentReasoning({ data }) {
   const verdict = data.assessment?.verdict || 'UNKNOWN';
@@ -57,6 +69,7 @@ function AgentReasoning({ data }) {
     : verdict === 'NEEDS_APPROVAL' ? '#FFB400'
     : verdict === 'INFO' ? '#007AFF'
     : verdict === 'BLOCKED' ? '#FF453A' : '#666';
+  const triggered = data.assessment?.triggered || [];
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4 }}>
@@ -82,6 +95,19 @@ function AgentReasoning({ data }) {
         <div>
           <span style={{ fontSize: 10, color: verdictColor, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Gatekeeper</span>
           <p style={{ margin: 0, fontSize: 13, color: '#bbb', lineHeight: 1.5 }}>{data.agentReasoning?.gatekeeper}</p>
+          {triggered.length > 0 && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginTop: 6 }}>
+              {triggered.map((slug) => (
+                <span key={slug} style={{
+                  fontSize: 10, padding: '2px 8px', borderRadius: 100,
+                  background: `${verdictColor}18`, color: verdictColor, border: `1px solid ${verdictColor}33`,
+                  letterSpacing: '0.02em',
+                }}>
+                  {RULE_LABELS[slug] || slug}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 

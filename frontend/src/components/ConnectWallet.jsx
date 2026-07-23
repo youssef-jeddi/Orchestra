@@ -12,15 +12,15 @@ const STATUS_COLORS = {
 
 export default function ConnectWallet() {
   const { ledger, bridge } = useOrchestra();
-  const { deviceStatus, walletAddress, connect, disconnect } = ledger;
+  const { deviceStatus, walletAddress, connectionType, connect, connectMetaMask, disconnect } = ledger;
 
   const isConnected = deviceStatus === 'ready' || deviceStatus === 'connected' || deviceStatus === 'signing';
   const label = deviceStatus === 'scanning'
-    ? 'Scanning...'
+    ? 'Connecting...'
     : deviceStatus === 'signing'
       ? 'Signing...'
       : isConnected && walletAddress
-        ? `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`
+        ? `${connectionType === 'metamask' ? '🦊 ' : ''}${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`
         : 'Connect Ledger';
 
   const borderColor = STATUS_COLORS[deviceStatus] || STATUS_COLORS.disconnected;
@@ -40,6 +40,19 @@ export default function ConnectWallet() {
         .cw-btn:hover {
           background: rgba(255,255,255,0.06);
           border-color: rgba(255,255,255,0.3);
+        }
+        .cw-mm {
+          position: fixed; top: 66px; right: 24px; z-index: 50;
+          background: transparent; border: 1px solid rgba(246,133,27,0.35);
+          border-radius: 100px; padding: 10px 24px; cursor: none;
+          font-family: var(--font-inter); font-size: 13px; font-weight: 500;
+          color: #E8E4DE; letter-spacing: 0.02em;
+          transition: background 0.25s, border-color 0.25s;
+          display: flex; align-items: center; gap: 8px;
+        }
+        .cw-mm:hover {
+          background: rgba(246,133,27,0.08);
+          border-color: rgba(246,133,27,0.6);
         }
         .cw-dot {
           width: 6px; height: 6px; border-radius: 50%;
@@ -70,6 +83,15 @@ export default function ConnectWallet() {
         <span className="cw-dot" />
         {label}
       </button>
+      {!isConnected && (
+        <button
+          className="cw-mm"
+          onClick={connectMetaMask}
+          disabled={deviceStatus === 'scanning'}
+        >
+          🦊 MetaMask
+        </button>
+      )}
     </>
   );
 }
