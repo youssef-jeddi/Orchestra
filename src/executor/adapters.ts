@@ -13,6 +13,7 @@ import { ethers } from "ethers";
 import crypto from "crypto";
 import { WETH_SEPOLIA, USDC_SEPOLIA } from "../integrations/uniswap/types";
 import { checkApproval } from "../integrations/uniswap/api";
+import { fetchQuoteWithRouting } from "../integrations/uniswap/routing";
 import { TOKEN_DECIMALS, toTokenWei, symbolFromAddress } from "../policy";
 
 export interface Balances {
@@ -45,9 +46,22 @@ export interface AdapterResult {
   payload?: Record<string, unknown>;
 }
 
+/** Result of a successful server-side auto-execution. */
+export interface ExecuteResult {
+  txHash: string;
+  explorerUrl: string;
+  tradeId: string;
+}
+
 export interface IntentAdapter {
   kind: string;
   build(ctx: ExecutionContext): Promise<AdapterResult>;
+  /**
+   * Optional server-side auto-execution, invoked only when the policy verdict is
+   * AUTO_EXECUTE and a Safe is available. Return null when execution isn't
+   * possible (e.g. no quote) so the caller falls back to the manual flow.
+   */
+  execute?(ctx: ExecutionContext, built: AdapterResult): Promise<ExecuteResult | null>;
 }
 
 // ─── balance — instant on-chain read ───
@@ -138,11 +152,104 @@ const addLiquidityAdapter: IntentAdapter = {
   },
 };
 
+// ─── swap — fetch Uniswap quote, optionally auto-execute via Safe ───
+const swapAdapter: IntentAdapter = {
+  kind: "swap",
+
+  async build(ctx) {
+    const p = ctx.params;
+    const tokenIn = p.tokenIn || WETH_SEPOLIA;
+    const tokenOut = p.tokenOut || USDC_SEPOLIA;
+    const rawAmount = String(p.amount || "0");
+    const symbolIn = p.symbolIn || symbolFromAddress(tokenIn, "ETH");
+    const symbolOut = p.symbolOut || symbolFromAddress(tokenOut, "USDC");
+
+    // Already-wei amounts (10+ digits) pass through; otherwise convert by decimals.
+    const amountWei = /^\d{10,}$/.test(String(rawAmount))
+      ? rawAmount
+      : toTokenWei(rawAmount, tokenIn).toString();
+
+    console.log(`[adapter:swap] ${rawAmount} ${symbolIn} → ${symbolOut} (${amountWei} wei)`);
+
+    let quoteData: Record<string, any> | null = null;
+    const swapper = ctx.safeAddress || ctx.walletAddress;
+    if (swapper) {
+      try {
+        const approvalTx = await checkApproval({ walletAddress: swapper, token: tokenIn, tokenOut, amount: amountWei });
+        const quoteResult = await fetchQuoteWithRouting({ swapper, tokenIn, tokenOut, amount: amountWei }, "autonomous");
+        console.log(`[adapter:swap]   routing: ${quoteResult.routing}, permit: ${quoteResult.permitData ? "yes" : "no"}`);
+        quoteData = {
+          tradeId: crypto.randomUUID(),
+          quote: quoteResult.quote, permitData: quoteResult.permitData,
+          routing: quoteResult.routing, isMevProtected: quoteResult.isMevProtected,
+          isGasless: quoteResult.isGasless, riskLevel: "autonomous",
+          approvalNeeded: !!approvalTx, approvalTx,
+          tokenIn, tokenOut, amount: amountWei,
+        };
+      } catch (err: any) {
+        console.error(`[adapter:swap] quote error: ${err.message}`);
+      }
+    }
+
+    return {
+      plan: {
+        id: quoteData?.tradeId || crypto.randomUUID(),
+        summary: ctx.planSummary, steps: ctx.planSteps, totalEstimatedValueUsd: ctx.totalEstimatedValueUsd,
+      },
+      payload: { quoteData },
+    };
+  },
+
+  async execute(ctx, built) {
+    const quoteData = (built.payload as any)?.quoteData as Record<string, any> | null;
+    if (!quoteData || !ctx.safeAddress) return null;
+
+    const agentKey = process.env.AGENT_PRIVATE_KEY;
+    if (!agentKey) throw new Error("AGENT_PRIVATE_KEY not set");
+
+    const { getApprovalTxsForSwap, executeBatchViaSafe } = await import("../integrations/safe/transaction");
+    const { submitSwap } = await import("../integrations/uniswap/api");
+
+    console.log(`[adapter:swap] AUTO_EXECUTE — fetching fresh quote…`);
+    const freshQuote = await fetchQuoteWithRouting(
+      { swapper: ctx.safeAddress, tokenIn: quoteData.tokenIn, tokenOut: quoteData.tokenOut, amount: quoteData.amount },
+      "autonomous"
+    );
+    const swapTx = await submitSwap(freshQuote.quote, null, undefined);
+    console.log(`[adapter:swap] AUTO_EXECUTE swap tx: to=${swapTx.to}, value=${swapTx.value}`);
+
+    const batch: Array<{ to: string; value: string; data: string }> = [];
+    const ETH_ADDRESS = "0x0000000000000000000000000000000000000000";
+    if (quoteData.tokenIn.toLowerCase() !== ETH_ADDRESS.toLowerCase()) {
+      const approvalTxs = await getApprovalTxsForSwap(
+        ctx.safeAddress, quoteData.tokenIn, BigInt(quoteData.amount || "0"), swapTx.to
+      );
+      batch.push(...approvalTxs);
+    }
+
+    const swapValue = swapTx.value?.startsWith("0x") ? BigInt(swapTx.value).toString() : (swapTx.value || "0");
+    batch.push({ to: swapTx.to, value: swapValue, data: swapTx.data });
+
+    const uniswapGas = parseInt(freshQuote.quote?.gasUseEstimate || "300000", 10);
+    const safeGasLimit = String(uniswapGas + 150000);
+    console.log(`[adapter:swap] AUTO_EXECUTE — executing ${batch.length} op(s) via Safe, gasLimit=${safeGasLimit}…`);
+    const txHash = await executeBatchViaSafe(ctx.safeAddress, agentKey, batch, safeGasLimit);
+
+    const { logTradeResult } = await import("./logResult");
+    const tradeId = quoteData.tradeId || crypto.randomUUID();
+    await logTradeResult(tradeId, txHash, "success");
+
+    console.log(`[adapter:swap] AUTO_EXECUTE success: ${txHash}`);
+    return { txHash, explorerUrl: `https://sepolia.etherscan.io/tx/${txHash}`, tradeId };
+  },
+};
+
 // ─── Registry ───
 const REGISTRY: Record<string, IntentAdapter> = {
   [balanceAdapter.kind]: balanceAdapter,
   [sendAdapter.kind]: sendAdapter,
   [addLiquidityAdapter.kind]: addLiquidityAdapter,
+  [swapAdapter.kind]: swapAdapter,
 };
 
 /** Look up the adapter for an intent kind, or undefined if none is registered. */

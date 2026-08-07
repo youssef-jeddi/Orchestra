@@ -28,8 +28,6 @@ import { initSafe } from "../safe/transaction";
 import { ALLOWANCE_MODULE_ADDRESS } from "../../types/safe";
 import { getTokens } from "../uniswap/types";
 import {
-  toTokenWei,
-  symbolFromAddress,
   detectIntentType,
   resolveDailyLimit,
   computePlanValueUsd,
@@ -484,21 +482,48 @@ app.post("/intent", async (req, res) => {
     const agentReasoning = { planner: plannerReasoning, gatekeeper: gatekeeperReasoning };
 
     // ═══════════════════════════════════════════
-    // ── Adapter dispatch (balance / send / add_liquidity) ──
+    // ── Adapter dispatch (balance / send / add_liquidity / swap) ──
     // ═══════════════════════════════════════════
-    // Each of these intents is handled by a self-contained IntentAdapter. The
-    // swap path (below) keeps its bespoke Safe auto-execution for now and will
-    // move behind an adapter `execute()` in a follow-up.
+    // Every value-bearing intent is a self-contained IntentAdapter. An adapter
+    // that supports server-side auto-execution exposes `execute()`, which runs
+    // only when the deterministic verdict is AUTO_EXECUTE and a Safe exists.
     const adapter = getAdapter(intentType);
     if (adapter) {
       if (intentType === "balance" && !walletAddress) {
         res.status(400).json({ error: "Connect wallet first" });
         return;
       }
-      const result = await adapter.build({
+      const ctx = {
         walletAddress, safeAddress, balanceAddress, provider,
         params, planSummary, planSteps, totalEstimatedValueUsd, balances,
-      });
+      };
+      const result = await adapter.build(ctx);
+
+      // Auto-execute when policy allows and the adapter supports it.
+      if (adapter.execute && verdict === "AUTO_EXECUTE" && safeAddress) {
+        try {
+          const exec = await adapter.execute(ctx, result);
+          if (exec) {
+            console.log(`[intent] ✓ ${intentType} auto-executed: ${exec.txHash}`);
+            res.json({
+              status: "ok",
+              intentType,
+              autoExecuted: true,
+              txHash: exec.txHash,
+              explorerUrl: exec.explorerUrl,
+              plan: { id: exec.tradeId, summary: planSummary, steps: planSteps, totalEstimatedValueUsd },
+              assessment: { verdict, riskScore, reasons: [gatekeeperReasoning], requiresLedger: false, triggered: decision.triggered },
+              agentReasoning,
+            });
+            return;
+          }
+        } catch (err: any) {
+          console.error(`[intent] ${intentType} auto-execute failed: ${err.message}`);
+          console.error(err.stack);
+          // Fall through to the manual flow below.
+        }
+      }
+
       console.log(`[intent] ✓ ${intentType} via adapter`);
       res.json({
         status: "ok",
@@ -508,123 +533,6 @@ app.post("/intent", async (req, res) => {
         plan: result.plan ?? { id: crypto.randomUUID(), summary: planSummary, steps: planSteps, totalEstimatedValueUsd },
         assessment: result.assessment ?? baseAssessment,
         ...(result.payload || {}),
-        agentReasoning,
-      });
-      return;
-    }
-
-    // ═══════════════════════════════════════════
-    // ── SWAP — fetch Uniswap quote ──
-    // ═══════════════════════════════════════════
-    if (intentType === "swap") {
-      const tokenIn = params.tokenIn || WETH_SEPOLIA;
-      const tokenOut = params.tokenOut || USDC_SEPOLIA;
-      const rawAmount = String(params.amount || "0");
-      const symbolIn = params.symbolIn || symbolFromAddress(tokenIn, "ETH");
-      const symbolOut = params.symbolOut || symbolFromAddress(tokenOut, "USDC");
-
-      // Convert to wei using correct decimals
-      const amountWei = String(rawAmount).match(/^\d{10,}$/)
-        ? rawAmount
-        : toTokenWei(rawAmount, tokenIn).toString();
-
-      console.log(`[intent] ✓ Swap: ${rawAmount} ${symbolIn} → ${symbolOut} (${amountWei} wei)`);
-
-      let quoteData = null;
-      const swapper = safeAddress || walletAddress;
-      if (swapper) {
-        try {
-          const approvalTx = await checkApproval({ walletAddress: swapper, token: tokenIn, tokenOut, amount: amountWei });
-          console.log(`[intent]   approval needed: ${!!approvalTx}`);
-
-          const quoteResult = await fetchQuoteWithRouting(
-            { swapper, tokenIn, tokenOut, amount: amountWei }, "autonomous"
-          );
-
-          console.log(`[intent]   routing: ${quoteResult.routing}, permit: ${quoteResult.permitData ? "yes" : "no"}`);
-
-          quoteData = {
-            tradeId: crypto.randomUUID(),
-            quote: quoteResult.quote, permitData: quoteResult.permitData,
-            routing: quoteResult.routing, isMevProtected: quoteResult.isMevProtected,
-            isGasless: quoteResult.isGasless, riskLevel: "autonomous",
-            approvalNeeded: !!approvalTx, approvalTx,
-            tokenIn, tokenOut, amount: amountWei,
-          };
-        } catch (err: any) {
-          console.error(`[intent] Quote error: ${err.message}`);
-        }
-      }
-
-      // ── Auto-execute via Safe if verdict allows ──
-      if (verdict === "AUTO_EXECUTE" && safeAddress && quoteData) {
-        try {
-          console.log(`[intent] AUTO_EXECUTE — executing via Safe...`);
-
-          const agentKey = process.env.AGENT_PRIVATE_KEY;
-          if (!agentKey) throw new Error("AGENT_PRIVATE_KEY not set");
-
-          const { getApprovalTxsForSwap, executeBatchViaSafe } = await import("../safe/transaction");
-          const { submitSwap } = await import("../uniswap/api");
-
-          console.log(`[intent] AUTO_EXECUTE — fetching fresh quote...`);
-          const freshQuote = await fetchQuoteWithRouting(
-            { swapper: safeAddress, tokenIn: quoteData.tokenIn, tokenOut: quoteData.tokenOut, amount: quoteData.amount },
-            "autonomous"
-          );
-          const swapTx = await submitSwap(freshQuote.quote, null, undefined);
-          console.log(`[intent] AUTO_EXECUTE swap tx: to=${swapTx.to}, value=${swapTx.value}`);
-
-          const batch: Array<{ to: string; value: string; data: string }> = [];
-          const ETH_ADDRESS = "0x0000000000000000000000000000000000000000";
-          if (quoteData.tokenIn.toLowerCase() !== ETH_ADDRESS.toLowerCase()) {
-            const approvalTxs = await getApprovalTxsForSwap(
-              safeAddress, quoteData.tokenIn, BigInt(quoteData.amount || "0"), swapTx.to
-            );
-            batch.push(...approvalTxs);
-          }
-
-          const swapValue = swapTx.value?.startsWith('0x')
-            ? BigInt(swapTx.value).toString()
-            : (swapTx.value || '0');
-          batch.push({ to: swapTx.to, value: swapValue, data: swapTx.data });
-
-          const uniswapGas = parseInt(freshQuote.quote?.gasUseEstimate || '300000', 10);
-          const safeGasLimit = String(uniswapGas + 150000);
-          console.log(`[intent] AUTO_EXECUTE — executing ${batch.length} op(s) via Safe, gasLimit=${safeGasLimit}...`);
-          const txHash = await executeBatchViaSafe(safeAddress, agentKey, batch, safeGasLimit);
-
-          const { logTradeResult } = await import("../../executor/logResult");
-          const tradeId = quoteData.tradeId || crypto.randomUUID();
-          await logTradeResult(tradeId, txHash, "success");
-
-          console.log(`[intent] AUTO_EXECUTE success: ${txHash}`);
-          res.json({
-            status: "ok",
-            intentType: "swap",
-            autoExecuted: true,
-            txHash,
-            explorerUrl: `https://sepolia.etherscan.io/tx/${txHash}`,
-            plan: { id: tradeId, summary: planSummary, steps: planSteps, totalEstimatedValueUsd },
-            assessment: { verdict, riskScore, reasons: [gatekeeperReasoning], requiresLedger: false, triggered: decision.triggered },
-            agentReasoning,
-          });
-          return;
-        } catch (err: any) {
-          console.error(`[intent] AUTO_EXECUTE failed: ${err.message}`);
-          console.error(err.stack);
-          // Fall through to manual flow
-        }
-      }
-
-      res.json({
-        status: "ok",
-        intentType: "swap",
-        autoExecuted: false,
-        safeAddress,
-        plan: { id: quoteData?.tradeId || crypto.randomUUID(), summary: planSummary, steps: planSteps, totalEstimatedValueUsd },
-        assessment: baseAssessment,
-        quoteData,
         agentReasoning,
       });
       return;
