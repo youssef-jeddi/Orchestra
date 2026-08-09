@@ -1,12 +1,10 @@
 // ─── Policy — Market data & token helpers ───
-// Pure functions over token metadata. No network, no side effects.
-//
-// NOTE: prices are hardcoded stubs ($1 stables, $2500 ETH). This is intentional
-// for the current testnet build — a later milestone replaces `estimateUsd` with a
-// real price oracle. Keep the signature stable so that swap is drop-in.
+// Token metadata + USD estimation. `estimateUsd` reads live prices from the
+// cached price feed (falling back to stub prices when the cache is cold).
 
 import { ethers } from "ethers";
 import { WETH_SEPOLIA, USDC_SEPOLIA } from "../integrations/uniswap/types";
+import { getPriceUsd } from "./priceFeed";
 
 // ─── Decimals ───
 export const TOKEN_DECIMALS: Record<string, number> = {
@@ -36,10 +34,9 @@ export function symbolFromAddress(address: string, fallback: string = "UNKNOWN")
   return TOKEN_SYMBOLS[address.toLowerCase()] || fallback;
 }
 
-// ─── USD estimation (stub prices) ───
+// ─── USD estimation (live cached prices) ───
 export function estimateUsd(symbol: string, amount: number): number {
-  const s = symbol.toUpperCase();
-  if (s === "USDC" || s === "USDT") return amount;
-  if (s === "ETH" || s === "WETH") return amount * 2500;
-  return amount;
+  const price = getPriceUsd(symbol);
+  // Unknown symbols (price 0) fall back to a $1 valuation, as before.
+  return price > 0 ? amount * price : amount;
 }

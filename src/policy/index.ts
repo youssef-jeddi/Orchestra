@@ -347,3 +347,4 @@ export function computeHabitProfile(history: ActivityRecord[]): HabitProfile {
 }
 
 export * from "./prices";
+export * from "./priceFeed";

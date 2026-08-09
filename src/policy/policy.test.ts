@@ -13,6 +13,8 @@ import {
   symbolFromAddress,
   toTokenWei,
   DEFAULT_DAILY_LIMIT,
+  getPriceUsd,
+  setPrices,
 } from "./index";
 import { WETH_SEPOLIA, USDC_SEPOLIA } from "../integrations/uniswap/types";
 
@@ -50,13 +52,26 @@ test("resolveDailyLimit: invalid → default", () => {
   assert.equal(resolveDailyLimit("50"), DEFAULT_DAILY_LIMIT);
 });
 
-// ── estimateUsd / symbolFromAddress / toTokenWei ──
-test("estimateUsd: stub prices", () => {
+// ── price feed / estimateUsd ──
+test("getPriceUsd: stub defaults before any refresh", () => {
+  assert.equal(getPriceUsd("USDC"), 1);
+  assert.equal(getPriceUsd("ETH"), 2500);
+  assert.equal(getPriceUsd("WETH"), 2500);
+  assert.equal(getPriceUsd("MYSTERY"), 0); // unknown → 0
+});
+test("estimateUsd: uses cache, $1 fallback for unknown", () => {
   assert.equal(estimateUsd("USDC", 100), 100);
   assert.equal(estimateUsd("usdt", 5), 5);
   assert.equal(estimateUsd("ETH", 0.01), 25);
   assert.equal(estimateUsd("WETH", 1), 2500);
-  assert.equal(estimateUsd("MYSTERY", 7), 7);
+  assert.equal(estimateUsd("MYSTERY", 7), 7); // price 0 → treated as $1
+});
+test("estimateUsd: reflects a live price update", () => {
+  setPrices({ ETH: 4000, WETH: 4000 });
+  assert.equal(estimateUsd("ETH", 1), 4000);
+  assert.equal(estimateUsd("ETH", 0.01), 40);
+  setPrices({ ETH: 2500, WETH: 2500 }); // restore for other tests
+  assert.equal(estimateUsd("ETH", 1), 2500);
 });
 test("symbolFromAddress: known + fallback", () => {
   assert.equal(symbolFromAddress(WETH_SEPOLIA), "ETH");

@@ -33,6 +33,8 @@ import {
   computePlanValueUsd,
   decide,
   computeHabitProfile,
+  refreshPrices,
+  getPrices,
   type PolicyProfile,
   type ActivityRecord,
 } from "../../policy";
@@ -284,6 +286,9 @@ app.post("/intent", async (req, res) => {
     console.log(`\n[intent] ═══════════════════════════════════════`);
     console.log(`[intent] "${message}"`);
     console.log(`[intent] wallet: ${walletAddress || "not provided"}`);
+
+    // Keep the price cache warm (self-throttled; off the critical path).
+    refreshPrices().catch(() => {});
 
     // ── Step 0a: Check Safe deployment ──
     let safeAddress: string | null = null;
@@ -575,6 +580,12 @@ app.get("/compute-provider", (_req, res) => {
   res.json({ provider: getComputeProvider() });
 });
 
+// ─── Live prices (cached) ───
+app.get("/prices", async (_req, res) => {
+  await refreshPrices().catch(() => {});
+  res.json({ prices: getPrices() });
+});
+
 // ─── Policy config ───
 // Read/merge the user's deterministic policy (user:profile.policy in 0G).
 // Fields: verifiedTokens, knownAddresses, dailyLimitUsd, maxAutoTxPerDay, typicalMaxUsd.
@@ -858,6 +869,8 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(`  WS:    ws://0.0.0.0:${PORT}/ws`);
   console.log(`  Mock:  curl -X POST http://localhost:${PORT}/mock-trade -H "Content-Type: application/json" -d '{"summary":"Swap 1 ETH → USDC"}'`);
   console.log();
+  // Warm the price cache at startup.
+  refreshPrices().catch(() => {});
 });
 
 server.on("error", (err) => {
