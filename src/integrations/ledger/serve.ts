@@ -35,6 +35,7 @@ import {
   computeHabitProfile,
   refreshPrices,
   getPrices,
+  estimateUsd,
   type PolicyProfile,
   type ActivityRecord,
 } from "../../policy";
@@ -332,7 +333,7 @@ app.post("/intent", async (req, res) => {
 
         const usdcFormatted = Number(ethers.formatUnits(usdcRaw, 6));
         const wethFormatted = Number(ethers.formatEther(wethRaw));
-        const totalUsd = (ethFormatted + wethFormatted) * 2500 + usdcFormatted;
+        const totalUsd = estimateUsd("ETH", ethFormatted + wethFormatted) + estimateUsd("USDC", usdcFormatted);
 
         balances = { eth: ethFormatted, weth: wethFormatted, usdc: usdcFormatted, totalUsd };
 

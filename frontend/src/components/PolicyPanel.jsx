@@ -24,9 +24,10 @@ export default function PolicyPanel() {
   const [saving, setSaving] = useState(false);
   const [demoWallet, setDemoWallet] = useState(null);
 
-  // Dev/demo override: visit ?demoWallet=0x... to exercise the panel without a
-  // Ledger connected. Read-only w.r.t. funds — the panel never signs anything.
+  // Dev-only override: visit ?demoWallet=0x... to exercise the panel without a
+  // Ledger connected. Disabled in production builds so it can't leak.
   useEffect(() => {
+    if (process.env.NODE_ENV === 'production') return;
     const p = new URLSearchParams(window.location.search).get('demoWallet');
     if (p) setDemoWallet(p);
   }, []);

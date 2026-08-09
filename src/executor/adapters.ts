@@ -14,7 +14,7 @@ import crypto from "crypto";
 import { WETH_SEPOLIA, USDC_SEPOLIA } from "../integrations/uniswap/types";
 import { checkApproval } from "../integrations/uniswap/api";
 import { fetchQuoteWithRouting } from "../integrations/uniswap/routing";
-import { TOKEN_DECIMALS, toTokenWei, symbolFromAddress } from "../policy";
+import { TOKEN_DECIMALS, toTokenWei, symbolFromAddress, estimateUsd } from "../policy";
 
 export interface Balances {
   eth: number;
@@ -70,9 +70,19 @@ const balanceAdapter: IntentAdapter = {
   async build(ctx) {
     let balances = ctx.balances;
     if (!balances) {
-      const ethBal = await ctx.provider.getBalance(ctx.balanceAddress!);
-      const eth = Number(ethers.formatEther(ethBal));
-      balances = { eth, weth: 0, usdc: 0, totalUsd: eth * 2500 };
+      try {
+        const ethBal = await ctx.provider.getBalance(ctx.balanceAddress!);
+        const eth = Number(ethers.formatEther(ethBal));
+        balances = { eth, weth: 0, usdc: 0, totalUsd: estimateUsd("ETH", eth) };
+      } catch (err: any) {
+        // RPC unavailable — degrade gracefully instead of a raw 500.
+        console.warn(`[adapter:balance] balance read failed: ${err.message}`);
+        return {
+          plan: { id: crypto.randomUUID(), summary: "Couldn't read your balance — the RPC endpoint is unavailable.", steps: [], totalEstimatedValueUsd: 0 },
+          assessment: { verdict: "INFO", riskScore: 0, reasons: ["Balance read failed"], requiresLedger: false, triggered: [], approvalMethod: "none" },
+          payload: { balances: null },
+        };
+      }
     }
     return {
       plan: {
@@ -81,7 +91,7 @@ const balanceAdapter: IntentAdapter = {
         steps: [],
         totalEstimatedValueUsd: balances.totalUsd,
       },
-      assessment: { verdict: "INFO", riskScore: 0, reasons: ["Read-only query"], requiresLedger: false, triggered: [] },
+      assessment: { verdict: "INFO", riskScore: 0, reasons: ["Read-only query"], requiresLedger: false, triggered: [], approvalMethod: "none" },
       payload: { balances },
     };
   },

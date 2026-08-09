@@ -223,7 +223,8 @@ export default function FuturisticNotebook({ onClose, initialMessage = '' }) {
     setIsTyping(true);
 
     try {
-      const data = await sendIntent(text, ledger.walletAddress, { autoApproveLimit: spendingLimit });
+      // Daily limit now comes from stored policy (Guardrails), read server-side.
+      const data = await sendIntent(text, ledger.walletAddress);
 
       setIsTyping(false);
 
