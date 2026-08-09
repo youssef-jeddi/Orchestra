@@ -127,11 +127,11 @@ test("decide: within daily limit → AUTO_EXECUTE", () => {
   assert.equal(d.riskScore, 15);
   assert.deepEqual(d.triggered, []);
 });
-test("decide: over daily limit → NEEDS_APPROVAL + requiresLedger", () => {
+test("decide: over daily limit → NEEDS_APPROVAL (passkey tier under $1000)", () => {
   const d = decide({ intentType: "swap", valueUsd: 500, dailyLimitUsd: 5, plan: okPlan });
   assert.equal(d.verdict, "NEEDS_APPROVAL");
   assert.equal(d.riskScore, 70);
-  assert.equal(d.requiresLedger, true);
+  assert.equal(d.approvalMethod, "passkey"); // $500 < $1000 hardware threshold
   assert.deepEqual(d.triggered, ["daily-limit"]);
 });
 test("decide: boundary — value equal to limit auto-executes", () => {
@@ -151,7 +151,34 @@ test("decide: value-bearing intent with no steps → BLOCKED", () => {
 test("decide: unknown intent → fail closed NEEDS_APPROVAL", () => {
   const d = decide({ intentType: "unknown", valueUsd: 0, dailyLimitUsd: 100, plan: { summary: "???", steps: [] } });
   assert.equal(d.verdict, "NEEDS_APPROVAL");
+  assert.notEqual(d.approvalMethod, "none");
+});
+
+// ── decide — approval tier (passkey vs ledger) ──
+test("decide: auto-execute → approvalMethod none", () => {
+  const d = decide({ intentType: "swap", valueUsd: 25, dailyLimitUsd: 100, plan: okPlan });
+  assert.equal(d.approvalMethod, "none");
+});
+test("decide: over limit but under hardware threshold → passkey", () => {
+  const d = decide({ intentType: "swap", valueUsd: 300, dailyLimitUsd: 100, hardwareThresholdUsd: 1000, plan: okPlan });
+  assert.equal(d.verdict, "NEEDS_APPROVAL");
+  assert.equal(d.approvalMethod, "passkey");
+  assert.equal(d.requiresLedger, false);
+});
+test("decide: above hardware threshold → ledger", () => {
+  const d = decide({ intentType: "swap", valueUsd: 5000, dailyLimitUsd: 100, hardwareThresholdUsd: 1000, plan: okPlan });
+  assert.equal(d.approvalMethod, "ledger");
   assert.equal(d.requiresLedger, true);
+});
+test("decide: hardware threshold defaults to $1000", () => {
+  const under = decide({ intentType: "swap", valueUsd: 900, dailyLimitUsd: 100, plan: okPlan });
+  assert.equal(under.approvalMethod, "passkey");
+  const over = decide({ intentType: "swap", valueUsd: 1500, dailyLimitUsd: 100, plan: okPlan });
+  assert.equal(over.approvalMethod, "ledger");
+});
+test("decide: blocked/info → approvalMethod none", () => {
+  assert.equal(decide({ intentType: "balance", valueUsd: 0, dailyLimitUsd: 100, plan: { summary: "x", steps: [] } }).approvalMethod, "none");
+  assert.equal(decide({ intentType: "swap", valueUsd: 10, dailyLimitUsd: 100, plan: { steps: [] } }).approvalMethod, "none");
 });
 
 // ── decide — daily limit uses rolling-24h spend ──

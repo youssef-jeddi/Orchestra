@@ -18,6 +18,12 @@ export type IntentType = "swap" | "send" | "add_liquidity" | "balance" | "unknow
 
 export const DEFAULT_DAILY_LIMIT = 100;
 
+/** Above this USD value, approval must use hardware (Ledger); below it a passkey suffices. */
+export const DEFAULT_HARDWARE_THRESHOLD = 1000;
+
+/** The factor required to satisfy an approval. */
+export type ApprovalMethod = "none" | "passkey" | "ledger";
+
 // ─── Intent classification (from AI plan steps) ───
 export function detectIntentType(steps: any[]): IntentType {
   if (!steps || steps.length === 0) return "unknown";
@@ -35,6 +41,17 @@ export function resolveDailyLimit(configured: unknown): number {
   return typeof configured === "number" && configured > 0
     ? configured
     : DEFAULT_DAILY_LIMIT;
+}
+
+export function resolveHardwareThreshold(configured: unknown): number {
+  return typeof configured === "number" && configured > 0
+    ? configured
+    : DEFAULT_HARDWARE_THRESHOLD;
+}
+
+/** Which factor an approval requires, given the value and the hardware threshold. */
+export function approvalMethodFor(valueUsd: number, hardwareThresholdUsd: number): ApprovalMethod {
+  return valueUsd > hardwareThresholdUsd ? "ledger" : "passkey";
 }
 
 // ─── Server-side USD valuation ───
@@ -86,6 +103,8 @@ export interface DecisionInput {
   valueUsd: number;
   /** The rolling-24h auto-approve limit (already resolved with a default). */
   dailyLimitUsd: number;
+  /** Above this USD value an approval must use a Ledger; below it a passkey suffices. */
+  hardwareThresholdUsd?: number;
   plan: PlanShape;
   /** Optional per-user policy for the extended deterministic rules. */
   profile?: PolicyProfile;
@@ -111,6 +130,8 @@ export interface PolicyProfile {
    * default) — `decide` reads the resolved value, not this field.
    */
   dailyLimitUsd?: number;
+  /** Above this USD value, approval must use a Ledger (not a passkey). */
+  hardwareThresholdUsd?: number;
   /** Rolling 24h cap on number of auto-approvals. Reaching it forces approval. */
   maxAutoTxPerDay?: number;
   /** Habit baseline: the user's typical max single-tx USD. */
@@ -134,6 +155,8 @@ export interface PolicyDecision {
   requiresLedger: boolean;
   /** Machine-readable slugs of every rule that pushed toward approval. */
   triggered: string[];
+  /** Which factor the approval needs: 'none' (auto/blocked/info), 'passkey', or 'ledger'. */
+  approvalMethod: ApprovalMethod;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -197,30 +220,32 @@ function sendRecipient(steps: any[]): string | null {
  */
 export function decide(input: DecisionInput): PolicyDecision {
   const { intentType, valueUsd, dailyLimitUsd, plan, profile, history, now } = input;
+  const hardwareThresholdUsd = resolveHardwareThreshold(input.hardwareThresholdUsd);
+  const approvalMethod: ApprovalMethod = approvalMethodFor(valueUsd, hardwareThresholdUsd);
 
   // 1. Read-only query.
   if (intentType === "balance") {
-    return { verdict: "INFO", riskScore: 0, reason: "Read-only query — no funds move.", requiresLedger: false, triggered: [] };
+    return { verdict: "INFO", riskScore: 0, reason: "Read-only query — no funds move.", requiresLedger: false, triggered: [], approvalMethod: "none" };
   }
 
   // 2. Malformed plan.
   if (!plan || typeof plan.summary !== "string" || plan.summary.trim() === "") {
-    return { verdict: "BLOCKED", riskScore: 100, reason: "Plan is malformed (missing summary).", requiresLedger: false, triggered: ["malformed"] };
+    return { verdict: "BLOCKED", riskScore: 100, reason: "Plan is malformed (missing summary).", requiresLedger: false, triggered: ["malformed"], approvalMethod: "none" };
   }
   const steps = Array.isArray(plan.steps) ? plan.steps : [];
   if (intentType !== "unknown" && steps.length === 0) {
-    return { verdict: "BLOCKED", riskScore: 100, reason: "Plan has no executable steps.", requiresLedger: false, triggered: ["malformed"] };
+    return { verdict: "BLOCKED", riskScore: 100, reason: "Plan has no executable steps.", requiresLedger: false, triggered: ["malformed"], approvalMethod: "none" };
   }
 
   // 3. Denylisted token.
   const denied = findDenylistedToken(steps);
   if (denied) {
-    return { verdict: "BLOCKED", riskScore: 100, reason: `Token ${denied} is denylisted.`, requiresLedger: false, triggered: ["denylist"] };
+    return { verdict: "BLOCKED", riskScore: 100, reason: `Token ${denied} is denylisted.`, requiresLedger: false, triggered: ["denylist"], approvalMethod: "none" };
   }
 
   // 4. Unrecognized action — fail closed.
   if (intentType === "unknown") {
-    return { verdict: "NEEDS_APPROVAL", riskScore: 60, reason: "Unrecognized action type — requires manual approval.", requiresLedger: true, triggered: ["unknown-intent"] };
+    return { verdict: "NEEDS_APPROVAL", riskScore: 60, reason: "Unrecognized action type — requires manual approval.", requiresLedger: approvalMethod === "ledger", triggered: ["unknown-intent"], approvalMethod };
   }
 
   // 5. Value-bearing intents (swap / send / add_liquidity): accumulate escalations.
@@ -295,8 +320,9 @@ export function decide(input: DecisionInput): PolicyDecision {
       verdict: "NEEDS_APPROVAL",
       riskScore: Math.max(...escalations.map((e) => e.risk)),
       reason: escalations.map((e) => e.reason).join(" "),
-      requiresLedger: true,
+      requiresLedger: approvalMethod === "ledger",
       triggered: escalations.map((e) => e.rule),
+      approvalMethod,
     };
   }
 
@@ -306,6 +332,7 @@ export function decide(input: DecisionInput): PolicyDecision {
     reason: `$${valueUsd} is within your $${dailyLimitUsd} daily auto-approve limit ($${spentToday} used today).`,
     requiresLedger: false,
     triggered: [],
+    approvalMethod: "none",
   };
 }
 

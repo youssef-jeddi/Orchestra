@@ -40,6 +40,13 @@ import {
 } from "../../policy";
 import { getPolicyProfile, getRecentActivity, recordActivity, _resetPolicyStoreCache } from "../../policy/store";
 import { getAdapter } from "../../executor/adapters";
+import {
+  registrationOptions,
+  verifyRegistration,
+  authenticationOptions,
+  verifyAuthentication,
+  hasPasskey,
+} from "../passkey";
 
 const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || "https://eth-sepolia.g.alchemy.com/v2/demo";
 const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC);
@@ -439,6 +446,7 @@ app.post("/intent", async (req, res) => {
       intentType,
       valueUsd: totalEstimatedValueUsd,
       dailyLimitUsd,
+      hardwareThresholdUsd: profile?.hardwareThresholdUsd,
       plan: { summary: planSummary, steps: planSteps },
       profile,
       history,
@@ -481,8 +489,9 @@ app.post("/intent", async (req, res) => {
       verdict,
       riskScore,
       reasons: [gatekeeperReasoning],
-      requiresLedger: verdict === "NEEDS_APPROVAL",
+      requiresLedger: decision.approvalMethod === "ledger",
       triggered: decision.triggered,
+      approvalMethod: decision.approvalMethod,
     };
     const agentReasoning = { planner: plannerReasoning, gatekeeper: gatekeeperReasoning };
 
@@ -578,6 +587,83 @@ app.post("/set-compute-provider", (req, res) => {
 
 app.get("/compute-provider", (_req, res) => {
   res.json({ provider: getComputeProvider() });
+});
+
+// ─── Passkey (WebAuthn) — medium-tier approval ───
+app.get("/passkey/status", async (req, res) => {
+  try {
+    const wallet = String(req.query.wallet || "");
+    if (!wallet) { res.status(400).json({ error: "wallet query param required" }); return; }
+    res.json({ registered: await hasPasskey(wallet) });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/passkey/register-options", async (req, res) => {
+  try {
+    const { walletAddress } = req.body;
+    if (!walletAddress) { res.status(400).json({ error: "walletAddress required" }); return; }
+    res.json(await registrationOptions(walletAddress));
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/passkey/register", async (req, res) => {
+  try {
+    const { walletAddress, response } = req.body;
+    if (!walletAddress || !response) { res.status(400).json({ error: "walletAddress and response required" }); return; }
+    await verifyRegistration(walletAddress, response);
+    console.log(`[passkey] registered for ${walletAddress}`);
+    res.json({ status: "ok", registered: true });
+  } catch (e: any) { res.status(400).json({ error: e.message }); }
+});
+
+app.post("/passkey/auth-options", async (req, res) => {
+  try {
+    const { walletAddress } = req.body;
+    if (!walletAddress) { res.status(400).json({ error: "walletAddress required" }); return; }
+    res.json(await authenticationOptions(walletAddress));
+  } catch (e: any) { res.status(400).json({ error: e.message }); }
+});
+
+// Verify the passkey assertion, then execute the approved action via the Safe.
+app.post("/passkey/approve", async (req, res) => {
+  try {
+    const { walletAddress, response, quoteData, sendData } = req.body;
+    if (!walletAddress || !response) { res.status(400).json({ error: "walletAddress and response required" }); return; }
+
+    const ok = await verifyAuthentication(walletAddress, response);
+    if (!ok) { res.status(401).json({ error: "Passkey verification failed" }); return; }
+    console.log(`[passkey] verified for ${walletAddress} — executing via Safe`);
+
+    const safeData = (await read(`safe:${walletAddress.toLowerCase()}`)) as any;
+    const safeAddress = safeData?.safeAddress;
+    if (!safeAddress) { res.status(400).json({ error: "No Safe deployed — passkey execution requires a Safe" }); return; }
+
+    if (quoteData) {
+      const swap = getAdapter("swap");
+      if (!swap?.execute) throw new Error("swap adapter unavailable");
+      const ctx = {
+        walletAddress, safeAddress, balanceAddress: safeAddress, provider,
+        params: {}, planSummary: "", planSteps: [], totalEstimatedValueUsd: 0, balances: null,
+      };
+      const exec = await swap.execute(ctx, { payload: { quoteData } });
+      if (!exec) throw new Error("execution produced no result");
+      res.json({ status: "ok", ...exec });
+      return;
+    }
+
+    if (sendData) {
+      const agentKey = process.env.AGENT_PRIVATE_KEY;
+      if (!agentKey) throw new Error("AGENT_PRIVATE_KEY not set");
+      const { executeBatchViaSafe } = await import("../safe/transaction");
+      const tx = sendData.unsignedTx;
+      const value = typeof tx.value === "string" && tx.value.startsWith("0x") ? BigInt(tx.value).toString() : (tx.value || "0");
+      const txHash = await executeBatchViaSafe(safeAddress, agentKey, [{ to: tx.to, value, data: tx.data || "0x" }], "150000");
+      res.json({ status: "ok", txHash, explorerUrl: `https://sepolia.etherscan.io/tx/${txHash}` });
+      return;
+    }
+
+    res.status(400).json({ error: "Nothing to execute — provide quoteData or sendData" });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
 // ─── Live prices (cached) ───
