@@ -7,7 +7,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { OrchestraProvider, useOrchestra } from '@/context/OrchestraContext';
-import { sendIntent } from '@/lib/bridge';
+import { sendIntent, getPrices } from '@/lib/bridge';
 import { executeSwap, executeSend } from '@/lib/signing';
 
 const ACCENT = '#C084FC';
@@ -56,6 +56,16 @@ function SimpleChat() {
   }, [messages, busy]);
 
   const [signingIdx, setSigningIdx] = useState(null);
+  const [prices, setPrices] = useState(null);
+
+  // Live price ticker — refresh every 60s.
+  useEffect(() => {
+    let alive = true;
+    const load = () => getPrices().then((d) => { if (alive) setPrices(d.prices); }).catch(() => {});
+    load();
+    const id = setInterval(load, 60000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
 
   const send = useCallback(async (raw) => {
     const text = (raw ?? input).trim();
@@ -112,6 +122,11 @@ function SimpleChat() {
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
           <span style={{ fontFamily: 'var(--font-playfair)', fontSize: 20, color: '#E8E4DE' }}>Orchestra</span>
           <span style={{ fontSize: 11, color: '#555' }}>lite</span>
+          {prices?.ETH && (
+            <span style={{ fontSize: 11, color: '#777', marginLeft: 4 }} title="Live price">
+              · ETH ${Number(prices.ETH).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+            </span>
+          )}
         </div>
         {connected ? (
           <button onClick={ledger.disconnect} style={pill(false)} title="Disconnect">

@@ -116,3 +116,7 @@ export async function setPolicy(policy) {
 export async function getHabit(walletAddress) {
   return bridgeFetch(`/habit?wallet=${walletAddress}`);
 }
+
+export async function getPrices() {
+  return bridgeFetch('/prices');
+}

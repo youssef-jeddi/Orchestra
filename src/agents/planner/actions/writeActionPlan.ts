@@ -39,7 +39,7 @@ const writeActionPlan: Action = {
   parameters: [
     { name: 'intent', type: 'string', description: 'Human-readable summary of what this plan does', required: true },
     { name: 'steps', type: 'array', description: 'Array of TransactionStep objects, each with: protocol, action, params, estimatedGasWei, order', required: true },
-    { name: 'totalEstimatedValueUsd', type: 'number', description: 'Total estimated value of the plan in USD', required: true },
+    { name: 'totalEstimatedValueUsd', type: 'number', description: 'Set to 0 — the server values the plan from step params using live prices', required: false },
     { name: 'flagId', type: 'string', description: 'ID of the flag that triggered this plan (if any)', required: false },
   ],
   handler: async (args: Record<string, unknown>): Promise<string> => {

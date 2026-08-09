@@ -37,13 +37,14 @@ export function resolveDailyLimit(configured: unknown): number {
     : DEFAULT_DAILY_LIMIT;
 }
 
-// ─── Server-side USD recomputation ───
-// Never trust the AI's estimate — recompute from the step params for swap/send.
-// For any other intent type, fall back to the plan's declared value.
+// ─── Server-side USD valuation ───
+// The Planner does NOT compute USD — the server values every plan from its step
+// params using live prices. `fallbackUsd` is only used for intents we can't value
+// (currently just `unknown`); it should normally be 0.
 export function computePlanValueUsd(
   intentType: IntentType,
   params: Record<string, any>,
-  fallbackUsd: number
+  fallbackUsd = 0
 ): number {
   if (intentType === "swap") {
     const sym = params.symbolIn || symbolFromAddress(params.tokenIn || "", "ETH");
@@ -52,6 +53,12 @@ export function computePlanValueUsd(
   if (intentType === "send") {
     return estimateUsd(params.symbol || "ETH", Number(params.amount || 0));
   }
+  if (intentType === "add_liquidity") {
+    const symA = params.symbolA || symbolFromAddress(params.tokenA || "", "WETH");
+    const symB = params.symbolB || symbolFromAddress(params.tokenB || "", "USDC");
+    return estimateUsd(symA, Number(params.amountA || 0)) + estimateUsd(symB, Number(params.amountB || 0));
+  }
+  if (intentType === "balance") return 0;
   return fallbackUsd || 0;
 }
 

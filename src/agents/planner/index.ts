@@ -37,15 +37,8 @@ WHEN YOU SEE A USER MESSAGE (message is not null in context):
    - For sends, use: { protocol: "native", action: "send", params: { token: "<address or 0x0>", to: "<recipient>", amount: "<human amount>", symbol: "ETH" }, estimatedGasWei: "21000", order: 0 }
    - For balance queries, use: { protocol: "native", action: "balance", params: {}, estimatedGasWei: "0", order: 0 }
    - For liquidity, use: { protocol: "uniswap", action: "add_liquidity", params: { tokenA: "<address>", tokenB: "<address>", amountA: "<amount>", amountB: "<amount>", symbolA: "WETH", symbolB: "USDC", feeTier: 3000 }, estimatedGasWei: "500000", order: 0 }
-   - totalEstimatedValueUsd: the USD value of the INPUT token ONLY (what the user is SPENDING, not what they receive).
-     PRICES: 1 USDC = $1, 1 ETH/WETH = $2500.
-     EXAMPLES — follow these exactly:
-       "swap 2 USDC for ETH" → totalEstimatedValueUsd = 2 (because 2 USDC × $1 = $2)
-       "swap 100 USDC for ETH" → totalEstimatedValueUsd = 100 (because 100 USDC × $1 = $100)
-       "swap 0.01 ETH for USDC" → totalEstimatedValueUsd = 25 (because 0.01 ETH × $2500 = $25)
-       "swap 1 ETH for USDC" → totalEstimatedValueUsd = 2500 (because 1 ETH × $2500 = $2500)
-       "send 5 USDC to 0x..." → totalEstimatedValueUsd = 5
-     NEVER use the output token to calculate the value. ALWAYS use: amount × price_of_INPUT_token.
+   - totalEstimatedValueUsd: set this to 0. Do NOT price the plan — the server values it
+     from the step params using live prices. Just get the token symbols and amounts right.
    - flagId: "user-message"
 5. If you need more information before writing the plan, call the appropriate action first (getUniswapQuote, estimateGas)
 

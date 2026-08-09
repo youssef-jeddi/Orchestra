@@ -94,10 +94,17 @@ test("computePlanValueUsd: send", () => {
   assert.equal(computePlanValueUsd("send", { symbol: "USDC", amount: "5" }, 0), 5);
   assert.equal(computePlanValueUsd("send", { amount: "1" }, 0), 2500);
 });
-test("computePlanValueUsd: other → fallback", () => {
-  assert.equal(computePlanValueUsd("balance", {}, 0), 0);
-  assert.equal(computePlanValueUsd("add_liquidity", {}, 42), 42);
-  assert.equal(computePlanValueUsd("unknown", {}, undefined as any), 0);
+test("computePlanValueUsd: add_liquidity sums both legs (server-valued)", () => {
+  // 0.01 WETH ($25) + 25 USDC ($25) = $50
+  assert.equal(
+    computePlanValueUsd("add_liquidity", { symbolA: "WETH", amountA: "0.01", symbolB: "USDC", amountB: "25" }, 0),
+    50
+  );
+  assert.equal(computePlanValueUsd("add_liquidity", {}, 42), 0); // no params → $0, not the fallback
+});
+test("computePlanValueUsd: balance is always 0; unknown uses fallback", () => {
+  assert.equal(computePlanValueUsd("balance", {}, 999), 0);
+  assert.equal(computePlanValueUsd("unknown", {}, 0), 0);
 });
 
 // ── decide — core (single daily limit) ──
