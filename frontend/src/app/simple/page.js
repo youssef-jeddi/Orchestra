@@ -7,8 +7,9 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { OrchestraProvider, useOrchestra } from '@/context/OrchestraContext';
-import { sendIntent, getPrices } from '@/lib/bridge';
+import { sendIntent, getPrices, getPasskeyStatus } from '@/lib/bridge';
 import { executeSwap, executeSend } from '@/lib/signing';
+import { registerPasskey, approveWithPasskey } from '@/lib/passkey';
 
 const ACCENT = '#C084FC';
 
@@ -57,6 +58,13 @@ function SimpleChat() {
 
   const [signingIdx, setSigningIdx] = useState(null);
   const [prices, setPrices] = useState(null);
+  const [passkeyReg, setPasskeyReg] = useState(false);
+
+  // Check passkey registration when a wallet connects.
+  useEffect(() => {
+    if (!ledger.walletAddress) { setPasskeyReg(false); return; }
+    getPasskeyStatus(ledger.walletAddress).then((d) => setPasskeyReg(!!d.registered)).catch(() => {});
+  }, [ledger.walletAddress]);
 
   // Live price ticker — refresh every 60s.
   useEffect(() => {
@@ -106,6 +114,34 @@ function SimpleChat() {
     }
   }, [ledger]);
 
+  // Approve + execute with a passkey (biometric) instead of signing directly.
+  const approvePasskey = useCallback(async (data, idx) => {
+    if (!ledger.walletAddress) {
+      setMessages((m) => [...m, { role: 'agent', error: 'Connect a wallet first.' }]);
+      return;
+    }
+    setSigningIdx(idx);
+    try {
+      const payload = data.quoteData ? { quoteData: data.quoteData } : { sendData: data.sendData };
+      const result = await approveWithPasskey(ledger.walletAddress, payload);
+      setMessages((m) => [...m, { role: 'system', txHash: result.txHash, explorerUrl: result.explorerUrl }]);
+    } catch (err) {
+      setMessages((m) => [...m, { role: 'agent', error: err.message }]);
+    } finally {
+      setSigningIdx(null);
+    }
+  }, [ledger.walletAddress]);
+
+  const registerPk = useCallback(async () => {
+    if (!ledger.walletAddress) return;
+    try {
+      await registerPasskey(ledger.walletAddress);
+      setPasskeyReg(true);
+    } catch (err) {
+      setMessages((m) => [...m, { role: 'agent', error: `Passkey registration failed: ${err.message}` }]);
+    }
+  }, [ledger.walletAddress]);
+
   const connected = !!ledger.walletAddress;
 
   return (
@@ -129,11 +165,16 @@ function SimpleChat() {
           )}
         </div>
         {connected ? (
-          <button onClick={ledger.disconnect} style={pill(false)} title="Disconnect">
-            <span style={{ width: 6, height: 6, borderRadius: 3, background: '#30D158', display: 'inline-block' }} />
-            {ledger.connectionType === 'metamask' ? '🦊 ' : ''}
-            {ledger.walletAddress.slice(0, 6)}…{ledger.walletAddress.slice(-4)}
-          </button>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {passkeyReg
+              ? <span style={{ fontSize: 11, color: '#30D158' }} title="Passkey registered">🔑 passkey</span>
+              : <button onClick={registerPk} style={pill(false)} title="Register a device passkey">🔑 Add passkey</button>}
+            <button onClick={ledger.disconnect} style={pill(false)} title="Disconnect">
+              <span style={{ width: 6, height: 6, borderRadius: 3, background: '#30D158', display: 'inline-block' }} />
+              {ledger.connectionType === 'metamask' ? '🦊 ' : ''}
+              {ledger.walletAddress.slice(0, 6)}…{ledger.walletAddress.slice(-4)}
+            </button>
+          </div>
         ) : (
           <div style={{ display: 'flex', gap: 8 }}>
             <button onClick={ledger.connect} style={pill(false)}>Ledger</button>
@@ -162,7 +203,8 @@ function SimpleChat() {
         )}
 
         {messages.map((m, i) => (
-          <MessageRow key={i} m={m} idx={i} onExecute={execute} signing={signingIdx === i} />
+          <MessageRow key={i} m={m} idx={i} onExecute={execute} onPasskey={approvePasskey}
+            passkeyReg={passkeyReg} signing={signingIdx === i} />
         ))}
         {busy && <div style={{ color: '#666', fontSize: 13, paddingLeft: 4 }}>Thinking…</div>}
         <div ref={endRef} />
@@ -206,7 +248,7 @@ function SimpleChat() {
   );
 }
 
-function MessageRow({ m, idx, onExecute, signing }) {
+function MessageRow({ m, idx, onExecute, onPasskey, passkeyReg, signing }) {
   if (m.role === 'user') {
     return (
       <div style={{ alignSelf: 'flex-end', maxWidth: '80%', background: '#242430', color: '#E8E4DE',
@@ -235,15 +277,25 @@ function MessageRow({ m, idx, onExecute, signing }) {
       </div>
     );
   }
-  return <AgentCard data={m.data} onExecute={() => onExecute(m.data, idx)} signing={signing} />;
+  return (
+    <AgentCard
+      data={m.data}
+      onExecute={() => onExecute(m.data, idx)}
+      onPasskey={() => onPasskey(m.data, idx)}
+      passkeyReg={passkeyReg}
+      signing={signing}
+    />
+  );
 }
 
-function AgentCard({ data, onExecute, signing }) {
+function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing }) {
   const verdict = data.assessment?.verdict || 'UNKNOWN';
   const color = VERDICT_COLOR[verdict] || '#666';
   const triggered = data.assessment?.triggered || [];
   const needsSign = !data.autoExecuted && (data.quoteData || data.sendData);
   const isSwap = !!data.quoteData;
+  const method = data.assessment?.approvalMethod; // 'passkey' | 'ledger' | 'none'
+  const usePasskey = needsSign && method === 'passkey' && passkeyReg;
 
   return (
     <div style={{ alignSelf: 'flex-start', maxWidth: '92%', display: 'flex', flexDirection: 'column', gap: 10,
@@ -305,21 +357,39 @@ function AgentCard({ data, onExecute, signing }) {
         </a>
       )}
       {needsSign && (
-        <button
-          onClick={onExecute}
-          disabled={signing}
-          style={{
-            marginTop: 2, padding: '10px 16px', borderRadius: 10, cursor: signing ? 'default' : 'pointer',
-            background: signing ? 'rgba(192,132,252,0.1)' : 'rgba(192,132,252,0.15)',
-            border: '1px solid rgba(192,132,252,0.35)', color: ACCENT,
-            fontFamily: 'var(--font-inter)', fontSize: 13, fontWeight: 500, opacity: signing ? 0.7 : 1,
-          }}
-        >
-          {signing ? 'Check your wallet…' : (isSwap ? 'Approve & Swap' : 'Approve & Send')}
-        </button>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 2 }}>
+          {usePasskey ? (
+            <button onClick={onPasskey} disabled={signing} style={approveBtn(signing)}>
+              {signing ? 'Confirm on your device…' : '🔑 Approve with passkey'}
+            </button>
+          ) : (
+            <button onClick={onExecute} disabled={signing} style={approveBtn(signing)}>
+              {signing ? 'Check your wallet…' : (isSwap ? 'Approve & Swap' : 'Approve & Send')}
+            </button>
+          )}
+          {method === 'passkey' && !passkeyReg && (
+            <span style={{ fontSize: 11, color: '#777' }}>
+              Tip: add a passkey (top-right) to approve with your fingerprint instead.
+            </span>
+          )}
+          {method === 'ledger' && (
+            <span style={{ fontSize: 11, color: '#FFB400' }}>
+              High-value — requires a Ledger hardware signature.
+            </span>
+          )}
+        </div>
       )}
     </div>
   );
+}
+
+function approveBtn(signing) {
+  return {
+    padding: '10px 16px', borderRadius: 10, cursor: signing ? 'default' : 'pointer',
+    background: signing ? 'rgba(192,132,252,0.1)' : 'rgba(192,132,252,0.15)',
+    border: '1px solid rgba(192,132,252,0.35)', color: ACCENT,
+    fontFamily: 'var(--font-inter)', fontSize: 13, fontWeight: 500, opacity: signing ? 0.7 : 1,
+  };
 }
 
 function pill(accent) {

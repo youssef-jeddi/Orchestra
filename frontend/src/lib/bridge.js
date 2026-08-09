@@ -120,3 +120,33 @@ export async function getHabit(walletAddress) {
 export async function getPrices() {
   return bridgeFetch('/prices');
 }
+
+// ── Passkey (WebAuthn) ──
+
+export async function getPasskeyStatus(walletAddress) {
+  return bridgeFetch(`/passkey/status?wallet=${walletAddress}`);
+}
+
+export async function passkeyRegisterOptions(walletAddress) {
+  return bridgeFetch('/passkey/register-options', {
+    method: 'POST', body: JSON.stringify({ walletAddress }),
+  });
+}
+
+export async function passkeyRegister(walletAddress, response) {
+  return bridgeFetch('/passkey/register', {
+    method: 'POST', body: JSON.stringify({ walletAddress, response }),
+  });
+}
+
+export async function passkeyAuthOptions(walletAddress) {
+  return bridgeFetch('/passkey/auth-options', {
+    method: 'POST', body: JSON.stringify({ walletAddress }),
+  });
+}
+
+export async function passkeyApprove(walletAddress, response, payload) {
+  return bridgeFetch('/passkey/approve', {
+    method: 'POST', body: JSON.stringify({ walletAddress, response, ...payload }),
+  });
+}
