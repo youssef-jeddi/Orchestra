@@ -34,6 +34,19 @@ export function symbolFromAddress(address: string, fallback: string = "UNKNOWN")
   return TOKEN_SYMBOLS[address.toLowerCase()] || fallback;
 }
 
+// The token ADDRESS is ground truth for valuation: a known address always wins
+// over the plan's claimed symbol, so a lying symbolIn can never re-price a plan
+// (a WETH swap labeled "USDC" would otherwise be valued at $1/token). The
+// claimed symbol only fills in for addresses we don't recognize — those are
+// caught separately by the unverified-token rule when an allow-list is set.
+export function resolveValuationSymbol(address: unknown, claimed: unknown, fallback: string): string {
+  if (typeof address === "string" && address) {
+    const known = TOKEN_SYMBOLS[address.toLowerCase()];
+    if (known) return known;
+  }
+  return typeof claimed === "string" && claimed ? claimed : fallback;
+}
+
 // ─── USD estimation (live cached prices) ───
 export function estimateUsd(symbol: string, amount: number): number {
   const price = getPriceUsd(symbol);

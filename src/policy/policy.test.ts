@@ -102,6 +102,15 @@ test("computePlanValueUsd: add_liquidity sums both legs (server-valued)", () => 
   );
   assert.equal(computePlanValueUsd("add_liquidity", {}, 42), 0); // no params → $0, not the fallback
 });
+test("computePlanValueUsd: known address wins over a lying claimed symbol", () => {
+  // A WETH swap labeled "USDC" must still be priced as WETH ($2500), not $1.
+  assert.equal(computePlanValueUsd("swap", { tokenIn: WETH_SEPOLIA, symbolIn: "USDC", amount: "2" }, 0), 5000);
+  assert.equal(computePlanValueUsd("send", { token: USDC_SEPOLIA, symbol: "SHIB", amount: "90" }, 0), 90);
+  assert.equal(
+    computePlanValueUsd("add_liquidity", { tokenA: WETH_SEPOLIA, symbolA: "USDC", amountA: "1", tokenB: USDC_SEPOLIA, symbolB: "WETH", amountB: "10" }, 0),
+    2510
+  );
+});
 test("computePlanValueUsd: balance is always 0; unknown uses fallback", () => {
   assert.equal(computePlanValueUsd("balance", {}, 999), 0);
   assert.equal(computePlanValueUsd("unknown", {}, 0), 0);

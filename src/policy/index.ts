@@ -10,7 +10,7 @@
 // Later steps will grow this into a full policy engine (limits, allow-lists,
 // velocity caps) that replaces — rather than patches — the Gatekeeper LLM verdict.
 
-import { estimateUsd, symbolFromAddress } from "./prices";
+import { estimateUsd, resolveValuationSymbol } from "./prices";
 
 export type Verdict = "AUTO_EXECUTE" | "NEEDS_APPROVAL" | "BLOCKED" | "INFO";
 
@@ -64,15 +64,16 @@ export function computePlanValueUsd(
   fallbackUsd = 0
 ): number {
   if (intentType === "swap") {
-    const sym = params.symbolIn || symbolFromAddress(params.tokenIn || "", "ETH");
+    const sym = resolveValuationSymbol(params.tokenIn, params.symbolIn, "ETH");
     return estimateUsd(sym, Number(params.amount || 0));
   }
   if (intentType === "send") {
-    return estimateUsd(params.symbol || "ETH", Number(params.amount || 0));
+    const sym = resolveValuationSymbol(params.token, params.symbol, "ETH");
+    return estimateUsd(sym, Number(params.amount || 0));
   }
   if (intentType === "add_liquidity") {
-    const symA = params.symbolA || symbolFromAddress(params.tokenA || "", "WETH");
-    const symB = params.symbolB || symbolFromAddress(params.tokenB || "", "USDC");
+    const symA = resolveValuationSymbol(params.tokenA, params.symbolA, "WETH");
+    const symB = resolveValuationSymbol(params.tokenB, params.symbolB, "USDC");
     return estimateUsd(symA, Number(params.amountA || 0)) + estimateUsd(symB, Number(params.amountB || 0));
   }
   if (intentType === "balance") return 0;
