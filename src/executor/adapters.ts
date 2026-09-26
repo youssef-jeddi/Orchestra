@@ -6,8 +6,8 @@
 //
 // The interface is deliberately shaped to fit protocol integrations, not just
 // native transfers: an adapter can fetch quotes, check approvals, and build one
-// or more unsigned transactions. Server-side auto-execution (the swap path) will
-// move behind an optional `execute()` on this interface in a follow-up.
+// or more unsigned transactions. Server-side auto-execution goes through the
+// optional `execute()` (swap and send), signed by the agent wallet as a Safe owner.
 
 import { ethers } from "ethers";
 import crypto from "crypto";
@@ -15,6 +15,18 @@ import { WETH_SEPOLIA, USDC_SEPOLIA } from "../integrations/uniswap/types";
 import { checkApproval } from "../integrations/uniswap/api";
 import { fetchQuoteWithRouting } from "../integrations/uniswap/routing";
 import { TOKEN_DECIMALS, toTokenWei, symbolFromAddress, estimateUsd } from "../policy";
+
+/** Uniswap's native-ETH sentinel. A WETH address would pull ERC-20 the Safe may not hold. */
+const NATIVE_ETH = "0x0000000000000000000000000000000000000000";
+
+function isNativeEth(symbol: string | undefined, address: string): boolean {
+  return String(symbol || "").toUpperCase() === "ETH" || address.toLowerCase() === NATIVE_ETH;
+}
+
+/** Quote address: "ETH" is native (the router wraps it); "WETH" stays the WETH contract. */
+function routingToken(address: string, symbol: string | undefined): string {
+  return String(symbol || "").toUpperCase() === "ETH" ? NATIVE_ETH : address;
+}
 
 export interface Balances {
   eth: number;
@@ -120,6 +132,24 @@ const sendAdapter: IntentAdapter = {
     console.log(`[adapter:send] ${amount} ${symbol} → ${to}`);
     return { payload: { sendData: { unsignedTx, token, symbol, amount, to } } };
   },
+
+  async execute(ctx, built) {
+    const sendData = (built.payload as any)?.sendData;
+    if (!sendData?.unsignedTx || !ctx.safeAddress) return null;
+
+    const agentKey = process.env.AGENT_PRIVATE_KEY;
+    if (!agentKey) throw new Error("AGENT_PRIVATE_KEY not set");
+
+    const { executeBatchViaSafe } = await import("../integrations/safe/transaction");
+    const tx = sendData.unsignedTx;
+    console.log(`[adapter:send] AUTO_EXECUTE via Safe ${ctx.safeAddress}`);
+    const txHash = await executeBatchViaSafe(ctx.safeAddress, agentKey, [{ to: tx.to, value: tx.value || "0", data: tx.data || "0x" }], "150000");
+
+    const tradeId = crypto.randomUUID();
+    const { logTradeResult } = await import("./logResult");
+    logTradeResult(tradeId, txHash, "success").catch(() => {});
+    return { txHash, explorerUrl: `https://sepolia.etherscan.io/tx/${txHash}`, tradeId };
+  },
 };
 
 // ─── add_liquidity — check approvals, build quote data ───
@@ -168,11 +198,11 @@ const swapAdapter: IntentAdapter = {
 
   async build(ctx) {
     const p = ctx.params;
-    const tokenIn = p.tokenIn || WETH_SEPOLIA;
-    const tokenOut = p.tokenOut || USDC_SEPOLIA;
+    const symbolIn = p.symbolIn || symbolFromAddress(p.tokenIn || "", "ETH");
+    const symbolOut = p.symbolOut || symbolFromAddress(p.tokenOut || "", "USDC");
+    const tokenIn = routingToken(p.tokenIn || WETH_SEPOLIA, symbolIn);
+    const tokenOut = routingToken(p.tokenOut || USDC_SEPOLIA, symbolOut);
     const rawAmount = String(p.amount || "0");
-    const symbolIn = p.symbolIn || symbolFromAddress(tokenIn, "ETH");
-    const symbolOut = p.symbolOut || symbolFromAddress(tokenOut, "USDC");
 
     // Already-wei amounts (10+ digits) pass through; otherwise convert by decimals.
     const amountWei = /^\d{10,}$/.test(String(rawAmount))
@@ -185,7 +215,9 @@ const swapAdapter: IntentAdapter = {
     const swapper = ctx.safeAddress || ctx.walletAddress;
     if (swapper) {
       try {
-        const approvalTx = await checkApproval({ walletAddress: swapper, token: tokenIn, tokenOut, amount: amountWei });
+        const approvalTx = isNativeEth(symbolIn, tokenIn)
+          ? null
+          : await checkApproval({ walletAddress: swapper, token: tokenIn, tokenOut, amount: amountWei });
         const quoteResult = await fetchQuoteWithRouting({ swapper, tokenIn, tokenOut, amount: amountWei }, "autonomous");
         console.log(`[adapter:swap]   routing: ${quoteResult.routing}, permit: ${quoteResult.permitData ? "yes" : "no"}`);
         quoteData = {
@@ -237,7 +269,11 @@ const swapAdapter: IntentAdapter = {
       batch.push(...approvalTxs);
     }
 
-    const swapValue = swapTx.value?.startsWith("0x") ? BigInt(swapTx.value).toString() : (swapTx.value || "0");
+    let swapValue = swapTx.value?.startsWith("0x") ? BigInt(swapTx.value).toString() : (swapTx.value || "0");
+    // Native ETH in: the Safe must forward the amount. A 0-value call tries to pull WETH and reverts GS013.
+    if (isNativeEth(undefined, quoteData.tokenIn) && BigInt(swapValue || "0") === 0n) {
+      swapValue = String(quoteData.amount || "0");
+    }
     batch.push({ to: swapTx.to, value: swapValue, data: swapTx.data });
 
     const uniswapGas = parseInt(freshQuote.quote?.gasUseEstimate || "300000", 10);
@@ -247,7 +283,7 @@ const swapAdapter: IntentAdapter = {
 
     const { logTradeResult } = await import("./logResult");
     const tradeId = quoteData.tradeId || crypto.randomUUID();
-    await logTradeResult(tradeId, txHash, "success");
+    logTradeResult(tradeId, txHash, "success").catch(() => {});
 
     console.log(`[adapter:swap] AUTO_EXECUTE success: ${txHash}`);
     return { txHash, explorerUrl: `https://sepolia.etherscan.io/tx/${txHash}`, tradeId };

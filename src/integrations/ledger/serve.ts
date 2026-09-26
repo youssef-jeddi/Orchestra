@@ -14,8 +14,6 @@ import { checkApproval, getQuote } from "../uniswap/api";
 import { fetchQuoteWithRouting } from "../uniswap/routing";
 import { executeSwap } from "../uniswap/execution";
 import { WETH_SEPOLIA, USDC_SEPOLIA, CHAIN_ID } from "../uniswap/types";
-import { runPlanner } from "../../agents/planner/index";
-import { buildActionPlan } from "../../agents/planner/actions/writeActionPlan";
 import { write, read, append } from "../zero-g/storage";
 import { setComputeProvider, getComputeProvider } from "../zero-g/compute";
 import { deploySafe } from "../safe/deploy";
@@ -23,24 +21,19 @@ import { detectExistingSafe } from "../safe/detect";
 import { setInitialSpendingLimits, updateSpendingLimit, buildLimitUpdateTx } from "../safe/spendingLimit";
 import { getAgentAddress } from "../safe/agentWallet";
 import { executePlan } from "../../executor";
-import { getSpendingLimit, getAllowanceTokens, updateSpendingLimit } from "../safe/spendingLimit";
-import { initSafe } from "../safe/transaction";
-import { ALLOWANCE_MODULE_ADDRESS } from "../../types/safe";
-import { getTokens } from "../uniswap/types";
 import {
-  detectIntentType,
-  resolveDailyLimit,
-  computePlanValueUsd,
-  decide,
   computeHabitProfile,
   refreshPrices,
   getPrices,
-  estimateUsd,
   type PolicyProfile,
   type ActivityRecord,
 } from "../../policy";
 import { getPolicyProfile, getRecentActivity, recordActivity, _resetPolicyStoreCache } from "../../policy/store";
-import { getAdapter } from "../../executor/adapters";
+import { getAdapter, type Balances } from "../../executor/adapters";
+import { interpretIntent, assessAction } from "../../intent/pipeline";
+import { sanitizeHistory } from "../../intent/planner";
+import { fetchBalances, resolveEnsName } from "../../intent/context";
+import { makeSepoliaProvider, withTimeout } from "../../utils/rpc";
 import {
   registrationOptions,
   verifyRegistration,
@@ -49,8 +42,7 @@ import {
   hasPasskey,
 } from "../passkey";
 
-const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || "https://eth-sepolia.g.alchemy.com/v2/demo";
-const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC);
+const provider = makeSepoliaProvider();
 const PORT = Number(process.env.PORT) || Number(process.env.LEDGER_BRIDGE_PORT) || 3001;
 
 const app = express();
@@ -281,298 +273,190 @@ app.get("/nonce/:address", async (req, res) => {
 // safety net now live in the pure, tested policy module (src/policy).
 
 // ─── POST /intent ───
-// ALL intents go through AI pipeline: Planner → Gatekeeper → dispatch by intent type.
+// message (+ recent conversation) → one planner LLM call → server-side
+// resolution → deterministic policy verdict → adapter. Storage and chain
+// lookups start in parallel with the LLM call and are time-boxed, so light
+// questions (price, help, clarifications) never wait on the network.
 app.post("/intent", async (req, res) => {
+  const started = Date.now();
   try {
-    const { message, walletAddress } = req.body;
-
-    if (!message) {
+    const { message, walletAddress, history } = req.body || {};
+    if (typeof message !== "string" || !message.trim()) {
       res.status(400).json({ error: "message is required" });
       return;
     }
+    if (message.length > 1000) {
+      res.status(400).json({ error: "message is too long (max 1000 characters)" });
+      return;
+    }
+    const wallet = typeof walletAddress === "string" && ethers.isAddress(walletAddress) ? walletAddress : undefined;
 
-    console.log(`\n[intent] ═══════════════════════════════════════`);
-    console.log(`[intent] "${message}"`);
-    console.log(`[intent] wallet: ${walletAddress || "not provided"}`);
-
-    // Keep the price cache warm (self-throttled; off the critical path).
+    console.log(`\n[intent] "${message}" (wallet: ${wallet || "none"})`);
     refreshPrices().catch(() => {});
 
-    // ── Step 0a: Check Safe deployment ──
-    let safeAddress: string | null = null;
-    if (walletAddress) {
-      try {
-        const safeData = await read(`safe:${walletAddress.toLowerCase()}`);
-        if (safeData) {
-          safeAddress = (safeData as any).safeAddress;
-          console.log(`[intent] Safe detected: ${safeAddress}`);
-        } else {
-          console.log(`[intent] No Safe found — user needs onboarding`);
-        }
-      } catch (safeReadErr: any) {
-        console.warn(`[intent] Safe read from 0G failed (non-critical): ${safeReadErr.message}`);
-      }
+    // Storage first, then the deterministic on-chain address (survives restarts
+    // when storage is in-memory, and re-syncs storage when found).
+    const safeP: Promise<string | null> = wallet
+      ? withTimeout(detectExistingSafe(wallet), 5_000, null)
+      : Promise.resolve(null);
+    const balancesP: Promise<Balances | null> = wallet
+      ? safeP.then((safe) => fetchBalances(provider, safe || wallet))
+      : Promise.resolve(null);
+    const profileP = withTimeout(getPolicyProfile(), 2_000, {} as PolicyProfile);
+    const activityP: Promise<ActivityRecord[] | undefined> = wallet
+      ? withTimeout(getRecentActivity(wallet), 2_000, [] as ActivityRecord[])
+      : Promise.resolve(undefined);
+
+    const { outcome, planner } = await interpretIntent(message.trim(), sanitizeHistory(history), {
+      connected: !!wallet,
+      getBalances: () => balancesP,
+      resolveEns: resolveEnsName,
+    });
+    const timing = () => ({ totalMs: Date.now() - started, plannerMs: planner.latencyMs, model: planner.model });
+    console.log(`[intent] planner ${planner.latencyMs}ms (${planner.model}, ${planner.attempts} call(s)) → ${outcome.kind}`);
+
+    // ── Conversational outcomes: answered straight from the planner ──
+    if (outcome.kind === "reply") {
+      res.json({ status: "reply", intentType: "chat", reply: outcome.text, reasoning: outcome.text, timing: timing() });
+      return;
     }
-
-    // ── Step 0b: Fetch on-chain balances (from Safe if available) ──
-    const balanceAddress = safeAddress || walletAddress;
-    let balances: { eth: number; weth: number; usdc: number; totalUsd: number } | null = null;
-    if (balanceAddress) {
-      try {
-        const ethBalance = await provider.getBalance(balanceAddress);
-        const ethFormatted = Number(ethers.formatEther(ethBalance));
-
-        const erc20Abi = ["function balanceOf(address) view returns (uint256)"];
-        const usdcContract = new ethers.Contract(USDC_SEPOLIA, erc20Abi, provider);
-        const wethContract = new ethers.Contract(WETH_SEPOLIA, erc20Abi, provider);
-
-        const [usdcRaw, wethRaw] = await Promise.all([
-          usdcContract.balanceOf(balanceAddress).catch(() => 0n),
-          wethContract.balanceOf(balanceAddress).catch(() => 0n),
-        ]);
-
-        const usdcFormatted = Number(ethers.formatUnits(usdcRaw, 6));
-        const wethFormatted = Number(ethers.formatEther(wethRaw));
-        const totalUsd = estimateUsd("ETH", ethFormatted + wethFormatted) + estimateUsd("USDC", usdcFormatted);
-
-        balances = { eth: ethFormatted, weth: wethFormatted, usdc: usdcFormatted, totalUsd };
-
-        // Fire-and-forget — don't let 0G write failure block the intent pipeline
-        write("portfolio:current", {
-          eth: ethFormatted,
-          weth: wethFormatted,
-          usdc: usdcFormatted,
-          totalUsd,
-          source: safeAddress ? "safe" : "eoa",
-          address: balanceAddress,
-          updatedAt: new Date().toISOString(),
-        }).catch((e: any) => console.warn(`[intent] Portfolio write failed (non-critical): ${e.message}`));
-        console.log(`[intent] Portfolio (${safeAddress ? 'Safe' : 'EOA'}): ${ethFormatted} ETH, ${wethFormatted} WETH, ${usdcFormatted} USDC ($${totalUsd.toFixed(2)})`);
-      } catch (err: any) {
-        console.warn(`[intent] Failed to fetch on-chain balances: ${err.message}`);
-      }
+    if (outcome.kind === "clarify") {
+      res.json({ status: "needs_clarification", intentType: "clarify", question: outcome.question, reasoning: outcome.question, timing: timing() });
+      return;
     }
-
-    // ── Step 0c: Ensure user profile exists in storage ──
-    try {
-      const existingProfile = await read("user:profile");
-      if (!existingProfile) {
-        await write("user:profile", {
-          address: walletAddress || "",
-          autoApproveLimit: 100,
-          currency: "USD",
-          knownAddresses: walletAddress ? [walletAddress] : [],
-          createdAt: new Date().toISOString(),
-        });
-        console.log(`[intent] Seeded default user profile`);
-      }
-    } catch (profileErr: any) {
-      console.warn(`[intent] User profile read/write failed (non-critical): ${profileErr.message}`);
-    }
-
-    // ═══════════════════════════════════════════
-    // ── Step 1: Run AI Planner ──
-    // ═══════════════════════════════════════════
-    try { await write("messages:latest", { message, walletAddress, timestamp: new Date().toISOString() }); } catch {}
-
-    console.log(`[intent] Running Planner…`);
-    const plannerResult = await runPlanner(message);
-    console.log(`[intent] Planner action: ${plannerResult.action}`);
-    console.log(`[intent] Planner reasoning: ${plannerResult.reasoning}`);
-
-    // Reconstruct the plan in-process from the Planner's return value — no 0G
-    // read-back. This removes a network round-trip and a concurrency race where
-    // parallel intents could read each other's most-recent plan.
-    let latestPlan: Record<string, unknown> | undefined;
-    if (plannerResult.action === "writeActionPlan") {
-      latestPlan = buildActionPlan(plannerResult.args) as unknown as Record<string, unknown>;
-    }
-
-    if (!latestPlan) {
-      try { await write("messages:latest", { message: null, timestamp: null }); } catch {}
-      console.log(`[intent] No plan written by Planner`);
-      res.json({ status: "no_action", intentType: "unknown", reasoning: plannerResult.reasoning });
+    if (outcome.kind === "unsupported") {
+      res.json({ status: "unsupported", intentType: "unsupported", reason: outcome.reason, reasoning: outcome.reason, timing: timing() });
       return;
     }
 
-    console.log(`[intent] Plan: ${JSON.stringify(latestPlan, null, 2)}`);
+    const safeAddress = await safeP;
+    const balanceAddress = safeAddress || wallet || null;
+    const infoAssessment = { verdict: "INFO", riskScore: 0, reasons: ["Read-only query — no funds move."], requiresLedger: false, triggered: [], approvalMethod: "none" };
 
-    // ═══════════════════════════════════════════
-    // ── Step 2: Deterministic Gatekeeper (no second LLM call) ──
-    // ═══════════════════════════════════════════
-    // The risk verdict is now computed by the pure `decide` policy engine — the
-    // Planner LLM stays the single interpretation call, the verdict is code.
-    // This removes ~1 full LLM round-trip and the associated 0G read/writes from
-    // the hot path, and makes the verdict deterministic + explainable.
-
-    // Clear the consumed user message (fire-and-forget — not on the critical path).
-    write("messages:latest", { message: null, timestamp: null }).catch(() => {});
-
-    const planSteps = (latestPlan.steps as any[]) || [];
-    const intentType = detectIntentType(planSteps);
-    const step0 = planSteps[0] || {};
-    const params = step0.params || {};
-    const planSummary = latestPlan.summary as string;
-
-    // Recompute USD value server-side — never trust the AI's estimate.
-    const totalEstimatedValueUsd = computePlanValueUsd(
-      intentType,
-      params,
-      (latestPlan.totalEstimatedValueUsd as number) || 0
-    );
-
-    // Load the user's policy (cached) + recent activity. The single spending
-    // control is the DAILY limit — resolved from the stored policy with a default.
-    let profile: PolicyProfile | undefined;
-    let history: ActivityRecord[] | undefined;
-    try { profile = await getPolicyProfile(); } catch {}
-    const dailyLimitUsd = resolveDailyLimit(profile?.dailyLimitUsd);
-
-    if (walletAddress) {
-      try { history = await getRecentActivity(walletAddress); } catch {}
-
-      // Learn the habit baseline from activity when not explicitly configured.
-      // Fail-closed: the anomaly rule only escalates, so a derived baseline is safe.
-      if (profile && history && profile.typicalMaxUsd == null) {
-        const habit = computeHabitProfile(history);
-        if (habit.typicalMaxUsd != null) {
-          profile = { ...profile, typicalMaxUsd: habit.typicalMaxUsd };
-          console.log(`[intent] Habit baseline: typicalMaxUsd=$${habit.typicalMaxUsd} (n=${habit.sampleSize})`);
-        }
-      }
-    }
-
-    // Authoritative deterministic decision.
-    const decision = decide({
-      intentType,
-      valueUsd: totalEstimatedValueUsd,
-      dailyLimitUsd,
-      hardwareThresholdUsd: profile?.hardwareThresholdUsd,
-      plan: { summary: planSummary, steps: planSteps },
-      profile,
-      history,
-    });
-    const verdict = decision.verdict;
-    const riskScore = decision.riskScore;
-    const plannerReasoning = plannerResult.reasoning;
-    const gatekeeperReasoning = decision.reason;
-
-    // Record auto-approved value-bearing actions so velocity/habit rules can see
-    // them (write-through cache + async 0G). Off the hot path.
-    if (
-      walletAddress &&
-      verdict === "AUTO_EXECUTE" &&
-      (intentType === "swap" || intentType === "send" || intentType === "add_liquidity")
-    ) {
-      recordActivity(walletAddress, {
-        valueUsd: totalEstimatedValueUsd,
-        at: new Date().toISOString(),
-        to: params.to,
-        token: params.tokenIn || params.token,
-      }).catch(() => {});
-    }
-
-    // Persist the assessment to 0G for audit/history — off the hot path.
-    append("assessments", {
-      planId: (latestPlan.id as string) || null,
-      verdict,
-      riskScore,
-      reasons: [gatekeeperReasoning],
-      requiresLedger: decision.requiresLedger,
-      assessedAt: new Date().toISOString(),
-    }).catch(() => {});
-
-    console.log(`[intent] Intent type: ${intentType}`);
-    console.log(`[intent] USD value (server): $${totalEstimatedValueUsd}`);
-    console.log(`[intent] Verdict: ${verdict} (deterministic, risk: ${riskScore}) — ${gatekeeperReasoning}`);
-
-    const baseAssessment = {
-      verdict,
-      riskScore,
-      reasons: [gatekeeperReasoning],
-      requiresLedger: decision.approvalMethod === "ledger",
-      triggered: decision.triggered,
-      approvalMethod: decision.approvalMethod,
-    };
-    const agentReasoning = { planner: plannerReasoning, gatekeeper: gatekeeperReasoning };
-
-    // ═══════════════════════════════════════════
-    // ── Adapter dispatch (balance / send / add_liquidity / swap) ──
-    // ═══════════════════════════════════════════
-    // Every value-bearing intent is a self-contained IntentAdapter. An adapter
-    // that supports server-side auto-execution exposes `execute()`, which runs
-    // only when the deterministic verdict is AUTO_EXECUTE and a Safe exists.
-    const adapter = getAdapter(intentType);
-    if (adapter) {
-      if (intentType === "balance" && !walletAddress) {
-        res.status(400).json({ error: "Connect wallet first" });
-        return;
-      }
-      const ctx = {
-        walletAddress, safeAddress, balanceAddress, provider,
-        params, planSummary, planSteps, totalEstimatedValueUsd, balances,
-      };
-      const result = await adapter.build(ctx);
-
-      // Auto-execute when policy allows and the adapter supports it.
-      if (adapter.execute && verdict === "AUTO_EXECUTE" && safeAddress) {
-        try {
-          const exec = await adapter.execute(ctx, result);
-          if (exec) {
-            console.log(`[intent] ✓ ${intentType} auto-executed: ${exec.txHash}`);
-            res.json({
-              status: "ok",
-              intentType,
-              autoExecuted: true,
-              txHash: exec.txHash,
-              explorerUrl: exec.explorerUrl,
-              plan: { id: exec.tradeId, summary: planSummary, steps: planSteps, totalEstimatedValueUsd },
-              assessment: { verdict, riskScore, reasons: [gatekeeperReasoning], requiresLedger: false, triggered: decision.triggered },
-              agentReasoning,
-            });
-            return;
-          }
-        } catch (err: any) {
-          console.error(`[intent] ${intentType} auto-execute failed: ${err.message}`);
-          console.error(err.stack);
-          // Fall through to the manual flow below.
-        }
-      }
-
-      console.log(`[intent] ✓ ${intentType} via adapter`);
+    // ── Read-only: balance / price ──
+    if (outcome.kind === "read") {
+      const wantsBalance = outcome.steps.some((s) => s.action === "balance");
+      const balances = wantsBalance ? await balancesP : null;
+      const prices = outcome.steps.filter((s) => s.action === "price").map((s) => s.price!);
+      const summary = outcome.steps
+        .map((s) => (s.action === "balance" ? describeBalances(balances, s.token) : s.summary))
+        .join(" · ");
       res.json({
         status: "ok",
-        intentType,
+        intentType: wantsBalance ? "balance" : "price",
         autoExecuted: false,
         safeAddress,
-        plan: result.plan ?? { id: crypto.randomUUID(), summary: planSummary, steps: planSteps, totalEstimatedValueUsd },
-        assessment: result.assessment ?? baseAssessment,
-        ...(result.payload || {}),
-        agentReasoning,
+        plan: { id: crypto.randomUUID(), summary, steps: [], totalEstimatedValueUsd: 0 },
+        assessment: infoAssessment,
+        ...(wantsBalance ? { balances } : {}),
+        ...(prices.length ? { prices } : {}),
+        agentReasoning: { planner: summary, gatekeeper: infoAssessment.reasons[0] },
+        timing: timing(),
       });
       return;
     }
 
-    // ═══════════════════════════════════════════
-    // ── UNKNOWN — return AI plan as-is ──
-    // ═══════════════════════════════════════════
-    console.log(`[intent] Unknown intent type, returning raw AI plan`);
-    console.log(`[intent] ═══════════════════════════════════════\n`);
+    // ── Value-bearing action: deterministic verdict ──
+    const action = outcome.action;
+    const intentType = action.intentType;
+    const [profile, activity] = await Promise.all([profileP, activityP]);
+    const decision = assessAction(action, { profile, history: activity });
+    const { verdict, riskScore } = decision;
+    if (decision.typicalMaxUsd != null) console.log(`[intent] Habit baseline: typicalMaxUsd=$${decision.typicalMaxUsd}`);
+    console.log(`[intent] ${action.summary} → ${verdict} (risk ${riskScore}) — ${decision.reason}`);
+
+    append("plans", { ...action, flagId: "user-message", createdAt: new Date().toISOString() }).catch(() => {});
+    append("assessments", {
+      planId: action.id, verdict, riskScore, reasons: [decision.reason],
+      requiresLedger: decision.requiresLedger, assessedAt: new Date().toISOString(),
+    }).catch(() => {});
+
+    const assessment = {
+      verdict,
+      riskScore,
+      reasons: [decision.reason],
+      requiresLedger: decision.approvalMethod === "ledger",
+      triggered: decision.triggered,
+      approvalMethod: decision.approvalMethod,
+    };
+    const agentReasoning = { planner: `Understood: ${action.summary}`, gatekeeper: decision.reason };
+    const plan = { id: action.id, summary: action.summary, steps: action.steps, totalEstimatedValueUsd: action.valueUsd };
+
+    const adapter = getAdapter(intentType);
+    // A blocked plan must not come back with a signable transaction.
+    if (verdict === "BLOCKED" || !adapter) {
+      res.json({ status: "ok", intentType, autoExecuted: false, safeAddress, plan, assessment, agentReasoning, timing: timing() });
+      return;
+    }
+
+    const ctx = {
+      walletAddress: wallet, safeAddress, balanceAddress, provider,
+      params: action.params, planSummary: action.summary, planSteps: action.steps,
+      totalEstimatedValueUsd: action.valueUsd, balances: null,
+    };
+    const result = await adapter.build(ctx);
+
+    // Auto-execute when policy allows and the adapter supports it.
+    if (adapter.execute && verdict === "AUTO_EXECUTE" && safeAddress) {
+      try {
+        const exec = await adapter.execute(ctx, result);
+        if (exec) {
+          console.log(`[intent] ✓ ${intentType} auto-executed: ${exec.txHash}`);
+          // Only value that actually moved counts toward the daily limit / velocity / habit rules.
+          if (wallet) {
+            recordActivity(wallet, {
+              valueUsd: action.valueUsd,
+              at: new Date().toISOString(),
+              to: action.params.to,
+              token: action.params.tokenIn || action.params.token,
+            }).catch(() => {});
+          }
+          res.json({
+            status: "ok", intentType, autoExecuted: true,
+            txHash: exec.txHash, explorerUrl: exec.explorerUrl,
+            plan: { ...plan, id: exec.tradeId },
+            assessment: { ...assessment, requiresLedger: false },
+            agentReasoning, timing: timing(),
+          });
+          return;
+        }
+      } catch (err: any) {
+        console.error(`[intent] ${intentType} auto-execute failed: ${err.message}`);
+        res.status(502).json({
+          error: err.message,
+          intentType,
+          autoExecuted: false,
+          plan,
+          assessment,
+        });
+        return;
+      }
+    }
 
     res.json({
       status: "ok",
-      intentType: "unknown",
+      intentType,
       autoExecuted: false,
       safeAddress,
-      plan: { id: crypto.randomUUID(), summary: planSummary, steps: planSteps, totalEstimatedValueUsd },
-      assessment: baseAssessment,
+      plan: { ...plan, ...(result.plan ? { id: result.plan.id } : {}) },
+      assessment,
+      ...(result.payload || {}),
       agentReasoning,
+      timing: timing(),
     });
   } catch (err: any) {
     console.error("[intent] Pipeline error:", err);
     res.status(500).json({ error: err.message });
   }
 });
+
+function describeBalances(b: Balances | null, token?: string): string {
+  if (!b) return "I couldn't read your balance right now (the RPC endpoint didn't answer).";
+  if (token === "ETH") return `You have ${b.eth.toFixed(4)} ETH`;
+  if (token === "WETH") return `You have ${b.weth.toFixed(4)} WETH`;
+  if (token === "USDC") return `You have ${b.usdc.toFixed(2)} USDC`;
+  return `Portfolio: ${b.eth.toFixed(4)} ETH, ${b.weth.toFixed(4)} WETH, ${b.usdc.toFixed(2)} USDC (~$${b.totalUsd.toFixed(2)})`;
+}
 
 // ─── Compute provider toggle ───
 app.post("/set-compute-provider", (req, res) => {
@@ -793,15 +677,19 @@ app.post("/onboard", async (req, res) => {
       deployedAt: new Date().toISOString(),
     });
 
+    // Merge: keep any existing guardrail policy (user:profile.policy) instead of wiping it.
+    const existingProfile = ((await read("user:profile").catch(() => null)) as any) || {};
     await write("user:profile", {
+      ...existingProfile,
       address: ledgerAddress,
       safeAddress,
-      riskTolerance: "moderate",
+      riskTolerance: existingProfile.riskTolerance || "moderate",
       autoApproveLimit: spendingLimitUSD,
-      preferredTokens: ["USDC", "WETH", "ETH"],
-      createdAt: new Date().toISOString(),
+      preferredTokens: existingProfile.preferredTokens || ["USDC", "WETH", "ETH"],
+      createdAt: existingProfile.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
+    _resetPolicyStoreCache();
 
     console.log(`[onboard] New user onboarded — Safe: ${safeAddress}`);
     res.json({

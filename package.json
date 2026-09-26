@@ -10,7 +10,9 @@
     "ledger:bridge": "npx tsx src/integrations/ledger/serve.ts",
     "ledger:ui": "npx vite src/integrations/ledger/ui",
     "safe:deploy": "npx tsx src/integrations/safe/deploy.ts",
+    "test": "npx tsx src/policy/policy.test.ts && npx tsx src/intent/intent.test.ts",
     "test:policy": "npx tsx src/policy/policy.test.ts",
+    "test:intent": "npx tsx src/intent/intent.test.ts",
     "eval": "npx tsx eval/run.ts",
     "paper": "bash paper/template/build.sh",
     "paper:tex": "bash paper/latex/build.sh"
@@ -41,7 +43,8 @@
     "groq-sdk": "^0.8.0",
     "rxjs": "^7.8.2",
     "tsx": "^4.21.0",
-    "ws": "^8.20.0"
+    "ws": "^8.20.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",

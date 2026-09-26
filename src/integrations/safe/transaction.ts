@@ -2,7 +2,7 @@ import Safe from '@safe-global/protocol-kit';
 import { ethers } from 'ethers';
 import { PERMIT2, UNIVERSAL_ROUTER } from '../uniswap/types';
 
-const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || 'https://eth-sepolia.g.alchemy.com/v2/demo';
+const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
 
 export async function initSafe(safeAddress: string, signerPrivateKey: string): Promise<InstanceType<typeof Safe>> {
   return Safe.init({
@@ -50,12 +50,17 @@ export async function executeBatchViaSafe(
   const tx = await safe.createTransaction({ transactions });
   const signedTx = await safe.signTransaction(tx);
 
-  // Bypass gas estimation for complex calldata (e.g. Uniswap swaps) —
-  // eth_estimateGas simulation incorrectly reverts with GS013 for large
-  // calldata even though actual on-chain execution succeeds.
+  // A fixed gas limit skips estimation. Estimation isn't reliable for router
+  // calldata, but a mined tx can still revert — GS013 means the inner call
+  // failed (safeTxGas and gasPrice are 0, so Safe reverts instead of returning false).
   const opts = gasLimit ? { gasLimit } : {};
-  const result = await safe.executeTransaction(signedTx, opts);
-  return (result as any).hash || '';
+  const result = await safe.executeTransaction(signedTx, opts) as { hash?: string; transactionResponse?: { wait: () => Promise<{ status?: number } | null> } };
+  const hash = result.hash || "";
+  const receipt = await result.transactionResponse?.wait?.();
+  if (receipt && Number(receipt.status) === 0) {
+    throw new Error(`Safe transaction reverted (GS013 — the inner call failed): https://sepolia.etherscan.io/tx/${hash}`);
+  }
+  return hash;
 }
 
 /**
