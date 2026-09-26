@@ -2,7 +2,7 @@ import Safe from '@safe-global/protocol-kit';
 import { ethers } from 'ethers';
 import { getAgentWallet } from './agentWallet';
 
-const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || 'https://eth-sepolia.g.alchemy.com/v2/demo';
+const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
 
 export async function deploySafe(
   ledgerAddress: string,

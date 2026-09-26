@@ -4,7 +4,7 @@ import { getAgentWallet } from '../integrations/safe/agentWallet';
 import { logTradeResult } from './logResult';
 import { ethers } from 'ethers';
 
-const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || 'https://eth-sepolia.g.alchemy.com/v2/demo';
+const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
 
 export async function executePlan(
   assessment: RiskAssessment,
