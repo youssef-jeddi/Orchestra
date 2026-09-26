@@ -103,19 +103,15 @@ function parseResponse(raw: string): AgentResponse {
 
 // ── Groq inference ──────────────────────────────────────────────────
 async function inferGroq(systemPrompt: string, userPrompt: string): Promise<AgentResponse> {
-  const Groq = (await import('groq-sdk')).default;
-  const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
-
-  const completion = await client.chat.completions.create({
-    model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
-    max_tokens: 1024,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt },
-    ],
+  const { complete } = await import('../llm');
+  const completion = await complete({
+    provider: 'groq',
+    system: systemPrompt,
+    messages: [{ role: 'user', content: userPrompt }],
+    maxTokens: 1024,
   });
 
-  const content = completion.choices[0]?.message?.content ?? '';
+  const content = completion.text;
   console.log('[0G Compute] Groq raw response:', content.slice(0, 500));
   return parseResponse(content);
 }
