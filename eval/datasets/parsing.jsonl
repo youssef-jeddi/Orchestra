@@ -1,0 +1,57 @@
+{"id":"swap-01","tags":["swap"],"message":"swap 10 usdc for eth","expect":{"type":"actions","steps":[{"action":"swap","from":"USDC","to":"ETH","amount":"10"}]}}
+{"id":"swap-02","tags":["swap"],"message":"Swap 0.05 ETH to USDC","expect":{"type":"actions","steps":[{"action":"swap","from":"ETH","to":"USDC","amount":"0.05"}]}}
+{"id":"swap-03","tags":["swap"],"message":"trade 25 USDC into WETH","expect":{"type":"actions","steps":[{"action":"swap","from":"USDC","to":"WETH","amount":"25"}]}}
+{"id":"swap-04","tags":["swap"],"message":"convert 0.1 weth to usdc","expect":{"type":"actions","steps":[{"action":"swap","from":"WETH","to":"USDC","amount":"0.1"}]}}
+{"id":"swap-05","tags":["swap"],"message":"exchange 3 usdc → eth","expect":{"type":"actions","steps":[{"action":"swap","from":"USDC","to":"ETH","amount":"3"}]}}
+{"id":"swap-06","tags":["swap"],"message":"swap .5 eth for usdc","expect":{"type":"actions","steps":[{"action":"swap","from":"ETH","to":"USDC","amount":"0.5"}]}}
+{"id":"swap-07","tags":["swap"],"message":"I want to swap 1,000 USDC for ETH","expect":{"type":"actions","steps":[{"action":"swap","from":"USDC","to":"ETH","amount":"1000"}]}}
+{"id":"swap-08","tags":["swap"],"message":"can you swap twenty usdc to eth for me?","expect":{"type":"actions","steps":[{"action":"swap","from":"USDC","to":"ETH","amount":"20"}]}}
+{"id":"swap-09","tags":["swap","typo"],"message":"swp 10 usdc fr eth","expect":{"type":"actions","steps":[{"action":"swap","from":"USDC","to":"ETH","amount":"10"}]}}
+{"id":"swap-10","tags":["swap","typo"],"message":"SWAP 10 USDC 4 ETH","expect":[{"type":"actions","steps":[{"action":"swap","from":"USDC","to":"ETH","amount":"10"}]},{"type":"clarify"}]}
+{"id":"swap-rel-01","tags":["swap","relative"],"message":"swap half my usdc to eth","expect":{"type":"actions","steps":[{"action":"swap","from":"USDC","to":"ETH","amount":"50%"}]}}
+{"id":"swap-rel-02","tags":["swap","relative"],"message":"swap all my weth for usdc","expect":{"type":"actions","steps":[{"action":"swap","from":"WETH","to":"USDC","amount":"all"}]}}
+{"id":"swap-rel-03","tags":["swap","relative"],"message":"swap 25% of my eth into usdc","expect":{"type":"actions","steps":[{"action":"swap","from":"ETH","to":"USDC","amount":"25%"}]}}
+{"id":"swap-usd-01","tags":["swap","usd"],"message":"swap $50 of eth to usdc","expect":{"type":"actions","steps":[{"action":"swap","from":"ETH","to":"USDC","amount":"50","unit":"usd"}]}}
+{"id":"swap-out-01","tags":["swap","exact-out"],"message":"buy 0.01 eth with usdc","expect":{"type":"actions","steps":[{"action":"swap","from":"USDC","to":"ETH","amount":"0.01","side":"out"}]}}
+{"id":"send-01","tags":["send"],"message":"send 5 usdc to vitalik.eth","expect":{"type":"actions","steps":[{"action":"send","token":"USDC","amount":"5","to":"vitalik.eth"}]}}
+{"id":"send-02","tags":["send"],"message":"send 0.01 ETH to 0x1111111111111111111111111111111111111111","expect":{"type":"actions","steps":[{"action":"send","token":"ETH","amount":"0.01","to":"0x1111111111111111111111111111111111111111"}]}}
+{"id":"send-03","tags":["send"],"message":"transfer 2.5 USDC to 0xAb5801a7D398351b8bE11C439e05C5B3259aeC9B","expect":{"type":"actions","steps":[{"action":"send","token":"USDC","amount":"2.5","to":"0xAb5801a7D398351b8bE11C439e05C5B3259aeC9B"}]}}
+{"id":"send-04","tags":["send"],"message":"pay alice.eth 10 usdc","expect":{"type":"actions","steps":[{"action":"send","token":"USDC","amount":"10","to":"alice.eth"}]}}
+{"id":"send-05","tags":["send","usd"],"message":"send $20 worth of eth to vitalik.eth","expect":{"type":"actions","steps":[{"action":"send","token":"ETH","amount":"20","unit":"usd","to":"vitalik.eth"}]}}
+{"id":"send-06","tags":["send","relative"],"message":"send all my usdc to 0x1111111111111111111111111111111111111111","expect":{"type":"actions","steps":[{"action":"send","token":"USDC","amount":"all","to":"0x1111111111111111111111111111111111111111"}]}}
+{"id":"send-07","tags":["send"],"message":"give 0.001 weth to vitalik.eth","expect":{"type":"actions","steps":[{"action":"send","token":"WETH","amount":"0.001","to":"vitalik.eth"}]}}
+{"id":"send-08","tags":["send"],"message":"please send 1 usdc to 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 thanks","expect":{"type":"actions","steps":[{"action":"send","token":"USDC","amount":"1","to":"0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"}]}}
+{"id":"send-09","tags":["send","typo"],"message":"sned 5 usdc to vitalik.eth","expect":{"type":"actions","steps":[{"action":"send","token":"USDC","amount":"5","to":"vitalik.eth"}]}}
+{"id":"balance-01","tags":["balance"],"message":"what's my balance?","expect":{"type":"actions","steps":[{"action":"balance"}]}}
+{"id":"balance-02","tags":["balance"],"message":"how much usdc do I have","expect":{"type":"actions","steps":[{"action":"balance","token":"USDC"}]}}
+{"id":"balance-03","tags":["balance"],"message":"show my portfolio","expect":{"type":"actions","steps":[{"action":"balance"}]}}
+{"id":"balance-04","tags":["balance"],"message":"do I have any weth?","expect":{"type":"actions","steps":[{"action":"balance","token":"WETH"}]}}
+{"id":"balance-05","tags":["balance"],"message":"balance","expect":{"type":"actions","steps":[{"action":"balance"}]}}
+{"id":"price-01","tags":["price"],"message":"what's the price of eth","expect":{"type":"actions","steps":[{"action":"price","token":"ETH"}]}}
+{"id":"price-02","tags":["price"],"message":"how much is 1 ETH worth right now?","expect":{"type":"actions","steps":[{"action":"price","token":"ETH"}]}}
+{"id":"price-03","tags":["price"],"message":"usdc price","expect":{"type":"actions","steps":[{"action":"price","token":"USDC"}]}}
+{"id":"reply-01","tags":["reply"],"message":"hi","expect":{"type":"reply"}}
+{"id":"reply-02","tags":["reply"],"message":"what can you do?","expect":{"type":"reply"}}
+{"id":"reply-03","tags":["reply"],"message":"thanks!","expect":{"type":"reply"}}
+{"id":"reply-04","tags":["reply"],"message":"what is a token swap?","expect":{"type":"reply"}}
+{"id":"reply-05","tags":["reply"],"message":"who are you","expect":{"type":"reply"}}
+{"id":"clarify-01","tags":["clarify"],"message":"send some usdc to vitalik.eth","expect":{"type":"clarify"}}
+{"id":"clarify-02","tags":["clarify"],"message":"swap usdc for eth","expect":{"type":"clarify"}}
+{"id":"clarify-03","tags":["clarify"],"message":"send 5 usdc","expect":{"type":"clarify"}}
+{"id":"clarify-04","tags":["clarify"],"message":"send 10 usdc to bob","expect":{"type":"clarify"}}
+{"id":"clarify-05","tags":["clarify"],"message":"swap 10 for eth","expect":{"type":"clarify"}}
+{"id":"clarify-06","tags":["clarify"],"message":"send money to my friend","expect":{"type":"clarify"}}
+{"id":"clarify-07","tags":["clarify"],"message":"buy some eth","expect":{"type":"clarify"}}
+{"id":"clarify-08","tags":["clarify"],"message":"transfer 5 to vitalik.eth","expect":{"type":"clarify"}}
+{"id":"unsupported-01","tags":["unsupported"],"message":"bridge 10 usdc to arbitrum","expect":{"type":"unsupported"}}
+{"id":"unsupported-02","tags":["unsupported"],"message":"buy me a cryptopunk NFT","expect":{"type":"unsupported"}}
+{"id":"unsupported-03","tags":["unsupported"],"message":"swap 10 usdc for pepe","expect":[{"type":"unsupported"},{"type":"actions","steps":[{"action":"swap","from":"USDC","to":"PEPE","amount":"10"}]}]}
+{"id":"unsupported-04","tags":["unsupported"],"message":"stake my eth on lido","expect":{"type":"unsupported"}}
+{"id":"unsupported-05","tags":["unsupported"],"message":"set a limit order to buy eth at 2000","expect":{"type":"unsupported"}}
+{"id":"unsupported-06","tags":["unsupported"],"message":"send 5 dai to vitalik.eth","expect":[{"type":"unsupported"},{"type":"actions","steps":[{"action":"send","token":"DAI","amount":"5","to":"vitalik.eth"}]}]}
+{"id":"multi-01","tags":["multi-step"],"message":"swap 10 usdc to eth then send 0.001 eth to vitalik.eth","expect":{"type":"actions","steps":[{"action":"swap","from":"USDC","to":"ETH","amount":"10"},{"action":"send","token":"ETH","amount":"0.001","to":"vitalik.eth"}]}}
+{"id":"multi-02","tags":["multi-step"],"message":"check my balance and the eth price","expect":{"type":"actions","steps":[{"action":"balance"},{"action":"price","token":"ETH"}]}}
+{"id":"turn-01","tags":["multi-turn"],"history":[{"role":"user","content":"swap usdc for eth"},{"role":"assistant","content":"How much USDC do you want to swap?"}],"message":"10","expect":{"type":"actions","steps":[{"action":"swap","from":"USDC","to":"ETH","amount":"10"}]}}
+{"id":"turn-02","tags":["multi-turn"],"history":[{"role":"user","content":"send 5 usdc"},{"role":"assistant","content":"Who should I send it to? I need a 0x address or an ENS name."}],"message":"vitalik.eth","expect":{"type":"actions","steps":[{"action":"send","token":"USDC","amount":"5","to":"vitalik.eth"}]}}
+{"id":"turn-03","tags":["multi-turn"],"history":[{"role":"user","content":"send eth to vitalik.eth"},{"role":"assistant","content":"How much ETH do you want to send?"}],"message":"0.01 please","expect":{"type":"actions","steps":[{"action":"send","token":"ETH","amount":"0.01","to":"vitalik.eth"}]}}
+{"id":"turn-04","tags":["multi-turn"],"history":[{"role":"user","content":"swap 10 usdc for eth"},{"role":"assistant","content":"Swap 10 USDC for ETH"}],"message":"actually make it 20","expect":{"type":"actions","steps":[{"action":"swap","from":"USDC","to":"ETH","amount":"20"}]}}
