@@ -9,7 +9,36 @@
 import { broadcast, submitSwap, getNonce } from './bridge';
 
 const CHAIN_ID = 11155111; // Sepolia
+const CHAIN_ID_HEX = '0xaa36a7';
 const explorer = (h) => `https://sepolia.etherscan.io/tx/${h}`;
+
+// MetaMask signs on whatever network is active, so switch to Sepolia first
+// (adding it if the wallet doesn't know it). Throws if the user refuses.
+async function ensureSepolia() {
+  const eth = typeof window !== 'undefined' ? window.ethereum : null;
+  if (!eth) throw new Error('MetaMask not available');
+  const current = await eth.request({ method: 'eth_chainId' });
+  if (String(current).toLowerCase() === CHAIN_ID_HEX) return;
+  try {
+    await eth.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: CHAIN_ID_HEX }] });
+  } catch (err) {
+    if (err?.code !== 4902) throw new Error('Switch MetaMask to the Sepolia test network to continue.');
+    await eth.request({
+      method: 'wallet_addEthereumChain',
+      params: [{
+        chainId: CHAIN_ID_HEX,
+        chainName: 'Sepolia',
+        nativeCurrency: { name: 'Sepolia Ether', symbol: 'ETH', decimals: 18 },
+        rpcUrls: ['https://ethereum-sepolia-rpc.publicnode.com'],
+        blockExplorerUrls: ['https://sepolia.etherscan.io'],
+      }],
+    });
+  }
+  const after = await eth.request({ method: 'eth_chainId' });
+  if (String(after).toLowerCase() !== CHAIN_ID_HEX) {
+    throw new Error('Switch MetaMask to the Sepolia test network to continue.');
+  }
+}
 
 function toHex(v) {
   if (v == null) return '0x0';
@@ -21,9 +50,11 @@ function toHex(v) {
 async function mmSend(ledger, tx) {
   const eth = typeof window !== 'undefined' ? window.ethereum : null;
   if (!eth) throw new Error('MetaMask not available');
+  await ensureSepolia();
+  // chainId makes MetaMask reject the tx outright if the network changed underneath us.
   return eth.request({
     method: 'eth_sendTransaction',
-    params: [{ from: ledger.walletAddress, to: tx.to, data: tx.data || '0x', value: toHex(tx.value) }],
+    params: [{ from: ledger.walletAddress, to: tx.to, data: tx.data || '0x', value: toHex(tx.value), chainId: CHAIN_ID_HEX }],
   });
 }
 
@@ -51,6 +82,27 @@ async function sendTx(ledger, tx, gasLimit) {
     : ledgerSendTx(ledger, tx, gasLimit);
 }
 
+// ── Fund a Safe from the connected wallet (ETH or ERC-20) ──
+export async function depositToSafe(ledger, safeAddress, token, amount) {
+  const { ethers } = await import('ethers');
+  const t = String(token || 'eth').toLowerCase();
+  let tx;
+  let gasLimit = 21000;
+  if (t === 'eth') {
+    tx = { to: safeAddress, value: ethers.parseEther(amount).toString(), data: '0x' };
+  } else {
+    const USDC = '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238';
+    const WETH = '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14';
+    const tokenAddr = t === 'usdc' ? USDC : WETH;
+    const decimals = t === 'usdc' ? 6 : 18;
+    const iface = new ethers.Interface(['function transfer(address to, uint256 amount)']);
+    tx = { to: tokenAddr, value: '0', data: iface.encodeFunctionData('transfer', [safeAddress, ethers.parseUnits(amount, decimals)]) };
+    gasLimit = 80000;
+  }
+  const txHash = await sendTx(ledger, tx, gasLimit);
+  return { txHash, explorerUrl: explorer(txHash) };
+}
+
 // ── Send: single transfer tx ──
 export async function executeSend(ledger, data) {
   const txHash = await sendTx(ledger, data.sendData.unsignedTx, 60000);
@@ -61,6 +113,8 @@ export async function executeSend(ledger, data) {
 export async function executeSwap(ledger, data) {
   const q = data.quoteData;
   if (!q) throw new Error('No quote to sign');
+  // The Permit2 typed data is bound to Sepolia too, so switch before any signature.
+  if (ledger.connectionType === 'metamask') await ensureSepolia();
 
   // 1. Permit2 / ERC20 approval.
   if (q.approvalNeeded && q.approvalTx) {

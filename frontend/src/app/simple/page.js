@@ -32,10 +32,32 @@ const RULE_LABELS = {
 };
 
 const EXAMPLES = [
+  'What can you do?',
   'What is my balance?',
+  "What's the price of ETH?",
   'Swap 2 USDC for ETH',
-  'Send 5 USDC to 0xd8dA…6045',
+  'Send 5 USDC to vitalik.eth',
 ];
+
+// Statuses answered with plain text instead of a plan card.
+const TEXT_STATUSES = new Set(['reply', 'needs_clarification', 'unsupported']);
+const HISTORY_TURNS = 8;
+
+function agentText(data) {
+  if (!data) return '';
+  return data.reply || data.question || data.reason || data.plan?.summary || '';
+}
+
+/** Recent turns in the shape the planner expects, so answers to its questions carry context. */
+function toHistory(messages) {
+  return messages
+    .filter((m) => m.role === 'user' || (m.role === 'agent' && m.data))
+    .map((m) => (m.role === 'user'
+      ? { role: 'user', content: m.text }
+      : { role: 'assistant', content: agentText(m.data) }))
+    .filter((t) => t.content)
+    .slice(-HISTORY_TURNS);
+}
 
 export default function SimplePage() {
   return (
@@ -46,7 +68,7 @@ export default function SimplePage() {
 }
 
 function SimpleChat() {
-  const { ledger } = useOrchestra();
+  const { ledger, safe } = useOrchestra();
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -79,17 +101,18 @@ function SimpleChat() {
     const text = (raw ?? input).trim();
     if (!text || busy) return;
     setInput('');
+    const history = toHistory(messages);
     setMessages((m) => [...m, { role: 'user', text }]);
     setBusy(true);
     try {
-      const data = await sendIntent(text, ledger.walletAddress);
+      const data = await sendIntent(text, ledger.walletAddress, { history });
       setMessages((m) => [...m, { role: 'agent', data }]);
     } catch (err) {
       setMessages((m) => [...m, { role: 'agent', error: err.message }]);
     } finally {
       setBusy(false);
     }
-  }, [input, busy, ledger.walletAddress]);
+  }, [input, busy, messages, ledger.walletAddress]);
 
   // Approve/execute a swap or send from an agent card.
   const execute = useCallback(async (data, idx) => {
@@ -182,6 +205,8 @@ function SimpleChat() {
           </div>
         )}
       </header>
+
+      {connected && <SafeSetup safe={safe} ledger={ledger} onError={(msg) => setMessages((m) => [...m, { role: 'agent', error: msg }])} />}
 
       {/* Messages */}
       <main style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 16, padding: '24px 0' }}>
@@ -277,6 +302,9 @@ function MessageRow({ m, idx, onExecute, onPasskey, passkeyReg, signing }) {
       </div>
     );
   }
+  if (TEXT_STATUSES.has(m.data?.status)) {
+    return <AgentText data={m.data} />;
+  }
   return (
     <AgentCard
       data={m.data}
@@ -288,6 +316,31 @@ function MessageRow({ m, idx, onExecute, onPasskey, passkeyReg, signing }) {
   );
 }
 
+function AgentText({ data }) {
+  const unsupported = data.status === 'unsupported';
+  return (
+    <div style={{ alignSelf: 'flex-start', maxWidth: '85%', display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div style={{
+        background: '#141418', border: `1px solid ${unsupported ? '#3a2a2a' : '#222228'}`,
+        color: unsupported ? '#C9A9A9' : '#E8E4DE', padding: '10px 14px',
+        borderRadius: '14px 14px 14px 4px', fontSize: 15, lineHeight: 1.5, whiteSpace: 'pre-line',
+      }}>
+        {agentText(data)}
+      </div>
+      <Timing timing={data.timing} />
+    </div>
+  );
+}
+
+function Timing({ timing }) {
+  if (!timing?.totalMs) return null;
+  return (
+    <span style={{ fontSize: 10, color: '#555', paddingLeft: 4 }}>
+      {(timing.totalMs / 1000).toFixed(1)}s{timing.model ? ` · ${timing.model}` : ''}
+    </span>
+  );
+}
+
 function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing }) {
   const verdict = data.assessment?.verdict || 'UNKNOWN';
   const color = VERDICT_COLOR[verdict] || '#666';
@@ -295,7 +348,7 @@ function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing }) {
   const needsSign = !data.autoExecuted && (data.quoteData || data.sendData);
   const isSwap = !!data.quoteData;
   const method = data.assessment?.approvalMethod; // 'passkey' | 'ledger' | 'none'
-  const usePasskey = needsSign && method === 'passkey' && passkeyReg;
+  const usePasskey = needsSign && (method === 'passkey' || method === 'ledger') && passkeyReg;
 
   return (
     <div style={{ alignSelf: 'flex-start', maxWidth: '92%', display: 'flex', flexDirection: 'column', gap: 10,
@@ -306,7 +359,7 @@ function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing }) {
         <p style={{ margin: 0, fontSize: 15, color: '#E8E4DE' }}>
           {data.plan.summary}
           {data.plan.totalEstimatedValueUsd > 0 && (
-            <span style={{ color: '#777' }}> — ${data.plan.totalEstimatedValueUsd}</span>
+            <span style={{ color: '#777' }}> — ${Number(data.plan.totalEstimatedValueUsd).toFixed(2)}</span>
           )}
         </p>
       )}
@@ -373,12 +426,77 @@ function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing }) {
             </span>
           )}
           {method === 'ledger' && (
-            <span style={{ fontSize: 11, color: '#FFB400' }}>
-              High-value — requires a Ledger hardware signature.
+            <span style={{ fontSize: 11, color: '#777' }}>
+              Ledger is paused — approve with a passkey or your wallet instead.
             </span>
           )}
         </div>
       )}
+      <Timing timing={data.timing} />
+    </div>
+  );
+}
+
+function SafeSetup({ safe, ledger, onError }) {
+  const [busy, setBusy] = useState(null); // 'deploy' | 'eth' | 'usdc' | null
+
+  const deploy = async () => {
+    setBusy('deploy');
+    try { await safe.deploy(100); }
+    catch (err) { onError(err.message); }
+    finally { setBusy(null); }
+  };
+
+  const fund = async (token, amount) => {
+    setBusy(token);
+    try {
+      await safe.deposit(token, amount);
+      setTimeout(() => safe.refreshBalances(), 4000);
+    } catch (err) { onError(err.message); }
+    finally { setBusy(null); }
+  };
+
+  if (safe.safeStatus === 'checking' || safe.safeStatus === 'unknown') {
+    return <p style={{ fontSize: 12, color: '#555', margin: '10px 0 0' }}>Looking for a Safe…</p>;
+  }
+
+  if (safe.safeStatus !== 'deployed') {
+    return (
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+        marginTop: 12, padding: '10px 12px', border: '1px solid #2a2a30', borderRadius: 12, background: '#141418',
+      }}>
+        <p style={{ margin: 0, fontSize: 13, color: '#999', lineHeight: 1.4 }}>
+          Auto-execute needs a Safe. Create one (agent wallet pays gas), then fund it from MetaMask.
+        </p>
+        <button onClick={deploy} disabled={!!busy} style={pill(true)}>
+          {busy === 'deploy' ? 'Creating…' : 'Create Safe'}
+        </button>
+      </div>
+    );
+  }
+
+  const b = safe.balances || {};
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 10,
+      marginTop: 12, padding: '10px 12px', border: '1px solid #1c1c22', borderRadius: 12,
+    }}>
+      <a href={`https://sepolia.etherscan.io/address/${safe.safeAddress}`} target="_blank" rel="noreferrer"
+        style={{ fontSize: 12, color: '#999', textDecoration: 'none' }}>
+        Safe {safe.safeAddress.slice(0, 6)}…{safe.safeAddress.slice(-4)} ↗
+      </a>
+      <span style={{ fontSize: 12, color: '#777' }}>
+        {(b.eth || 0).toFixed(4)} ETH · {(b.usdc || 0).toFixed(2)} USDC
+      </span>
+      <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+        <button onClick={() => fund('eth', '0.01')} disabled={!!busy} style={pill(false)}>
+          {busy === 'eth' ? '…' : '+ 0.01 ETH'}
+        </button>
+        <button onClick={() => fund('usdc', '10')} disabled={!!busy} style={pill(false)}>
+          {busy === 'usdc' ? '…' : '+ 10 USDC'}
+        </button>
+      </div>
     </div>
   );
 }

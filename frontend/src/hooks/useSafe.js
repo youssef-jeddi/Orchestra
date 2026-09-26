@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import * as api from '@/lib/bridge';
+import { depositToSafe } from '@/lib/signing';
 
 export function useSafe(ledger) {
   const [safeAddress, setSafeAddress] = useState(null);
@@ -65,48 +66,10 @@ export function useSafe(ledger) {
   }, [ledger, refreshBalances]);
 
   const deposit = useCallback(async (token, amount) => {
-    if (!ledger.walletAddress || !safeAddress) throw new Error('Connect Ledger and deploy Safe first');
-
-    const { ethers } = await import('ethers');
-    const nonceData = await api.getNonce(ledger.walletAddress);
-    const maxFeePerGas = BigInt(nonceData.maxFeePerGas);
-    const maxPriorityFeePerGas = BigInt(nonceData.maxPriorityFeePerGas);
-
-    let tx;
-    if (token === 'eth') {
-      tx = ethers.Transaction.from({
-        to: safeAddress,
-        value: ethers.parseEther(amount),
-        nonce: nonceData.nonce,
-        maxFeePerGas, maxPriorityFeePerGas,
-        gasLimit: 21000, chainId: 11155111, type: 2,
-      });
-    } else {
-      const USDC = '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238';
-      const WETH = '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14';
-      const tokenAddr = token === 'usdc' ? USDC : WETH;
-      const decimals = token === 'usdc' ? 6 : 18;
-      const iface = new ethers.Interface(['function transfer(address to, uint256 amount)']);
-      const data = iface.encodeFunctionData('transfer', [safeAddress, ethers.parseUnits(amount, decimals)]);
-
-      tx = ethers.Transaction.from({
-        to: tokenAddr, value: 0n, data,
-        nonce: nonceData.nonce,
-        maxFeePerGas, maxPriorityFeePerGas,
-        gasLimit: 80000, chainId: 11155111, type: 2,
-      });
-    }
-
-    ledger.log(`Depositing ${amount} ${token.toUpperCase()} to Safe...`);
-    const sig = await ledger.sign(tx.unsignedSerialized);
-    const { ethers: e2 } = await import('ethers');
-    const signedTx = tx.clone();
-    signedTx.signature = e2.Signature.from(sig);
-
-    const result = await api.broadcast(signedTx.serialized);
+    if (!ledger.walletAddress || !safeAddress) throw new Error('Connect a wallet and create a Safe first');
+    ledger.log(`Depositing ${amount} ${String(token).toUpperCase()} to Safe...`);
+    const result = await depositToSafe(ledger, safeAddress, token, amount);
     ledger.log(`Deposit broadcast: ${result.txHash}`);
-
-    // Refresh balances after delay
     setTimeout(() => refreshBalances(), 5000);
     return result;
   }, [ledger, safeAddress, refreshBalances]);

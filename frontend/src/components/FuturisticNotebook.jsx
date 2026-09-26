@@ -228,7 +228,7 @@ export default function FuturisticNotebook({ onClose, initialMessage = '' }) {
 
       setIsTyping(false);
 
-      if (data.status === 'no_action') {
+      if (['no_action', 'reply', 'needs_clarification', 'unsupported'].includes(data.status)) {
         setMessages((prev) => [...prev, {
           id: Date.now(), role: 'scholar', text: data.reasoning || "I couldn't determine an action for that request.", isNew: true,
         }]);
