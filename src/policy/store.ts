@@ -9,34 +9,55 @@
 // records immediately (velocity stays correct). A multi-instance deployment
 // would need a shared store (see the "Lightweight DB" option).
 
-import { read, readMany, append } from "../integrations/zero-g/storage";
+import { read, write, readMany, append } from "../integrations/zero-g/storage";
 import type { PolicyProfile, ActivityRecord } from "./index";
 
 const PROFILE_TTL_MS = 30_000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const ACTIVITY_RETENTION_MS = 2 * DAY_MS; // keep a little more than the 24h window
 
-let profileCache: { value: PolicyProfile; expires: number } | null = null;
+const profileCache = new Map<string, { value: PolicyProfile; expires: number }>();
 const activityCache = new Map<string, ActivityRecord[]>();
 
-/**
- * The user's extended policy config. Read from `user:profile.policy` in 0G.
- * Absent config → `{}` → every extended rule stays off (base behaviour).
- */
-export async function getPolicyProfile(): Promise<PolicyProfile> {
-  const now = Date.now();
-  if (profileCache && profileCache.expires > now) return profileCache.value;
+/** Before policies were per wallet, one global record held everyone's. */
+const LEGACY_PROFILE_KEY = "user:profile";
+const profileKey = (wallet: string) => `user:profile:${wallet.toLowerCase()}`;
 
-  let value: PolicyProfile = {};
+/**
+ * A wallet's stored profile (`user:profile:<wallet>`), falling back to the
+ * legacy global record until the wallet saves its own. Read-only fallback:
+ * writes always go to the wallet's own key.
+ */
+export async function readUserProfile(wallet: string): Promise<Record<string, any>> {
   try {
-    const p = (await read("user:profile")) as any;
-    if (p && typeof p === "object" && p.policy && typeof p.policy === "object") {
-      value = p.policy as PolicyProfile;
-    }
+    const own = (await read(profileKey(wallet))) as any;
+    if (own && typeof own === "object") return own;
+    const legacy = (await read(LEGACY_PROFILE_KEY)) as any;
+    return legacy && typeof legacy === "object" ? legacy : {};
   } catch {
-    /* non-critical — fall back to empty policy */
+    return {};
   }
-  profileCache = { value, expires: now + PROFILE_TTL_MS };
+}
+
+export async function writeUserProfile(wallet: string, profile: Record<string, any>): Promise<void> {
+  await write(profileKey(wallet), profile);
+  profileCache.delete(wallet.toLowerCase());
+}
+
+/**
+ * A wallet's extended policy config (`policy` of its profile). No wallet or no
+ * config → `{}` → every extended rule stays off (base behaviour).
+ */
+export async function getPolicyProfile(wallet?: string): Promise<PolicyProfile> {
+  if (!wallet) return {};
+  const key = wallet.toLowerCase();
+  const now = Date.now();
+  const hit = profileCache.get(key);
+  if (hit && hit.expires > now) return hit.value;
+
+  const p = await readUserProfile(key);
+  const value = p.policy && typeof p.policy === "object" ? (p.policy as PolicyProfile) : {};
+  profileCache.set(key, { value, expires: now + PROFILE_TTL_MS });
   return value;
 }
 
@@ -83,6 +104,6 @@ export async function recordActivity(wallet: string, rec: ActivityRecord): Promi
 
 /** Test hook — clears all caches. */
 export function _resetPolicyStoreCache(): void {
-  profileCache = null;
+  profileCache.clear();
   activityCache.clear();
 }
