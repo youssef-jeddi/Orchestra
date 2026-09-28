@@ -45,10 +45,12 @@ import {
   getApproval,
   approvalView,
   reject,
+  issueReviewToken,
+  approvalForReview,
   ApprovalError,
   type PendingApproval,
 } from "../../approvals";
-import { describeApproval, describeOutcome } from "../../approvals/describe";
+import { describeApproval, describeOutcome, reviewOf } from "../../approvals/describe";
 import {
   telegramEnabled,
   getLink,
@@ -56,6 +58,8 @@ import {
   confirmLink,
   sendApprovalMessage,
   settleApprovalMessage,
+  sendLinkMessage,
+  sendText,
   startTelegramBot,
   type DecisionHandler,
 } from "../telegram";
@@ -65,7 +69,10 @@ import {
   authenticationOptions,
   verifyAuthentication,
   hasPasskey,
+  hasPhonePasskey,
+  phoneRp,
 } from "../passkey";
+import { createSetupToken, getSetup, consumeSetup } from "../passkey/phoneSetup";
 
 const provider = makeSepoliaProvider();
 const PORT = Number(process.env.PORT) || Number(process.env.LEDGER_BRIDGE_PORT) || 3001;
@@ -506,10 +513,20 @@ app.post("/intent", async (req, res) => {
       const link = telegramEnabled() ? await getLink(wallet) : null;
       if (link) {
         try {
-          const messageId = await sendApprovalMessage(link.chatId, approval.id, describeApproval(approval));
+          // With a phone passkey the chat only carries the review link: approving
+          // takes the review page + the phone's passkey, bound to the payload hash.
+          const rp = phoneRp();
+          const phonePasskey = !!rp && (await hasPhonePasskey(wallet));
+          let reviewUrl: string | undefined;
+          if (phonePasskey) {
+            const t = issueReviewToken(approval);
+            reviewUrl = `${rp!.origin}/phone/approve/${approval.id}?t=${encodeURIComponent(t)}`;
+          }
+          const messageId = await sendApprovalMessage(link.chatId, approval.id, describeApproval(approval, { phonePasskey }), reviewUrl);
           approval.channel = "telegram";
+          approval.factor = phonePasskey ? "phone-passkey" : "telegram-button";
           approval.telegram = { chatId: link.chatId, messageId };
-          console.log(`[approval] ${approval.id} sent to Telegram chat ${link.chatId}`);
+          console.log(`[approval] ${approval.id} sent to Telegram chat ${link.chatId} (${approval.factor})`);
         } catch (err: any) {
           // Fail closed: never fall back to a weaker factor because the phone was unreachable.
           settle(approval, { error: `Telegram delivery failed: ${err.message}` });
@@ -592,6 +609,9 @@ const onTelegramDecision: DecisionHandler = async ({ wallet, approvalId, approve
     await refreshTelegramMessage(a);
     return "Rejected. Nothing was executed.";
   }
+  // Phone-passkey approvals can't be approved with a chat button (there is none,
+  // but a crafted callback must not skip the passkey either).
+  if (a.factor === "phone-passkey") return "Open “Review & approve” and confirm with your phone's passkey.";
   claim(a.id, wallet);
   console.log(`[telegram] ${a.id} approved — executing via Safe`);
   await refreshTelegramMessage(a); // "⏳ executing…"
@@ -716,7 +736,123 @@ app.get("/telegram/status", async (req, res) => {
   if (!telegramEnabled()) { res.json({ enabled: false, linked: false }); return; }
   if (!ethers.isAddress(wallet)) { res.status(400).json({ error: "wallet query param required" }); return; }
   const link = await getLink(wallet);
-  res.json({ enabled: true, linked: !!link, username: link?.username });
+  res.json({
+    enabled: true, linked: !!link, username: link?.username,
+    phoneAvailable: !!phoneRp(), phonePasskey: await hasPhonePasskey(wallet),
+  });
+});
+
+// ─── Phone passkey ───
+// Setup: the signed-in desktop asks → a one-time link goes to the linked Telegram
+// → the phone opens it and creates a passkey for PUBLIC_APP_URL's domain.
+// Approvals: the Telegram message links to /phone/approve/<id>?t=<secret>; the page
+// shows the decoded payload and approving takes that passkey, bound to the payload hash.
+
+function requirePhoneRp() {
+  const rp = phoneRp();
+  if (!rp) throw new ApprovalError(400, "Phone approvals need PUBLIC_APP_URL set to the app's public https address.");
+  return rp;
+}
+
+app.post("/passkey/phone-setup", requireSession, async (_req, res) => {
+  try {
+    const wallet = res.locals.wallet as string;
+    const rp = requirePhoneRp();
+    const link = telegramEnabled() ? await getLink(wallet) : null;
+    if (!link) { res.status(400).json({ error: "Link Telegram first: the setup link is sent there." }); return; }
+    const token = createSetupToken(wallet);
+    await sendLinkMessage(
+      link.chatId,
+      "Set up a passkey on this phone for Orchestra. Once it's set up, risky transactions are confirmed here with it. Open the link on this phone (valid 10 minutes, one use).",
+      "📱 Set up phone passkey",
+      `${rp.origin}/phone/setup?token=${encodeURIComponent(token)}`,
+    );
+    console.log(`[passkey] phone setup link sent to ${wallet}'s Telegram`);
+    res.json({ sent: true });
+  } catch (e: any) { sendError(res, e); }
+});
+
+app.post("/phone/setup/options", async (req, res) => {
+  try {
+    const rp = requirePhoneRp();
+    const entry = getSetup(req.body?.token);
+    if (!entry) { res.status(404).json({ error: "This setup link is invalid, used or expired. Ask for a new one in Orchestra." }); return; }
+    // Repeatable: the link is single-use, so one challenge per link is enough and a
+    // second fetch must not replace the one the phone may be signing.
+    entry.options ??= await registrationOptions(entry.wallet, rp, true);
+    entry.challenge = entry.options.challenge;
+    res.json({ wallet: entry.wallet, options: entry.options });
+  } catch (e: any) { sendError(res, e); }
+});
+
+app.post("/phone/setup/verify", async (req, res) => {
+  try {
+    const rp = requirePhoneRp();
+    const { token, response } = req.body || {};
+    const entry = getSetup(token);
+    if (!entry || !entry.challenge) { res.status(404).json({ error: "This setup link is invalid, used or expired. Ask for a new one in Orchestra." }); return; }
+    consumeSetup(token); // single-use, pass or fail
+    await verifyRegistration(entry.wallet, response, { rp, challenge: entry.challenge, label: "phone" });
+    console.log(`[passkey] phone passkey registered for ${entry.wallet}`);
+    const link = await getLink(entry.wallet);
+    if (link) sendText(link.chatId, "✅ Phone passkey set up. From now on, risky transactions are confirmed on this phone with it.").catch(() => {});
+    res.json({ status: "ok" });
+  } catch (e: any) { sendError(res, e, 400); }
+});
+
+app.post("/phone/approvals/:id/review", (req, res) => {
+  try {
+    const a = approvalForReview(req.params.id, req.body?.t);
+    res.json({ review: reviewOf(a), ...approvalView(a) });
+  } catch (e: any) { sendError(res, e); }
+});
+
+app.post("/phone/approvals/:id/options", async (req, res) => {
+  try {
+    const rp = requirePhoneRp();
+    const a = approvalForReview(req.params.id, req.body?.t);
+    requirePending(a.id, a.wallet);
+    // Repeatable while the challenge is unused: a second fetch (page reload, React
+    // dev double effects) must not replace the challenge the phone may be signing.
+    if (a.challenge && a.passkeyOptions?.challenge === a.challenge) { res.json(a.passkeyOptions); return; }
+    const opts = await authenticationOptions(a.wallet, challengeBytes(a), rp);
+    a.challenge = opts.challenge;
+    a.passkeyOptions = opts as unknown as PendingApproval["passkeyOptions"];
+    res.json(opts);
+  } catch (e: any) { sendError(res, e, 400); }
+});
+
+app.post("/phone/approvals/:id/approve", async (req, res) => {
+  try {
+    const rp = requirePhoneRp();
+    const a = approvalForReview(req.params.id, req.body?.t);
+    requirePending(a.id, a.wallet);
+    const challenge = a.challenge;
+    a.challenge = undefined; // single-use, pass or fail
+    if (!challenge) { res.status(400).json({ error: "Start the passkey check for this approval first." }); return; }
+    const ok = await verifyAuthentication(a.wallet, req.body?.response, challenge, rp);
+    if (!ok) { res.status(401).json({ error: "Passkey verification failed" }); return; }
+
+    claim(a.id, a.wallet);
+    console.log(`[passkey] ${a.id} approved with the phone passkey — executing via Safe`);
+    await refreshTelegramMessage(a); // "⏳ executing…"
+    try {
+      const result = await executeApproval(a);
+      res.json({ status: "ok", ...result });
+    } finally {
+      refreshTelegramMessage(a).catch(() => {});
+    }
+  } catch (e: any) { sendError(res, e); }
+});
+
+app.post("/phone/approvals/:id/reject", async (req, res) => {
+  try {
+    const a = approvalForReview(req.params.id, req.body?.t);
+    reject(a.id, a.wallet);
+    console.log(`[passkey] ${a.id} rejected on the phone`);
+    await refreshTelegramMessage(a);
+    res.json({ status: "rejected" });
+  } catch (e: any) { sendError(res, e); }
 });
 
 app.post("/telegram/link-request", (req, res) => {
