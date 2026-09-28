@@ -1,8 +1,14 @@
-// ─── Passkey (WebAuthn) — medium-tier approval factor ───
-// Registers a device passkey per wallet and verifies assertions. A verified
-// assertion proves user presence (phishing-resistant biometric) — it authorizes
-// the agent wallet to execute a tx via the Safe. It does NOT sign the tx bytes,
-// which is why this is the MEDIUM tier; high-value txs still require a Ledger.
+// ─── Passkey (WebAuthn) — approval factor ───
+// Registers device passkeys per wallet and verifies assertions. A wallet can
+// hold several: one in the desktop browser, one on the phone. A passkey is
+// bound to the domain (RP ID) it was created on, so each is stored with its RP
+// ID and only offered on that domain:
+//   browser  PASSKEY_RP_ID / PASSKEY_ORIGIN           (the desktop app)
+//   phone    host / origin of PUBLIC_APP_URL          (the phone approval page)
+//
+// Approvals pass a challenge derived from the pending payload's hash, so a
+// verified assertion commits to exactly that payload. It still doesn't sign the
+// tx bytes themselves — the server builds and executes them.
 //
 // WebAuthn crypto is handled by @simplewebauthn/server — never hand-rolled.
 
@@ -14,22 +20,46 @@ import {
 } from "@simplewebauthn/server";
 import { read, write } from "../zero-g/storage";
 
-const RP_ID = process.env.PASSKEY_RP_ID || "localhost";
-const RP_NAME = "Orchestra";
-const ORIGIN = process.env.PASSKEY_ORIGIN || "http://localhost:3000";
+export interface RelyingParty {
+  rpID: string;
+  origin: string;
+}
 
-// Short-lived challenge store (in-memory), keyed by wallet. A challenge is
-// single-use and expires quickly, binding an assertion to a specific request.
+export type PasskeyLabel = "browser" | "phone";
+
+const RP_NAME = "Orchestra";
+
+export function browserRp(): RelyingParty {
+  return {
+    rpID: process.env.PASSKEY_RP_ID || "localhost",
+    origin: process.env.PASSKEY_ORIGIN || "http://localhost:3000",
+  };
+}
+
+/** The phone approval page's relying party, or null when PUBLIC_APP_URL isn't an https URL. */
+export function phoneRp(): RelyingParty | null {
+  const raw = process.env.PUBLIC_APP_URL;
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "https:") return null; // WebAuthn needs a secure context off localhost
+    return { rpID: url.hostname, origin: url.origin };
+  } catch {
+    return null;
+  }
+}
+
+// Short-lived challenge store (in-memory) for flows that don't hold their own.
 const CHALLENGE_TTL_MS = 5 * 60_000;
 const challenges = new Map<string, { challenge: string; expires: number }>();
 
-function setChallenge(wallet: string, challenge: string): void {
-  challenges.set(wallet.toLowerCase(), { challenge, expires: Date.now() + CHALLENGE_TTL_MS });
+function setChallenge(key: string, challenge: string): void {
+  challenges.set(key.toLowerCase(), { challenge, expires: Date.now() + CHALLENGE_TTL_MS });
 }
-function takeChallenge(wallet: string): string | null {
-  const key = wallet.toLowerCase();
-  const e = challenges.get(key);
-  challenges.delete(key); // single-use
+function takeChallenge(key: string): string | null {
+  const k = key.toLowerCase();
+  const e = challenges.get(k);
+  challenges.delete(k); // single-use
   if (!e || e.expires < Date.now()) return null;
   return e.challenge;
 }
@@ -39,89 +69,125 @@ interface StoredCred {
   publicKey: string; // base64
   counter: number;
   transports?: string[];
+  rpID: string;
+  label: PasskeyLabel;
+  createdAt?: string;
 }
 
-async function getCred(wallet: string): Promise<StoredCred | null> {
+const storeKey = (wallet: string) => `passkey:${wallet.toLowerCase()}`;
+
+async function getCreds(wallet: string): Promise<StoredCred[]> {
   try {
-    return (await read(`passkey:${wallet.toLowerCase()}`)) as StoredCred | null;
+    const stored = (await read(storeKey(wallet))) as any;
+    if (!stored) return [];
+    if (Array.isArray(stored.creds)) return stored.creds;
+    // Before multi-passkey support a single browser credential was stored bare.
+    if (stored.id && stored.publicKey) return [{ ...stored, rpID: stored.rpID || browserRp().rpID, label: "browser" }];
+    return [];
   } catch {
-    return null;
+    return [];
   }
 }
 
+async function saveCreds(wallet: string, creds: StoredCred[]): Promise<void> {
+  await write(storeKey(wallet), { creds });
+}
+
 export async function hasPasskey(wallet: string): Promise<boolean> {
-  return !!(await getCred(wallet));
+  const rp = browserRp().rpID;
+  return (await getCreds(wallet)).some((c) => c.rpID === rp);
+}
+
+/** A passkey registered on the phone for the current PUBLIC_APP_URL domain. */
+export async function hasPhonePasskey(wallet: string): Promise<boolean> {
+  const rp = phoneRp();
+  if (!rp) return false;
+  return (await getCreds(wallet)).some((c) => c.label === "phone" && c.rpID === rp.rpID);
 }
 
 // ── Registration ──
-export async function registrationOptions(wallet: string) {
+
+/** Options to create a passkey on `rp`. Without `holdChallenge`, the challenge is kept per wallet. */
+export async function registrationOptions(wallet: string, rp: RelyingParty = browserRp(), holdChallenge = false) {
+  const existing = (await getCreds(wallet)).filter((c) => c.rpID === rp.rpID);
   const opts = await generateRegistrationOptions({
     rpName: RP_NAME,
-    rpID: RP_ID,
+    rpID: rp.rpID,
     userName: wallet,
     userID: new TextEncoder().encode(wallet.toLowerCase()),
     attestationType: "none",
+    excludeCredentials: existing.map((c) => ({ id: c.id, transports: c.transports as any })),
     authenticatorSelection: { residentKey: "preferred", userVerification: "preferred" },
   });
-  setChallenge(wallet, opts.challenge);
+  if (!holdChallenge) setChallenge(`reg:${wallet}:${rp.rpID}`, opts.challenge);
   return opts;
 }
 
-export async function verifyRegistration(wallet: string, response: any): Promise<boolean> {
-  const expectedChallenge = takeChallenge(wallet);
+export async function verifyRegistration(
+  wallet: string,
+  response: any,
+  opts: { rp?: RelyingParty; challenge?: string; label?: PasskeyLabel } = {}
+): Promise<boolean> {
+  const rp = opts.rp ?? browserRp();
+  const expectedChallenge = opts.challenge ?? takeChallenge(`reg:${wallet}:${rp.rpID}`);
   if (!expectedChallenge) throw new Error("No or expired registration challenge");
 
   const verification = await verifyRegistrationResponse({
     response,
     expectedChallenge,
-    expectedOrigin: ORIGIN,
-    expectedRPID: RP_ID,
+    expectedOrigin: rp.origin,
+    expectedRPID: rp.rpID,
   });
   if (!verification.verified || !verification.registrationInfo) {
     throw new Error("Passkey registration could not be verified");
   }
 
   const cred = verification.registrationInfo.credential;
-  const stored: StoredCred = {
+  const creds = (await getCreds(wallet)).filter((c) => c.id !== cred.id);
+  creds.push({
     id: cred.id,
     publicKey: Buffer.from(cred.publicKey).toString("base64"),
     counter: cred.counter,
     transports: response?.response?.transports,
-  };
-  await write(`passkey:${wallet.toLowerCase()}`, stored);
+    rpID: rp.rpID,
+    label: opts.label ?? "browser",
+    createdAt: new Date().toISOString(),
+  });
+  await saveCreds(wallet, creds);
   return true;
 }
 
 // ── Authentication ──
 // Approvals pass their own challenge (derived from the pending payload's hash)
 // and hold it themselves; without one, a random challenge is kept per wallet.
-export async function authenticationOptions(wallet: string, challenge?: Uint8Array) {
-  const cred = await getCred(wallet);
-  if (!cred) throw new Error("No passkey registered for this wallet");
+export async function authenticationOptions(wallet: string, challenge?: Uint8Array, rp: RelyingParty = browserRp()) {
+  const creds = (await getCreds(wallet)).filter((c) => c.rpID === rp.rpID);
+  if (creds.length === 0) throw new Error("No passkey registered for this wallet on this device");
 
   const opts = await generateAuthenticationOptions({
-    rpID: RP_ID,
-    allowCredentials: [{ id: cred.id, transports: cred.transports as any }],
+    rpID: rp.rpID,
+    allowCredentials: creds.map((c) => ({ id: c.id, transports: c.transports as any })),
     userVerification: "preferred",
     ...(challenge ? { challenge: challenge as Uint8Array<ArrayBuffer> } : {}),
   });
-  if (!challenge) setChallenge(wallet, opts.challenge);
+  if (!challenge) setChallenge(`auth:${wallet}:${rp.rpID}`, opts.challenge);
   return opts;
 }
 
 /** Verify an assertion. Returns true only if the passkey signature checks out. */
-export async function verifyAuthentication(wallet: string, response: any, challenge?: string): Promise<boolean> {
-  const expectedChallenge = challenge ?? takeChallenge(wallet);
+export async function verifyAuthentication(wallet: string, response: any, challenge?: string, rp: RelyingParty = browserRp()): Promise<boolean> {
+  const expectedChallenge = challenge ?? takeChallenge(`auth:${wallet}:${rp.rpID}`);
   if (!expectedChallenge) throw new Error("No or expired authentication challenge");
 
-  const cred = await getCred(wallet);
-  if (!cred) throw new Error("No passkey registered for this wallet");
+  const creds = await getCreds(wallet);
+  const cred = creds.find((c) => c.id === response?.id && c.rpID === rp.rpID);
+  if (!cred) throw new Error("This passkey isn't registered for this wallet");
 
   const verification = await verifyAuthenticationResponse({
     response,
     expectedChallenge,
-    expectedOrigin: ORIGIN,
-    expectedRPID: RP_ID,
+    expectedOrigin: rp.origin,
+    expectedRPID: rp.rpID,
     credential: {
       id: cred.id,
       publicKey: new Uint8Array(Buffer.from(cred.publicKey, "base64")),
@@ -132,10 +198,8 @@ export async function verifyAuthentication(wallet: string, response: any, challe
 
   if (verification.verified) {
     // Persist the incremented signature counter (replay defense).
-    await write(`passkey:${wallet.toLowerCase()}`, {
-      ...cred,
-      counter: verification.authenticationInfo.newCounter,
-    });
+    cred.counter = verification.authenticationInfo.newCounter;
+    await saveCreds(wallet, creds);
   }
   return verification.verified;
 }
