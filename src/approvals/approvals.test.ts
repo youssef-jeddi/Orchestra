@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { ethers } from "ethers";
-import { describeApproval } from "./describe";
+import { describeApproval, reviewOf } from "./describe";
 import { USDC_SEPOLIA } from "../integrations/uniswap/types";
 import {
   createApproval,
@@ -13,6 +13,8 @@ import {
   reject,
   settle,
   challengeBytes,
+  issueReviewToken,
+  approvalForReview,
   canonicalJson,
   hashExecution,
   approvalView,
@@ -151,6 +153,30 @@ test("describe: an undecodable payload is flagged, never summarised", () => {
 test("describe: HTML in the reason is escaped", () => {
   const a = createApproval(base({ triggered: [], reason: "<b>bad</b> & worse" }));
   assert.match(describeApproval(a), /&lt;b&gt;bad&lt;\/b&gt; &amp; worse/);
+});
+
+// ── Phone review links ──
+test("review link: only the exact secret opens it", () => {
+  const a = createApproval(base());
+  assert.equal(code(() => approvalForReview(a.id, "anything")), 404); // no token issued yet
+  const t = issueReviewToken(a);
+  assert.equal(approvalForReview(a.id, t), a);
+  assert.equal(code(() => approvalForReview(a.id, t.slice(0, -1) + (t.endsWith("A") ? "B" : "A"))), 404);
+  assert.equal(code(() => approvalForReview(a.id, undefined)), 404);
+  assert.equal(code(() => approvalForReview("unknown", t)), 404);
+});
+
+test("review + phone hint: structured review matches the message; the chat says to use the passkey", () => {
+  const a = createApproval(base({
+    execution: { sendData: { unsignedTx: { to: USDC_SEPOLIA, value: "0", data: transfer.encodeFunctionData("transfer", [VITALIK, 150_000_000n]) } } },
+  }));
+  const r = reviewOf(a);
+  assert.equal(r.decoded, true);
+  assert.equal(r.title, "Send 150 USDC");
+  assert.deepEqual(r.details, [{ label: "to", value: VITALIK, mono: true }]);
+  assert.equal(r.ref, a.hash.slice(2, 10));
+  assert.match(describeApproval(a, { phonePasskey: true }), /confirm with your phone's passkey/);
+  assert.doesNotMatch(describeApproval(a), /passkey/);
 });
 
 console.log("approvals");

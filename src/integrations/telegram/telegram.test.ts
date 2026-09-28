@@ -5,13 +5,18 @@ import assert from "node:assert/strict";
 import { ethers } from "ethers";
 
 process.env.TELEGRAM_BOT_TOKEN = "test-token";
-// Stub the Bot API: only getMe is reached by these tests.
-globalThis.fetch = (async () => ({
-  status: 200,
-  json: async () => ({ ok: true, result: { username: "orchestra_test_bot" } }),
-})) as any;
+// Stub the Bot API and record what's sent.
+const sent: { method: string; body: any }[] = [];
+globalThis.fetch = (async (url: string, init: any) => {
+  const method = String(url).split("/").pop()!;
+  sent.push({ method, body: JSON.parse(init?.body || "{}") });
+  return {
+    status: 200,
+    json: async () => ({ ok: true, result: method === "getMe" ? { username: "orchestra_test_bot" } : { message_id: 42 } }),
+  };
+}) as any;
 
-import { linkRequest, confirmLink } from "./index";
+import { linkRequest, confirmLink, sendApprovalMessage } from "./index";
 
 const owner = ethers.Wallet.createRandom();
 const attacker = ethers.Wallet.createRandom();
@@ -47,6 +52,24 @@ test("link: a code issued for another wallet can't be claimed", async () => {
 
 test("link: unknown code is refused", async () => {
   await assert.rejects(confirmLink(owner.address, "nope", "0x"), /expired/);
+});
+
+test("approval message: basic mode has Approve + Reject buttons", async () => {
+  sent.length = 0;
+  assert.equal(await sendApprovalMessage(7, "id-1", "<b>x</b>"), 42);
+  const kb = sent[0].body.reply_markup.inline_keyboard.flat();
+  assert.deepEqual(kb.map((b: any) => b.callback_data), ["a:id-1", "r:id-1"]);
+});
+
+test("approval message: phone-passkey mode has only the review link and Reject — no Approve", async () => {
+  sent.length = 0;
+  await sendApprovalMessage(7, "id-2", "<b>x</b>", "https://app.example.com/phone/approve/id-2?t=secret");
+  const kb = sent[0].body.reply_markup.inline_keyboard.flat();
+  assert.deepEqual(kb, [
+    { text: "🔐 Review & approve", url: "https://app.example.com/phone/approve/id-2?t=secret" },
+    { text: "✖️ Reject", callback_data: "r:id-2" },
+  ]);
+  assert.ok(!kb.some((b: any) => String(b.callback_data).startsWith("a:")));
 });
 
 (async () => {

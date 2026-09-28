@@ -35,9 +35,22 @@ export interface PendingApproval {
   status: ApprovalStatus;
   /** Current passkey challenge (base64url), bound to id + hash. Single-use. */
   challenge?: string;
+  /**
+   * The WebAuthn options that carry `challenge`. Asking for options again while
+   * that challenge is unused returns these instead of replacing the challenge,
+   * so a page that fetches twice can't end up signing a stale one.
+   */
+  passkeyOptions?: { challenge: string } & Record<string, unknown>;
   /** Set when the approval was sent to an out-of-band channel; it can then only be approved there. */
   channel?: "telegram";
   telegram?: { chatId: number; messageId: number };
+  /**
+   * How the Telegram approval is confirmed: the in-chat button, or the phone
+   * review page + the phone's passkey (the Approve button is then refused).
+   */
+  factor?: "telegram-button" | "phone-passkey";
+  /** Secret in the review-page link, sent only to Telegram (the page is useless without it). */
+  reviewToken?: string;
   result?: { txHash: string; explorerUrl: string };
   error?: string;
 }
@@ -113,6 +126,23 @@ export function challengeBytes(a: PendingApproval): Uint8Array {
   return new Uint8Array(crypto.createHash("sha256").update(`orchestra-approval:${a.id}:${a.hash}:${nonce}`).digest());
 }
 
+/** Create the review-page secret for a phone-passkey approval. */
+export function issueReviewToken(a: PendingApproval): string {
+  a.reviewToken = crypto.randomBytes(24).toString("base64url");
+  return a.reviewToken;
+}
+
+/** The approval behind a review-page link, if the link's secret matches (any status). */
+export function approvalForReview(id: unknown, token: unknown, now = Date.now()): PendingApproval {
+  const a = typeof id === "string" ? getApproval(id, now) : null;
+  const given = Buffer.from(typeof token === "string" ? token : "");
+  const expected = Buffer.from(a?.reviewToken ?? "");
+  if (!a || !a.reviewToken || given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) {
+    throw new ApprovalError(404, "This approval link is invalid or has expired.");
+  }
+  return a;
+}
+
 /** Atomically move pending → executing. Only one approver can ever win. */
 export function claim(id: string, wallet: string, now = Date.now()): PendingApproval {
   const a = requirePending(id, wallet, now);
@@ -143,6 +173,7 @@ export function approvalView(a: PendingApproval) {
   return {
     id: a.id, status: a.status, intentType: a.intentType, summary: a.summary,
     hash: a.hash, expiresAt: new Date(a.expiresAt).toISOString(), channel: a.channel ?? "passkey",
+    ...(a.factor ? { factor: a.factor } : {}),
     ...(a.result ? a.result : {}), ...(a.error ? { error: a.error } : {}),
   };
 }

@@ -155,20 +155,38 @@ async function completeLink(code: string, chatId: number, username?: string): Pr
 
 // ── Messages ──
 
-export async function sendApprovalMessage(chatId: number, approvalId: string, html: string): Promise<number> {
+/**
+ * Send an approval request. With `reviewUrl` (phone-passkey mode) there is no
+ * Approve button: approving happens on the review page, with the phone's passkey.
+ */
+export async function sendApprovalMessage(chatId: number, approvalId: string, html: string, reviewUrl?: string): Promise<number> {
+  const reject = { text: "✖️ Reject", callback_data: `r:${approvalId}` };
   const msg = await call<{ message_id: number }>("sendMessage", {
     chat_id: chatId,
     text: html,
     parse_mode: "HTML",
     link_preview_options: { is_disabled: true },
     reply_markup: {
-      inline_keyboard: [[
-        { text: "✅ Approve", callback_data: `a:${approvalId}` },
-        { text: "✖️ Reject", callback_data: `r:${approvalId}` },
-      ]],
+      inline_keyboard: reviewUrl
+        ? [[{ text: "🔐 Review & approve", url: reviewUrl }], [reject]]
+        : [[{ text: "✅ Approve", callback_data: `a:${approvalId}` }, reject]],
     },
   });
   return msg.message_id;
+}
+
+/** A plain message with one link button (e.g. the phone passkey setup link). */
+export async function sendLinkMessage(chatId: number, text: string, buttonText: string, url: string): Promise<void> {
+  await call("sendMessage", {
+    chat_id: chatId,
+    text,
+    link_preview_options: { is_disabled: true },
+    reply_markup: { inline_keyboard: [[{ text: buttonText, url }]] },
+  });
+}
+
+export async function sendText(chatId: number, text: string): Promise<void> {
+  await call("sendMessage", { chat_id: chatId, text });
 }
 
 /** Replace the buttons with the outcome, keeping the original description above it. */
