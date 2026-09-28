@@ -15,6 +15,10 @@ import {
   DEFAULT_DAILY_LIMIT,
   getPriceUsd,
   setPrices,
+  checkSwapQuote,
+  resolveMaxSwapShortfall,
+  formatTokenAmount,
+  DEFAULT_MAX_SWAP_SHORTFALL,
 } from "./index";
 import { WETH_SEPOLIA, USDC_SEPOLIA } from "../integrations/uniswap/types";
 
@@ -341,6 +345,43 @@ test("computeHabitProfile: derived baseline feeds the anomaly rule", () => {
   });
   assert.equal(d.verdict, "NEEDS_APPROVAL");
   assert.deepEqual(d.triggered, ["habit-anomaly"]);
+});
+
+// ── checkSwapQuote ──
+test("checkSwapQuote: fair quote (fee + small slippage) passes", () => {
+  setPrices({ ETH: 2500, USDC: 1 });
+  const c = checkSwapQuote({ symbolIn: "USDC", amountIn: 10, symbolOut: "ETH", amountOut: 0.00398, maxShortfall: 0.05 })!;
+  assert.equal(c.ok, true);
+  assert.equal(c.marketOut, 0.004);
+  assert.ok(Math.abs(c.shortfall - 0.005) < 1e-9);
+});
+test("checkSwapQuote: mispriced pool (the 0x5973… Sepolia swap) is refused", () => {
+  setPrices({ ETH: 2500, USDC: 1 });
+  const c = checkSwapQuote({ symbolIn: "USDC", amountIn: 10, symbolOut: "ETH", amountOut: 0.000318, maxShortfall: 0.05 })!;
+  assert.equal(c.ok, false);
+  assert.match(c.reason!, /~0\.000318 ETH for 10 USDC, 92% less than the ~0\.004 ETH/);
+});
+test("checkSwapQuote: a quote better than market is never refused", () => {
+  setPrices({ ETH: 2500, USDC: 1 });
+  const c = checkSwapQuote({ symbolIn: "ETH", amountIn: 0.01, symbolOut: "USDC", amountOut: 300, maxShortfall: 0.05 })!;
+  assert.equal(c.ok, true);
+  assert.ok(c.shortfall < 0);
+});
+test("checkSwapQuote: boundary is inclusive; unknown price → null", () => {
+  setPrices({ ETH: 2500, USDC: 1 });
+  assert.equal(checkSwapQuote({ symbolIn: "USDC", amountIn: 100, symbolOut: "ETH", amountOut: 0.038, maxShortfall: 0.05 })!.ok, true);
+  assert.equal(checkSwapQuote({ symbolIn: "USDC", amountIn: 100, symbolOut: "ETH", amountOut: 0.0379, maxShortfall: 0.05 })!.ok, false);
+  assert.equal(checkSwapQuote({ symbolIn: "PEPE", amountIn: 1, symbolOut: "ETH", amountOut: 1 }), null);
+});
+test("resolveMaxSwapShortfall: env string, default, and bad values", () => {
+  assert.equal(resolveMaxSwapShortfall("0.1"), 0.1);
+  assert.equal(resolveMaxSwapShortfall(undefined), DEFAULT_MAX_SWAP_SHORTFALL);
+  for (const bad of ["abc", "0", "1.5", -0.2]) assert.equal(resolveMaxSwapShortfall(bad), DEFAULT_MAX_SWAP_SHORTFALL);
+});
+test("formatTokenAmount: stablecoin cents, 4 significant digits otherwise", () => {
+  assert.equal(formatTokenAmount(1234.567, "USDC"), "1,234.57");
+  assert.equal(formatTokenAmount(0.000318234, "ETH"), "0.0003182");
+  assert.equal(formatTokenAmount(1.23456789, "ETH"), "1.2346");
 });
 
 console.log(`\n${passed} passed`);

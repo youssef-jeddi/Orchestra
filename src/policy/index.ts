@@ -14,15 +14,15 @@ import { estimateUsd, resolveValuationSymbol } from "./prices";
 
 export type Verdict = "AUTO_EXECUTE" | "NEEDS_APPROVAL" | "BLOCKED" | "INFO";
 
-export type IntentType = "swap" | "send" | "add_liquidity" | "balance" | "unknown";
+export type IntentType = "swap" | "send" | "add_liquidity" | "deposit" | "balance" | "unknown";
 
 export const DEFAULT_DAILY_LIMIT = 100;
 
 /** Above this USD value, approval must use hardware (Ledger); below it a passkey suffices. */
 export const DEFAULT_HARDWARE_THRESHOLD = 1000;
 
-/** The factor required to satisfy an approval. */
-export type ApprovalMethod = "none" | "passkey" | "ledger";
+/** The factor required to satisfy an approval. 'wallet': the user signs the tx in their own wallet. */
+export type ApprovalMethod = "none" | "passkey" | "ledger" | "wallet";
 
 // ─── Intent classification (from AI plan steps) ───
 export function detectIntentType(steps: any[]): IntentType {
@@ -67,7 +67,7 @@ export function computePlanValueUsd(
     const sym = resolveValuationSymbol(params.tokenIn, params.symbolIn, "ETH");
     return estimateUsd(sym, Number(params.amount || 0));
   }
-  if (intentType === "send") {
+  if (intentType === "send" || intentType === "deposit") {
     const sym = resolveValuationSymbol(params.token, params.symbol, "ETH");
     return estimateUsd(sym, Number(params.amount || 0));
   }
@@ -383,3 +383,4 @@ export function computeHabitProfile(history: ActivityRecord[]): HabitProfile {
 
 export * from "./prices";
 export * from "./priceFeed";
+export * from "./quoteCheck";
