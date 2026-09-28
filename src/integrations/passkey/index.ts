@@ -93,7 +93,9 @@ export async function verifyRegistration(wallet: string, response: any): Promise
 }
 
 // ── Authentication ──
-export async function authenticationOptions(wallet: string) {
+// Approvals pass their own challenge (derived from the pending payload's hash)
+// and hold it themselves; without one, a random challenge is kept per wallet.
+export async function authenticationOptions(wallet: string, challenge?: Uint8Array) {
   const cred = await getCred(wallet);
   if (!cred) throw new Error("No passkey registered for this wallet");
 
@@ -101,14 +103,15 @@ export async function authenticationOptions(wallet: string) {
     rpID: RP_ID,
     allowCredentials: [{ id: cred.id, transports: cred.transports as any }],
     userVerification: "preferred",
+    ...(challenge ? { challenge: challenge as Uint8Array<ArrayBuffer> } : {}),
   });
-  setChallenge(wallet, opts.challenge);
+  if (!challenge) setChallenge(wallet, opts.challenge);
   return opts;
 }
 
 /** Verify an assertion. Returns true only if the passkey signature checks out. */
-export async function verifyAuthentication(wallet: string, response: any): Promise<boolean> {
-  const expectedChallenge = takeChallenge(wallet);
+export async function verifyAuthentication(wallet: string, response: any, challenge?: string): Promise<boolean> {
+  const expectedChallenge = challenge ?? takeChallenge(wallet);
   if (!expectedChallenge) throw new Error("No or expired authentication challenge");
 
   const cred = await getCred(wallet);
