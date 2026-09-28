@@ -7,7 +7,10 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { OrchestraProvider, useOrchestra } from '@/context/OrchestraContext';
-import { sendIntent, getPrices, getPasskeyStatus } from '@/lib/bridge';
+import {
+  sendIntent, getPrices, getPasskeyStatus, getApproval,
+  getTelegramStatus, telegramLinkRequest, telegramLink,
+} from '@/lib/bridge';
 import { executeSwap, executeSend } from '@/lib/signing';
 import { registerPasskey, approveWithPasskey } from '@/lib/passkey';
 
@@ -37,6 +40,7 @@ const EXAMPLES = [
   "What's the price of ETH?",
   'Swap 2 USDC for ETH',
   'Send 5 USDC to vitalik.eth',
+  'Fund my Safe with 0.01 ETH',
 ];
 
 // Statuses answered with plain text instead of a plan card.
@@ -68,7 +72,7 @@ export default function SimplePage() {
 }
 
 function SimpleChat() {
-  const { ledger, safe } = useOrchestra();
+  const { ledger, safe, session } = useOrchestra();
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -100,6 +104,15 @@ function SimpleChat() {
   const send = useCallback(async (raw) => {
     const text = (raw ?? input).trim();
     if (!text || busy) return;
+    // A connected wallet must be signed in: the server only acts for a wallet that proved ownership.
+    if (ledger.walletAddress && !session.ready) {
+      setMessages((m) => [...m, { role: 'user', text }, {
+        role: 'agent',
+        error: session.status === 'signing' ? 'Finish signing in with your wallet first.' : 'Sign in with your wallet first (button at the top).',
+      }]);
+      setInput('');
+      return;
+    }
     setInput('');
     const history = toHistory(messages);
     setMessages((m) => [...m, { role: 'user', text }]);
@@ -112,9 +125,9 @@ function SimpleChat() {
     } finally {
       setBusy(false);
     }
-  }, [input, busy, messages, ledger.walletAddress]);
+  }, [input, busy, messages, ledger.walletAddress, session.ready, session.status]);
 
-  // Approve/execute a swap or send from an agent card.
+  // Approve/execute a swap, send or Safe deposit from an agent card.
   const execute = useCallback(async (data, idx) => {
     if (!ledger.walletAddress) {
       setMessages((m) => [...m, { role: 'agent', error: 'Connect a wallet first.' }]);
@@ -122,9 +135,11 @@ function SimpleChat() {
     }
     setSigningIdx(idx);
     try {
-      const result = data.quoteData
-        ? await executeSwap(ledger, data)
-        : await executeSend(ledger, data);
+      const result = data.depositData
+        ? await safe.deposit(data.depositData.symbol.toLowerCase(), data.depositData.amount)
+        : data.quoteData
+          ? await executeSwap(ledger, data)
+          : await executeSend(ledger, data);
       if (result.orderId) {
         setMessages((m) => [...m, { role: 'system', text: `UniswapX order submitted: ${result.orderId.slice(0, 16)}…` }]);
       } else {
@@ -135,7 +150,7 @@ function SimpleChat() {
     } finally {
       setSigningIdx(null);
     }
-  }, [ledger]);
+  }, [ledger, safe]);
 
   // Approve + execute with a passkey (biometric) instead of signing directly.
   const approvePasskey = useCallback(async (data, idx) => {
@@ -143,10 +158,13 @@ function SimpleChat() {
       setMessages((m) => [...m, { role: 'agent', error: 'Connect a wallet first.' }]);
       return;
     }
+    if (!data.approval?.id) {
+      setMessages((m) => [...m, { role: 'agent', error: 'This action has no server-held approval. Ask again.' }]);
+      return;
+    }
     setSigningIdx(idx);
     try {
-      const payload = data.quoteData ? { quoteData: data.quoteData } : { sendData: data.sendData };
-      const result = await approveWithPasskey(ledger.walletAddress, payload);
+      const result = await approveWithPasskey(ledger.walletAddress, data.approval.id);
       setMessages((m) => [...m, { role: 'system', txHash: result.txHash, explorerUrl: result.explorerUrl }]);
     } catch (err) {
       setMessages((m) => [...m, { role: 'agent', error: err.message }]);
@@ -189,9 +207,16 @@ function SimpleChat() {
         </div>
         {connected ? (
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            {passkeyReg
+            {!session.ready && (
+              <button onClick={session.signIn} disabled={session.status === 'signing'} style={pill(true)}
+                title={session.error || 'Prove you own this wallet (free, no transaction)'}>
+                {session.status === 'signing' ? 'Check your wallet…' : '✍️ Sign in'}
+              </button>
+            )}
+            <TelegramLink ledger={ledger} onError={(msg) => setMessages((m) => [...m, { role: 'agent', error: msg }])} />
+            {session.ready && (passkeyReg
               ? <span style={{ fontSize: 11, color: '#30D158' }} title="Passkey registered">🔑 passkey</span>
-              : <button onClick={registerPk} style={pill(false)} title="Register a device passkey">🔑 Add passkey</button>}
+              : <button onClick={registerPk} style={pill(false)} title="Register a device passkey">🔑 Add passkey</button>)}
             <button onClick={ledger.disconnect} style={pill(false)} title="Disconnect">
               <span style={{ width: 6, height: 6, borderRadius: 3, background: '#30D158', display: 'inline-block' }} />
               {ledger.connectionType === 'metamask' ? '🦊 ' : ''}
@@ -206,7 +231,7 @@ function SimpleChat() {
         )}
       </header>
 
-      {connected && <SafeSetup safe={safe} ledger={ledger} onError={(msg) => setMessages((m) => [...m, { role: 'agent', error: msg }])} />}
+      {connected && session.ready && <SafeSetup safe={safe} ledger={ledger} onError={(msg) => setMessages((m) => [...m, { role: 'agent', error: msg }])} />}
 
       {/* Messages */}
       <main style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 16, padding: '24px 0' }}>
@@ -345,10 +370,11 @@ function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing }) {
   const verdict = data.assessment?.verdict || 'UNKNOWN';
   const color = VERDICT_COLOR[verdict] || '#666';
   const triggered = data.assessment?.triggered || [];
-  const needsSign = !data.autoExecuted && (data.quoteData || data.sendData);
+  const needsSign = !data.autoExecuted && (data.quoteData || data.sendData || data.depositData);
   const isSwap = !!data.quoteData;
+  const isDeposit = !!data.depositData;
   const method = data.assessment?.approvalMethod; // 'passkey' | 'ledger' | 'none'
-  const usePasskey = needsSign && (method === 'passkey' || method === 'ledger') && passkeyReg;
+  const usePasskey = needsSign && (method === 'passkey' || method === 'ledger') && passkeyReg && !!data.approval?.id;
 
   return (
     <div style={{ alignSelf: 'flex-start', maxWidth: '92%', display: 'flex', flexDirection: 'column', gap: 10,
@@ -409,7 +435,8 @@ function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing }) {
           ✓ Executed — view on Etherscan ↗
         </a>
       )}
-      {needsSign && (
+      {needsSign && data.approval?.channel === 'telegram' && <TelegramWait approval={data.approval} />}
+      {needsSign && data.approval?.channel !== 'telegram' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 2 }}>
           {usePasskey ? (
             <button onClick={onPasskey} disabled={signing} style={approveBtn(signing)}>
@@ -417,7 +444,7 @@ function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing }) {
             </button>
           ) : (
             <button onClick={onExecute} disabled={signing} style={approveBtn(signing)}>
-              {signing ? 'Check your wallet…' : (isSwap ? 'Approve & Swap' : 'Approve & Send')}
+              {signing ? 'Check your wallet…' : (isDeposit ? 'Sign deposit' : isSwap ? 'Approve & Swap' : 'Approve & Send')}
             </button>
           )}
           {method === 'passkey' && !passkeyReg && (
@@ -434,6 +461,94 @@ function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing }) {
       )}
       <Timing timing={data.timing} />
     </div>
+  );
+}
+
+// An approval sent to the user's phone: poll the server until it's settled there.
+function TelegramWait({ approval }) {
+  const [state, setState] = useState(approval);
+
+  useEffect(() => {
+    if (!['pending', 'executing'].includes(state.status)) return;
+    const id = setTimeout(() => {
+      getApproval(approval.id).then(setState).catch(() => setState((s) => ({ ...s })));
+    }, 2000);
+    return () => clearTimeout(id);
+  }, [state, approval.id]);
+
+  const text = {
+    pending: '📱 Sent to your Telegram. Check the details there and approve or reject.',
+    executing: '⏳ Approved on your phone. Executing…',
+    rejected: '🚫 Rejected on your phone. Nothing was executed.',
+    expired: '⌛ Expired. Nothing was executed.',
+    failed: `❌ Execution failed: ${state.error || 'unknown error'}`,
+  }[state.status];
+
+  if (state.status === 'executed') {
+    return (
+      <a href={state.explorerUrl} target="_blank" rel="noreferrer"
+        style={{ fontSize: 13, color: '#30D158', textDecoration: 'none' }}>
+        ✓ Approved on your phone and executed. View on Etherscan ↗
+      </a>
+    );
+  }
+  return <span style={{ fontSize: 13, color: state.status === 'failed' ? '#FF453A' : '#999' }}>{text}</span>;
+}
+
+// Link a Telegram chat: the wallet signs a one-time code, then the user presses Start in Telegram.
+function TelegramLink({ ledger, onError }) {
+  const [status, setStatus] = useState(null); // { enabled, linked, username }
+  const [url, setUrl] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const wallet = ledger.walletAddress;
+
+  const refresh = useCallback(() => {
+    if (!wallet) return;
+    getTelegramStatus(wallet).then(setStatus).catch(() => {});
+  }, [wallet]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  // While the t.me link is out, poll until the chat has pressed Start.
+  useEffect(() => {
+    if (!url || status?.linked) return;
+    const id = setInterval(refresh, 3000);
+    return () => clearInterval(id);
+  }, [url, status?.linked, refresh]);
+
+  if (!status?.enabled) return null;
+  if (status.linked) {
+    return <span style={{ fontSize: 11, color: '#30D158' }} title="Risky transactions are approved in Telegram">📱 {status.username ? `@${status.username}` : 'Telegram'}</span>;
+  }
+  if (url) {
+    return (
+      <a href={url} target="_blank" rel="noreferrer" style={{ ...pill(true), textDecoration: 'none' }}>
+        📱 Open Telegram and press Start
+      </a>
+    );
+  }
+
+  const link = async () => {
+    setBusy(true);
+    try {
+      const { code, typedData } = await telegramLinkRequest(wallet);
+      const sig = await ledger.signTyped(typedData);
+      const { ethers } = await import('ethers');
+      // Ledger returns {v,r,s}; MetaMask returns a serialized hex string.
+      const signature = typeof sig === 'string' ? sig : ethers.Signature.from({ v: sig.v, r: sig.r, s: sig.s }).serialized;
+      const res = await telegramLink(wallet, code, signature);
+      setUrl(res.url);
+    } catch (err) {
+      onError(`Telegram link failed: ${err.message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <button onClick={link} disabled={busy} style={pill(false)} title="Approve risky transactions from your phone">
+      {busy ? 'Check your wallet…' : '📱 Link Telegram'}
+    </button>
   );
 }
 

@@ -5,14 +5,52 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 export const BRIDGE_HTTP = API_URL;
 export const BRIDGE_WS = API_URL.replace(/^http/, 'ws') + '/ws';
 
+// ── Wallet session ──
+// Set by useSession after the wallet signs in; sent on every request so the
+// server can act for that wallet. A 401 `session_required` clears it.
+let sessionToken = null;
+const sessionInvalidListeners = new Set();
+
+export function setSessionToken(token) {
+  sessionToken = token || null;
+}
+
+/** Subscribe to "the server rejected our session". Returns an unsubscribe function. */
+export function onSessionInvalid(fn) {
+  sessionInvalidListeners.add(fn);
+  return () => sessionInvalidListeners.delete(fn);
+}
+
 export async function bridgeFetch(path, options = {}) {
   const res = await fetch(`${BRIDGE_HTTP}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
     ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+      ...options.headers,
+    },
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  if (!res.ok) {
+    if (res.status === 401 && data.code === 'session_required') {
+      sessionToken = null;
+      sessionInvalidListeners.forEach((fn) => fn());
+    }
+    throw new Error(data.error || `HTTP ${res.status}`);
+  }
   return data;
+}
+
+export async function authLoginRequest(walletAddress) {
+  return bridgeFetch('/auth/login-request', { method: 'POST', body: JSON.stringify({ walletAddress }) });
+}
+
+export async function authLogin(walletAddress, nonce, signature) {
+  return bridgeFetch('/auth/login', { method: 'POST', body: JSON.stringify({ walletAddress, nonce, signature }) });
+}
+
+export async function getSession() {
+  return bridgeFetch('/auth/session');
 }
 
 // ── Specific API calls ──
@@ -139,14 +177,38 @@ export async function passkeyRegister(walletAddress, response) {
   });
 }
 
-export async function passkeyAuthOptions(walletAddress) {
+export async function passkeyAuthOptions(walletAddress, approvalId) {
   return bridgeFetch('/passkey/auth-options', {
+    method: 'POST', body: JSON.stringify({ walletAddress, approvalId }),
+  });
+}
+
+export async function passkeyApprove(walletAddress, approvalId, response) {
+  return bridgeFetch('/passkey/approve', {
+    method: 'POST', body: JSON.stringify({ walletAddress, approvalId, response }),
+  });
+}
+
+// ── Server-held approvals ──
+
+export async function getApproval(approvalId) {
+  return bridgeFetch(`/approvals/${approvalId}`);
+}
+
+// ── Telegram approvals ──
+
+export async function getTelegramStatus(walletAddress) {
+  return bridgeFetch(`/telegram/status?wallet=${walletAddress}`);
+}
+
+export async function telegramLinkRequest(walletAddress) {
+  return bridgeFetch('/telegram/link-request', {
     method: 'POST', body: JSON.stringify({ walletAddress }),
   });
 }
 
-export async function passkeyApprove(walletAddress, response, payload) {
-  return bridgeFetch('/passkey/approve', {
-    method: 'POST', body: JSON.stringify({ walletAddress, response, ...payload }),
+export async function telegramLink(walletAddress, code, signature) {
+  return bridgeFetch('/telegram/link', {
+    method: 'POST', body: JSON.stringify({ walletAddress, code, signature }),
   });
 }

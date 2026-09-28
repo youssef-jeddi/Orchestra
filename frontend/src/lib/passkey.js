@@ -16,12 +16,12 @@ export async function registerPasskey(walletAddress) {
 }
 
 /**
- * Approve + execute an action with a passkey assertion. `payload` is the thing
- * to execute: { quoteData } for a swap or { sendData } for a transfer.
- * Returns { txHash, explorerUrl }.
+ * Approve a server-held pending action with a passkey assertion. The server
+ * executes the payload it stored for `approvalId` (the challenge commits to its
+ * hash) — the browser never sends what to execute. Returns { txHash, explorerUrl }.
  */
-export async function approveWithPasskey(walletAddress, payload) {
-  const optionsJSON = await passkeyAuthOptions(walletAddress);
+export async function approveWithPasskey(walletAddress, approvalId) {
+  const optionsJSON = await passkeyAuthOptions(walletAddress, approvalId);
   const response = await startAuthentication({ optionsJSON });
-  return passkeyApprove(walletAddress, response, payload);
+  return passkeyApprove(walletAddress, approvalId, response);
 }
