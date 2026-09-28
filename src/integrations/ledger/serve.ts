@@ -20,6 +20,7 @@ import { deploySafe } from "../safe/deploy";
 import { detectExistingSafe } from "../safe/detect";
 import { setInitialSpendingLimits, updateSpendingLimit, buildLimitUpdateTx } from "../safe/spendingLimit";
 import { getAgentAddress } from "../safe/agentWallet";
+import { limitTxProblem } from "../safe/verifyLimitTx";
 import { executePlan } from "../../executor";
 import {
   computeHabitProfile,
@@ -28,12 +29,36 @@ import {
   type PolicyProfile,
   type ActivityRecord,
 } from "../../policy";
-import { getPolicyProfile, getRecentActivity, recordActivity, _resetPolicyStoreCache } from "../../policy/store";
+import { getPolicyProfile, getRecentActivity, recordActivity, readUserProfile, writeUserProfile } from "../../policy/store";
+import { loginRequest, login, requireSession, sessionWallet, AuthError } from "../../auth";
 import { getAdapter, type Balances } from "../../executor/adapters";
 import { interpretIntent, assessAction } from "../../intent/pipeline";
 import { sanitizeHistory } from "../../intent/planner";
 import { fetchBalances, resolveEnsName } from "../../intent/context";
 import { makeSepoliaProvider, withTimeout } from "../../utils/rpc";
+import {
+  createApproval,
+  requirePending,
+  challengeBytes,
+  claim,
+  settle,
+  getApproval,
+  approvalView,
+  reject,
+  ApprovalError,
+  type PendingApproval,
+} from "../../approvals";
+import { describeApproval, describeOutcome } from "../../approvals/describe";
+import {
+  telegramEnabled,
+  getLink,
+  linkRequest,
+  confirmLink,
+  sendApprovalMessage,
+  settleApprovalMessage,
+  startTelegramBot,
+  type DecisionHandler,
+} from "../telegram";
 import {
   registrationOptions,
   verifyRegistration,
@@ -51,7 +76,7 @@ app.use(express.json());
 // CORS — allow cross-origin requests from Vercel frontend
 app.use((_req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Headers", "Content-Type");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   if (_req.method === "OPTIONS") {
     res.sendStatus(204);
@@ -289,7 +314,18 @@ app.post("/intent", async (req, res) => {
       res.status(400).json({ error: "message is too long (max 1000 characters)" });
       return;
     }
-    const wallet = typeof walletAddress === "string" && ethers.isAddress(walletAddress) ? walletAddress : undefined;
+    // The wallet comes from the session, never the body: anything that reads or
+    // moves a wallet's funds needs proof of ownership. Without a session the
+    // request is anonymous (prices, help, questions) and nothing can execute.
+    const session = sessionWallet(req);
+    if (walletAddress != null && walletAddress !== "") {
+      if (!session) { res.status(401).json({ error: "Sign in with your wallet first.", code: "session_required" }); return; }
+      if (String(walletAddress).toLowerCase() !== session) {
+        res.status(401).json({ error: "Your session is for another wallet. Sign in again.", code: "session_required" });
+        return;
+      }
+    }
+    const wallet = session ? ethers.getAddress(session) : undefined;
 
     console.log(`\n[intent] "${message}" (wallet: ${wallet || "none"})`);
     refreshPrices().catch(() => {});
@@ -302,14 +338,17 @@ app.post("/intent", async (req, res) => {
     const balancesP: Promise<Balances | null> = wallet
       ? safeP.then((safe) => fetchBalances(provider, safe || wallet))
       : Promise.resolve(null);
-    const profileP = withTimeout(getPolicyProfile(), 2_000, {} as PolicyProfile);
+    const profileP = withTimeout(getPolicyProfile(wallet), 2_000, {} as PolicyProfile);
     const activityP: Promise<ActivityRecord[] | undefined> = wallet
       ? withTimeout(getRecentActivity(wallet), 2_000, [] as ActivityRecord[])
       : Promise.resolve(undefined);
 
+    // The wallet's own balance only matters for deposits into the Safe — fetch it on demand.
+    let walletBalancesP: Promise<Balances | null> | null = null;
     const { outcome, planner } = await interpretIntent(message.trim(), sanitizeHistory(history), {
       connected: !!wallet,
       getBalances: () => balancesP,
+      getWalletBalances: () => (walletBalancesP ??= wallet ? fetchBalances(provider, wallet) : Promise.resolve(null)),
       resolveEns: resolveEnsName,
     });
     const timing = () => ({ totalMs: Date.now() - started, plannerMs: planner.latencyMs, model: planner.model });
@@ -396,6 +435,23 @@ app.post("/intent", async (req, res) => {
     };
     const result = await adapter.build(ctx);
 
+    // The adapter can refine the summary (e.g. the quoted swap output) — show that.
+    if (result.plan?.summary && result.plan.summary !== plan.summary) {
+      plan.summary = result.plan.summary;
+      agentReasoning.planner = `Understood: ${result.plan.summary}`;
+    }
+
+    // The adapter refused (e.g. the quote is far below market): nothing to sign or execute.
+    if (result.refusal) {
+      console.log(`[intent] ${intentType} refused by adapter: ${result.refusal}`);
+      res.json({
+        status: "unsupported", intentType, reason: result.refusal, reasoning: result.refusal,
+        plan, assessment: { ...assessment, verdict: "BLOCKED", requiresLedger: false, approvalMethod: "none" },
+        timing: timing(),
+      });
+      return;
+    }
+
     // Auto-execute when policy allows and the adapter supports it.
     if (adapter.execute && verdict === "AUTO_EXECUTE" && safeAddress) {
       try {
@@ -433,6 +489,37 @@ app.post("/intent", async (req, res) => {
       }
     }
 
+    // An agent-executed action awaiting approval: hold its exact payload server-side.
+    // Approvals (passkey, …) then execute that record, never a client-sent payload.
+    let approval: PendingApproval | null = null;
+    const execution = approvalExecution(intentType, result.payload);
+    if (verdict === "NEEDS_APPROVAL" && adapter.execute && safeAddress && wallet && execution) {
+      approval = createApproval({
+        wallet, safeAddress, intentType: intentType as "swap" | "send",
+        summary: plan.summary, valueUsd: action.valueUsd,
+        reason: decision.reason, triggered: decision.triggered, execution,
+      });
+      console.log(`[approval] ${approval.id} pending — ${plan.summary} (hash ${approval.hash.slice(0, 18)}…)`);
+
+      // A linked Telegram chat becomes the only way to approve it: the phone shows
+      // what will actually execute, decoded from the stored payload.
+      const link = telegramEnabled() ? await getLink(wallet) : null;
+      if (link) {
+        try {
+          const messageId = await sendApprovalMessage(link.chatId, approval.id, describeApproval(approval));
+          approval.channel = "telegram";
+          approval.telegram = { chatId: link.chatId, messageId };
+          console.log(`[approval] ${approval.id} sent to Telegram chat ${link.chatId}`);
+        } catch (err: any) {
+          // Fail closed: never fall back to a weaker factor because the phone was unreachable.
+          settle(approval, { error: `Telegram delivery failed: ${err.message}` });
+          const reason = "I couldn't deliver the approval to your Telegram, so nothing will execute. Try again in a moment.";
+          res.json({ status: "unsupported", intentType, reason, reasoning: reason, plan, timing: timing() });
+          return;
+        }
+      }
+    }
+
     res.json({
       status: "ok",
       intentType,
@@ -441,6 +528,7 @@ app.post("/intent", async (req, res) => {
       plan: { ...plan, ...(result.plan ? { id: result.plan.id } : {}) },
       assessment,
       ...(result.payload || {}),
+      ...(approval ? { approval: approvalView(approval) } : {}),
       agentReasoning,
       timing: timing(),
     });
@@ -449,6 +537,79 @@ app.post("/intent", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+/** The payload an approval stores for an agent-executed intent, or null if there's nothing to execute. */
+function approvalExecution(intentType: string, payload: Record<string, unknown> | undefined): Record<string, unknown> | null {
+  if (intentType === "swap" && payload?.quoteData) return { quoteData: payload.quoteData };
+  if (intentType === "send" && payload?.sendData) return { sendData: payload.sendData };
+  return null;
+}
+
+/** Execute a claimed approval's stored payload through the Safe and record the outcome. */
+async function executeApproval(a: PendingApproval): Promise<{ txHash: string; explorerUrl: string }> {
+  try {
+    const adapter = getAdapter(a.intentType);
+    if (!adapter?.execute) throw new Error(`${a.intentType} can't be executed through the Safe`);
+    const ctx = {
+      walletAddress: a.wallet, safeAddress: a.safeAddress, balanceAddress: a.safeAddress, provider,
+      params: {}, planSummary: a.summary, planSteps: [], totalEstimatedValueUsd: a.valueUsd, balances: null,
+    };
+    const exec = await adapter.execute(ctx, { payload: a.execution });
+    if (!exec) throw new Error("execution produced no result");
+    const result = { txHash: exec.txHash, explorerUrl: exec.explorerUrl };
+    settle(a, { result });
+    console.log(`[approval] ${a.id} executed: ${exec.txHash}`);
+    return result;
+  } catch (err: any) {
+    settle(a, { error: err.message });
+    console.error(`[approval] ${a.id} failed: ${err.message}`);
+    throw err;
+  }
+}
+
+/** Passkeys can't approve what was sent to the phone — otherwise the phone check could be skipped. */
+function requirePasskeyChannel(a: PendingApproval): void {
+  if (a.channel === "telegram") throw new ApprovalError(409, "This approval was sent to your Telegram. Approve it there.");
+}
+
+async function refreshTelegramMessage(a: PendingApproval): Promise<void> {
+  if (a.telegram) await settleApprovalMessage(a.telegram.chatId, a.telegram.messageId, describeApproval(a), describeOutcome(a));
+}
+
+// Approve / Reject pressed in Telegram. Answers fast; execution runs in the
+// background and the message is edited with the outcome.
+const onTelegramDecision: DecisionHandler = async ({ wallet, approvalId, approve }) => {
+  const a = getApproval(approvalId);
+  if (!a || a.channel !== "telegram") return "Unknown approval.";
+  if (a.wallet !== wallet) return "This approval belongs to another wallet.";
+  if (a.status !== "pending") {
+    await refreshTelegramMessage(a);
+    return `Already ${a.status}.`;
+  }
+  if (!approve) {
+    reject(a.id, wallet);
+    console.log(`[telegram] ${a.id} rejected`);
+    await refreshTelegramMessage(a);
+    return "Rejected. Nothing was executed.";
+  }
+  claim(a.id, wallet);
+  console.log(`[telegram] ${a.id} approved — executing via Safe`);
+  await refreshTelegramMessage(a); // "⏳ executing…"
+  executeApproval(a).catch(() => {}).finally(() => refreshTelegramMessage(a));
+  return "Approved. Executing…";
+};
+
+/** A wallet in the body must match the session (catches a stale session after switching accounts). */
+function sameWalletOrAbsent(bodyWallet: unknown, res: express.Response): boolean {
+  if (bodyWallet == null || bodyWallet === "") return true;
+  if (String(bodyWallet).toLowerCase() === res.locals.wallet) return true;
+  res.status(401).json({ error: "Your session is for another wallet. Sign in again.", code: "session_required" });
+  return false;
+}
+
+function sendError(res: express.Response, err: any, fallbackStatus = 500): void {
+  res.status(err instanceof ApprovalError ? err.status : fallbackStatus).json({ error: err.message });
+}
 
 function describeBalances(b: Balances | null, token?: string): string {
   if (!b) return "I couldn't read your balance right now (the RPC endpoint didn't answer).";
@@ -483,72 +644,94 @@ app.get("/passkey/status", async (req, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.post("/passkey/register-options", async (req, res) => {
+// Registering a passkey for a wallet requires a session for that wallet;
+// otherwise anyone could register one for a wallet that has none.
+app.post("/passkey/register-options", requireSession, async (req, res) => {
   try {
-    const { walletAddress } = req.body;
-    if (!walletAddress) { res.status(400).json({ error: "walletAddress required" }); return; }
+    const walletAddress = res.locals.wallet as string;
     res.json(await registrationOptions(walletAddress));
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-app.post("/passkey/register", async (req, res) => {
+app.post("/passkey/register", requireSession, async (req, res) => {
   try {
-    const { walletAddress, response } = req.body;
-    if (!walletAddress || !response) { res.status(400).json({ error: "walletAddress and response required" }); return; }
+    const walletAddress = res.locals.wallet as string;
+    const { response } = req.body;
+    if (!response) { res.status(400).json({ error: "response required" }); return; }
     await verifyRegistration(walletAddress, response);
     console.log(`[passkey] registered for ${walletAddress}`);
     res.json({ status: "ok", registered: true });
   } catch (e: any) { res.status(400).json({ error: e.message }); }
 });
 
-app.post("/passkey/auth-options", async (req, res) => {
+// Passkey options for one pending approval. The challenge is derived from the
+// approval's payload hash, so the assertion commits to that exact payload.
+app.post("/passkey/auth-options", requireSession, async (req, res) => {
   try {
-    const { walletAddress } = req.body;
-    if (!walletAddress) { res.status(400).json({ error: "walletAddress required" }); return; }
-    res.json(await authenticationOptions(walletAddress));
+    const walletAddress = res.locals.wallet as string;
+    const { approvalId } = req.body;
+    const a = requirePending(approvalId, walletAddress);
+    requirePasskeyChannel(a);
+    const opts = await authenticationOptions(walletAddress, challengeBytes(a));
+    a.challenge = opts.challenge;
+    res.json(opts);
+  } catch (e: any) { sendError(res, e, 400); }
+});
+
+// Verify the passkey assertion for an approval, then execute the payload the
+// server stored for it. Any payload in the request body is ignored.
+app.post("/passkey/approve", requireSession, async (req, res) => {
+  try {
+    const walletAddress = res.locals.wallet as string;
+    const { approvalId, response } = req.body;
+    if (!response) { res.status(400).json({ error: "response required" }); return; }
+    const a = requirePending(approvalId, walletAddress);
+    requirePasskeyChannel(a);
+    const challenge = a.challenge;
+    a.challenge = undefined; // single-use, pass or fail
+    if (!challenge) { res.status(400).json({ error: "Request passkey options for this approval first." }); return; }
+
+    const ok = await verifyAuthentication(walletAddress, response, challenge);
+    if (!ok) { res.status(401).json({ error: "Passkey verification failed" }); return; }
+
+    claim(a.id, walletAddress);
+    console.log(`[passkey] ${a.id} approved by ${walletAddress} — executing via Safe`);
+    const result = await executeApproval(a);
+    res.json({ status: "ok", approvalId: a.id, ...result });
+  } catch (e: any) { sendError(res, e); }
+});
+
+// ─── Approval status (the frontend polls this while an approval is out on another channel) ───
+app.get("/approvals/:id", (req, res) => {
+  const a = getApproval(req.params.id);
+  if (!a) { res.status(404).json({ error: "Unknown approval" }); return; }
+  res.json(approvalView(a));
+});
+
+// ─── Telegram linking ───
+// 1. link-request → EIP-712 typed data with a one-time code  2. the wallet signs it
+// 3. link → signature verified, t.me deep link returned  4. /start <code> in Telegram binds the chat.
+app.get("/telegram/status", async (req, res) => {
+  const wallet = String(req.query.wallet || "");
+  if (!telegramEnabled()) { res.json({ enabled: false, linked: false }); return; }
+  if (!ethers.isAddress(wallet)) { res.status(400).json({ error: "wallet query param required" }); return; }
+  const link = await getLink(wallet);
+  res.json({ enabled: true, linked: !!link, username: link?.username });
+});
+
+app.post("/telegram/link-request", (req, res) => {
+  try {
+    if (!telegramEnabled()) { res.status(400).json({ error: "Telegram approvals aren't configured on this server." }); return; }
+    res.json(linkRequest(String(req.body?.walletAddress || "")));
   } catch (e: any) { res.status(400).json({ error: e.message }); }
 });
 
-// Verify the passkey assertion, then execute the approved action via the Safe.
-app.post("/passkey/approve", async (req, res) => {
+app.post("/telegram/link", async (req, res) => {
   try {
-    const { walletAddress, response, quoteData, sendData } = req.body;
-    if (!walletAddress || !response) { res.status(400).json({ error: "walletAddress and response required" }); return; }
-
-    const ok = await verifyAuthentication(walletAddress, response);
-    if (!ok) { res.status(401).json({ error: "Passkey verification failed" }); return; }
-    console.log(`[passkey] verified for ${walletAddress} — executing via Safe`);
-
-    const safeData = (await read(`safe:${walletAddress.toLowerCase()}`)) as any;
-    const safeAddress = safeData?.safeAddress;
-    if (!safeAddress) { res.status(400).json({ error: "No Safe deployed — passkey execution requires a Safe" }); return; }
-
-    if (quoteData) {
-      const swap = getAdapter("swap");
-      if (!swap?.execute) throw new Error("swap adapter unavailable");
-      const ctx = {
-        walletAddress, safeAddress, balanceAddress: safeAddress, provider,
-        params: {}, planSummary: "", planSteps: [], totalEstimatedValueUsd: 0, balances: null,
-      };
-      const exec = await swap.execute(ctx, { payload: { quoteData } });
-      if (!exec) throw new Error("execution produced no result");
-      res.json({ status: "ok", ...exec });
-      return;
-    }
-
-    if (sendData) {
-      const agentKey = process.env.AGENT_PRIVATE_KEY;
-      if (!agentKey) throw new Error("AGENT_PRIVATE_KEY not set");
-      const { executeBatchViaSafe } = await import("../safe/transaction");
-      const tx = sendData.unsignedTx;
-      const value = typeof tx.value === "string" && tx.value.startsWith("0x") ? BigInt(tx.value).toString() : (tx.value || "0");
-      const txHash = await executeBatchViaSafe(safeAddress, agentKey, [{ to: tx.to, value, data: tx.data || "0x" }], "150000");
-      res.json({ status: "ok", txHash, explorerUrl: `https://sepolia.etherscan.io/tx/${txHash}` });
-      return;
-    }
-
-    res.status(400).json({ error: "Nothing to execute — provide quoteData or sendData" });
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
+    const { walletAddress, code, signature } = req.body || {};
+    if (!walletAddress || !code || !signature) { res.status(400).json({ error: "walletAddress, code and signature required" }); return; }
+    res.json(await confirmLink(walletAddress, code, signature));
+  } catch (e: any) { res.status(400).json({ error: e.message }); }
 });
 
 // ─── Live prices (cached) ───
@@ -557,13 +740,35 @@ app.get("/prices", async (_req, res) => {
   res.json({ prices: getPrices() });
 });
 
-// ─── Policy config ───
-// Read/merge the user's deterministic policy (user:profile.policy in 0G).
-// Fields: verifiedTokens, knownAddresses, dailyLimitUsd, maxAutoTxPerDay, typicalMaxUsd.
-app.get("/policy", async (_req, res) => {
+// ─── Wallet sessions ───
+// 1. login-request → EIP-712 typed data with a one-time nonce  2. the wallet signs it
+// 3. login → signature verified, session token issued (send as Authorization: Bearer).
+app.post("/auth/login-request", (req, res) => {
   try {
-    const p = (await read("user:profile")) as any;
-    res.json({ policy: (p && p.policy) || {} });
+    res.json(loginRequest(req.body?.walletAddress));
+  } catch (e: any) { res.status(e instanceof AuthError ? e.status : 400).json({ error: e.message }); }
+});
+
+app.post("/auth/login", (req, res) => {
+  try {
+    const { walletAddress, nonce, signature } = req.body || {};
+    const session = login(walletAddress, nonce, signature);
+    console.log(`[auth] session issued for ${session.wallet}`);
+    res.json(session);
+  } catch (e: any) { res.status(e instanceof AuthError ? e.status : 400).json({ error: e.message }); }
+});
+
+app.get("/auth/session", requireSession, (_req, res) => {
+  res.json({ wallet: res.locals.wallet });
+});
+
+// ─── Policy config ───
+// Read/merge the signed-in wallet's deterministic policy (user:profile:<wallet>.policy).
+// Fields: verifiedTokens, knownAddresses, dailyLimitUsd, maxAutoTxPerDay, typicalMaxUsd.
+app.get("/policy", requireSession, async (_req, res) => {
+  try {
+    const p = await readUserProfile(res.locals.wallet);
+    res.json({ policy: p.policy || {} });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
@@ -584,14 +789,15 @@ app.get("/habit", async (req, res) => {
   }
 });
 
-app.post("/policy", async (req, res) => {
+app.post("/policy", requireSession, async (req, res) => {
   try {
+    const wallet = res.locals.wallet as string;
     const patch = req.body?.policy;
     if (!patch || typeof patch !== "object") {
       res.status(400).json({ error: "body must be { policy: { ... } }" });
       return;
     }
-    const existing = ((await read("user:profile")) as any) || {};
+    const existing = await readUserProfile(wallet);
     // Merge; a null value clears that field (lets you disable a rule).
     const mergedPolicy: Record<string, unknown> = { ...(existing.policy || {}) };
     for (const [k, v] of Object.entries(patch)) {
@@ -603,9 +809,8 @@ app.post("/policy", async (req, res) => {
       policy: mergedPolicy,
       updatedAt: new Date().toISOString(),
     };
-    await write("user:profile", updated);
-    _resetPolicyStoreCache(); // pick up the new policy immediately
-    console.log(`[policy] Updated: ${JSON.stringify(updated.policy)}`);
+    await writeUserProfile(wallet, updated); // also drops the cached policy
+    console.log(`[policy] Updated for ${wallet}: ${JSON.stringify(updated.policy)}`);
     res.json({ status: "ok", policy: updated.policy });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
@@ -613,13 +818,11 @@ app.post("/policy", async (req, res) => {
 });
 
 // ─── Safe onboarding ───
-app.post("/onboard", async (req, res) => {
+app.post("/onboard", requireSession, async (req, res) => {
   try {
-    const { ledgerAddress, spendingLimitUSD = 100 } = req.body;
-    if (!ledgerAddress) {
-      res.status(400).json({ error: "ledgerAddress is required" });
-      return;
-    }
+    const ledgerAddress = ethers.getAddress(res.locals.wallet);
+    if (!sameWalletOrAbsent(req.body?.ledgerAddress, res)) return;
+    const { spendingLimitUSD = 100 } = req.body;
 
     console.log(`[onboard] Checking Safe for ${ledgerAddress}...`);
 
@@ -677,9 +880,9 @@ app.post("/onboard", async (req, res) => {
       deployedAt: new Date().toISOString(),
     });
 
-    // Merge: keep any existing guardrail policy (user:profile.policy) instead of wiping it.
-    const existingProfile = ((await read("user:profile").catch(() => null)) as any) || {};
-    await write("user:profile", {
+    // Merge: keep any existing guardrail policy instead of wiping it.
+    const existingProfile = await readUserProfile(ledgerAddress);
+    await writeUserProfile(ledgerAddress, {
       ...existingProfile,
       address: ledgerAddress,
       safeAddress,
@@ -689,7 +892,6 @@ app.post("/onboard", async (req, res) => {
       createdAt: existingProfile.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
-    _resetPolicyStoreCache();
 
     console.log(`[onboard] New user onboarded — Safe: ${safeAddress}`);
     res.json({
@@ -745,11 +947,13 @@ app.get("/safe-balances", async (req, res) => {
 });
 
 // Step 1: Build unsigned tx for Ledger to sign (MultiSend of 3 setAllowance calls through Safe)
-app.post("/prepare-limit-update", async (req, res) => {
+app.post("/prepare-limit-update", requireSession, async (req, res) => {
   try {
-    const { newLimitUSD, ledgerAddress } = req.body;
-    if (!newLimitUSD || !ledgerAddress) {
-      res.status(400).json({ error: "newLimitUSD and ledgerAddress required" });
+    const ledgerAddress = ethers.getAddress(res.locals.wallet);
+    if (!sameWalletOrAbsent(req.body?.ledgerAddress, res)) return;
+    const { newLimitUSD } = req.body;
+    if (!newLimitUSD) {
+      res.status(400).json({ error: "newLimitUSD required" });
       return;
     }
 
@@ -771,12 +975,16 @@ app.post("/prepare-limit-update", async (req, res) => {
   }
 });
 
-// Step 2: After Ledger signs and tx is broadcast, update storage + OrchestraPolicy
-app.post("/finalize-limit-update", async (req, res) => {
+// Step 2: After Ledger signs and tx is broadcast, update storage + OrchestraPolicy.
+// Only once the chain shows that exact limit-update tx succeeded, sent by this
+// wallet to its Safe — a session alone can't raise the limit.
+app.post("/finalize-limit-update", requireSession, async (req, res) => {
   try {
-    const { newLimitUSD, ledgerAddress, txHash } = req.body;
-    if (!newLimitUSD || !ledgerAddress) {
-      res.status(400).json({ error: "newLimitUSD and ledgerAddress required" });
+    const ledgerAddress = ethers.getAddress(res.locals.wallet);
+    if (!sameWalletOrAbsent(req.body?.ledgerAddress, res)) return;
+    const { newLimitUSD, txHash } = req.body;
+    if (!newLimitUSD || typeof txHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(txHash)) {
+      res.status(400).json({ error: "newLimitUSD and txHash required" });
       return;
     }
 
@@ -786,19 +994,29 @@ app.post("/finalize-limit-update", async (req, res) => {
       return;
     }
 
+    const safeAddress = (stored as any).safeAddress as string;
+    const expected = buildLimitUpdateTx(safeAddress, ledgerAddress, getAgentAddress(), newLimitUSD);
+    const [tx, receipt] = await Promise.all([
+      withTimeout(provider.getTransaction(txHash), 10_000, null),
+      withTimeout(provider.getTransactionReceipt(txHash), 10_000, null),
+    ]);
+    const problem = limitTxProblem({ tx, receipt, wallet: ledgerAddress, safeAddress, expectedData: expected.data });
+    if (problem) {
+      res.status(400).json({ error: `Limit not updated: ${problem}` });
+      return;
+    }
+
     // Update 0G Storage
     await write(`safe:${ledgerAddress.toLowerCase()}`, {
       ...(stored as any),
       spendingLimitUSD: newLimitUSD,
     });
-    const profile = await read("user:profile");
-    if (profile) {
-      await write("user:profile", {
-        ...(profile as any),
-        autoApproveLimit: newLimitUSD,
-        updatedAt: new Date().toISOString(),
-      });
-    }
+    const profile = await readUserProfile(ledgerAddress);
+    await writeUserProfile(ledgerAddress, {
+      ...profile,
+      autoApproveLimit: newLimitUSD,
+      updatedAt: new Date().toISOString(),
+    });
 
     // Update OrchestraPolicy on-chain (agent wallet signs — it's just a registry write)
     const policyAddress = process.env.ORCHESTRA_POLICY_ADDRESS;
@@ -846,6 +1064,7 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log();
   // Warm the price cache at startup.
   refreshPrices().catch(() => {});
+  startTelegramBot(onTelegramDecision);
 });
 
 server.on("error", (err) => {

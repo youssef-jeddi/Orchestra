@@ -14,7 +14,7 @@ import crypto from "crypto";
 import { WETH_SEPOLIA, USDC_SEPOLIA } from "../integrations/uniswap/types";
 import { checkApproval } from "../integrations/uniswap/api";
 import { fetchQuoteWithRouting } from "../integrations/uniswap/routing";
-import { TOKEN_DECIMALS, toTokenWei, symbolFromAddress, estimateUsd } from "../policy";
+import { TOKEN_DECIMALS, toTokenWei, symbolFromAddress, estimateUsd, checkSwapQuote, formatTokenAmount, type QuoteCheck } from "../policy";
 
 /** Uniswap's native-ETH sentinel. A WETH address would pull ERC-20 the Safe may not hold. */
 const NATIVE_ETH = "0x0000000000000000000000000000000000000000";
@@ -26,6 +26,47 @@ function isNativeEth(symbol: string | undefined, address: string): boolean {
 /** Quote address: "ETH" is native (the router wraps it); "WETH" stays the WETH contract. */
 function routingToken(address: string, symbol: string | undefined): string {
   return String(symbol || "").toUpperCase() === "ETH" ? NATIVE_ETH : address;
+}
+
+function decimalsFor(address: string): number {
+  return TOKEN_DECIMALS[address.toLowerCase()] ?? 18;
+}
+
+function symbolFor(address: string): string {
+  return isNativeEth(undefined, address) ? "ETH" : symbolFromAddress(address, "UNKNOWN");
+}
+
+interface QuoteLeg {
+  tokenIn: string;
+  symbolIn: string;
+  /** Raw input amount (wei / smallest unit). */
+  amountIn: string;
+  tokenOut: string;
+  symbolOut: string;
+}
+
+/**
+ * Read a quote's output and check it against the reference prices. A quote
+ * whose output can't be read can't be verified either, so it is refused.
+ */
+function assessQuote(quote: any, leg: QuoteLeg): { amountOut: number | null; check: QuoteCheck | null; refusal?: string } {
+  const raw = quote?.output?.amount ?? quote?.orderInfo?.outputs?.[0]?.startAmount;
+  if (raw == null || !/^\d+$/.test(String(raw))) {
+    return { amountOut: null, check: null, refusal: "Not swapping: the Uniswap quote has no readable output amount, so its price can't be checked." };
+  }
+  const amountOut = Number(ethers.formatUnits(String(raw), decimalsFor(leg.tokenOut)));
+  const amountIn = Number(ethers.formatUnits(leg.amountIn, decimalsFor(leg.tokenIn)));
+  const check = checkSwapQuote({ symbolIn: leg.symbolIn, amountIn, symbolOut: leg.symbolOut, amountOut });
+  return { amountOut, check, refusal: check && !check.ok ? check.reason : undefined };
+}
+
+/** "Swap 10 USDC for ~0.00398 ETH", with the USD value and any notable gap to market. */
+function swapSummary(amountIn: string, symbolIn: string, amountOut: number, symbolOut: string, check: QuoteCheck | null): string {
+  const usd = estimateUsd(symbolIn, Number(amountIn));
+  let s = `Swap ${amountIn} ${symbolIn} for ~${formatTokenAmount(amountOut, symbolOut)} ${symbolOut}`;
+  if (symbolIn !== "USDC" && usd > 0) s += ` (~$${usd.toFixed(2)})`;
+  if (check && check.shortfall >= 0.01) s += `, ${(check.shortfall * 100).toFixed(1)}% below market`;
+  return s;
 }
 
 export interface Balances {
@@ -56,6 +97,8 @@ export interface AdapterResult {
   plan?: { id: string; summary: string; steps: any[]; totalEstimatedValueUsd: number };
   assessment?: Record<string, unknown>;
   payload?: Record<string, unknown>;
+  /** Set when the action must not go ahead (e.g. a mispriced quote). Nothing is signable. */
+  refusal?: string;
 }
 
 /** Result of a successful server-side auto-execution. */
@@ -152,6 +195,20 @@ const sendAdapter: IntentAdapter = {
   },
 };
 
+// ─── deposit — the user's wallet funds their Safe ───
+// Built like a send to the Safe, but signed by the user's own wallet: there is
+// deliberately no execute() — the agent can't move funds out of the user's wallet.
+const depositAdapter: IntentAdapter = {
+  kind: "deposit",
+  async build(ctx) {
+    if (!ctx.walletAddress) return { refusal: "Connect a wallet first so I can move funds from it into your Safe." };
+    if (!ctx.safeAddress) return { refusal: "You don't have a Safe yet. Create one first (the \"Create Safe\" button), then fund it." };
+    const built = await sendAdapter.build({ ...ctx, params: { ...ctx.params, to: ctx.safeAddress } });
+    const sendData = (built.payload as any).sendData;
+    return { payload: { depositData: { ...sendData, safeAddress: ctx.safeAddress } } };
+  },
+};
+
 // ─── add_liquidity — check approvals, build quote data ───
 const addLiquidityAdapter: IntentAdapter = {
   kind: "add_liquidity",
@@ -212,6 +269,8 @@ const swapAdapter: IntentAdapter = {
     console.log(`[adapter:swap] ${rawAmount} ${symbolIn} → ${symbolOut} (${amountWei} wei)`);
 
     let quoteData: Record<string, any> | null = null;
+    let summary = ctx.planSummary;
+    let refusal: string | undefined;
     const swapper = ctx.safeAddress || ctx.walletAddress;
     if (swapper) {
       try {
@@ -220,26 +279,32 @@ const swapAdapter: IntentAdapter = {
           : await checkApproval({ walletAddress: swapper, token: tokenIn, tokenOut, amount: amountWei });
         const quoteResult = await fetchQuoteWithRouting({ swapper, tokenIn, tokenOut, amount: amountWei }, "autonomous");
         console.log(`[adapter:swap]   routing: ${quoteResult.routing}, permit: ${quoteResult.permitData ? "yes" : "no"}`);
+
+        const assessed = assessQuote(quoteResult.quote, { tokenIn, symbolIn, amountIn: amountWei, tokenOut, symbolOut });
+        refusal = assessed.refusal;
+        if (assessed.amountOut != null) summary = swapSummary(rawAmount, symbolIn, assessed.amountOut, symbolOut, assessed.check);
+        if (refusal) console.warn(`[adapter:swap] quote refused: ${refusal}`);
+
         quoteData = {
           tradeId: crypto.randomUUID(),
           quote: quoteResult.quote, permitData: quoteResult.permitData,
           routing: quoteResult.routing, isMevProtected: quoteResult.isMevProtected,
           isGasless: quoteResult.isGasless, riskLevel: "autonomous",
           approvalNeeded: !!approvalTx, approvalTx,
-          tokenIn, tokenOut, amount: amountWei,
+          tokenIn, tokenOut, amount: amountWei, symbolIn, symbolOut,
+          expectedOut: assessed.amountOut,
         };
       } catch (err: any) {
         console.error(`[adapter:swap] quote error: ${err.message}`);
       }
     }
 
-    return {
-      plan: {
-        id: quoteData?.tradeId || crypto.randomUUID(),
-        summary: ctx.planSummary, steps: ctx.planSteps, totalEstimatedValueUsd: ctx.totalEstimatedValueUsd,
-      },
-      payload: { quoteData },
+    const plan = {
+      id: quoteData?.tradeId || crypto.randomUUID(),
+      summary, steps: ctx.planSteps, totalEstimatedValueUsd: ctx.totalEstimatedValueUsd,
     };
+    if (refusal) return { plan, refusal };
+    return { plan, payload: { quoteData } };
   },
 
   async execute(ctx, built) {
@@ -257,6 +322,14 @@ const swapAdapter: IntentAdapter = {
       { swapper: ctx.safeAddress, tokenIn: quoteData.tokenIn, tokenOut: quoteData.tokenOut, amount: quoteData.amount },
       "autonomous"
     );
+    // Re-check the quote that will actually execute: the price can move between
+    // the preview and here (a passkey approval can come minutes later).
+    const { refusal } = assessQuote(freshQuote.quote, {
+      tokenIn: quoteData.tokenIn, symbolIn: quoteData.symbolIn || symbolFor(quoteData.tokenIn),
+      amountIn: String(quoteData.amount), tokenOut: quoteData.tokenOut,
+      symbolOut: quoteData.symbolOut || symbolFor(quoteData.tokenOut),
+    });
+    if (refusal) throw new Error(refusal);
     const swapTx = await submitSwap(freshQuote.quote, null, undefined);
     console.log(`[adapter:swap] AUTO_EXECUTE swap tx: to=${swapTx.to}, value=${swapTx.value}`);
 
@@ -294,6 +367,7 @@ const swapAdapter: IntentAdapter = {
 const REGISTRY: Record<string, IntentAdapter> = {
   [balanceAdapter.kind]: balanceAdapter,
   [sendAdapter.kind]: sendAdapter,
+  [depositAdapter.kind]: depositAdapter,
   [addLiquidityAdapter.kind]: addLiquidityAdapter,
   [swapAdapter.kind]: swapAdapter,
 };
