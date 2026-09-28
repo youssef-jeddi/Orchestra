@@ -370,9 +370,12 @@ function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing }) {
   const verdict = data.assessment?.verdict || 'UNKNOWN';
   const color = VERDICT_COLOR[verdict] || '#666';
   const triggered = data.assessment?.triggered || [];
-  const needsSign = !data.autoExecuted && (data.quoteData || data.sendData || data.depositData);
+  const needsSign = !data.autoExecuted && (data.quoteData || data.sendData || data.depositData || data.lpData);
   const isSwap = !!data.quoteData;
   const isDeposit = !!data.depositData;
+  // Liquidity is added from the Safe, so it can only be approved through a server-held
+  // approval (passkey / Telegram) — there is no "sign it in your wallet" path.
+  const isLp = !!data.lpData;
   const method = data.assessment?.approvalMethod; // 'passkey' | 'ledger' | 'none'
   const usePasskey = needsSign && (method === 'passkey' || method === 'ledger') && passkeyReg && !!data.approval?.id;
 
@@ -442,12 +445,16 @@ function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing }) {
             <button onClick={onPasskey} disabled={signing} style={approveBtn(signing)}>
               {signing ? 'Confirm on your device…' : '🔑 Approve with passkey'}
             </button>
+          ) : isLp ? (
+            <span style={{ fontSize: 13, color: '#999', lineHeight: 1.5 }}>
+              Adding liquidity runs from your Safe: approve it with a passkey (add one top-right) or link Telegram, then ask again.
+            </span>
           ) : (
             <button onClick={onExecute} disabled={signing} style={approveBtn(signing)}>
               {signing ? 'Check your wallet…' : (isDeposit ? 'Sign deposit' : isSwap ? 'Approve & Swap' : 'Approve & Send')}
             </button>
           )}
-          {method === 'passkey' && !passkeyReg && (
+          {method === 'passkey' && !passkeyReg && !isLp && (
             <span style={{ fontSize: 11, color: '#777' }}>
               Tip: add a passkey (top-right) to approve with your fingerprint instead.
             </span>

@@ -179,6 +179,27 @@ test("review + phone hint: structured review matches the message; the chat says 
   assert.doesNotMatch(describeApproval(a), /passkey/);
 });
 
+test("describe: add liquidity is decoded from lpData — max deposit, expected use, full range, to the Safe", () => {
+  const a = createApproval(base({
+    intentType: "add_liquidity",
+    execution: { lpData: {
+      tokenA: "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14", symbolA: "ETH", amountA: "10000000000000000",
+      tokenB: USDC_SEPOLIA, symbolB: "USDC", amountB: "25000000",
+      feeTier: 3000, usedA: 0.01, usedB: 25,
+    } },
+  }));
+  const r = reviewOf(a);
+  assert.equal(r.title, "Add liquidity: ETH/USDC 0.3%");
+  assert.deepEqual(r.details.map((d) => d.value), [
+    "0.01 ETH + 25 USDC",
+    "0.01 ETH + 25 USDC (the rest stays in your Safe)",
+    "full range (refused if the pool's price is far from market)",
+    "your Safe",
+  ]);
+  const unknown = createApproval(base({ intentType: "add_liquidity", execution: { lpData: { tokenA: "0x0000000000000000000000000000000000000001", tokenB: USDC_SEPOLIA, feeTier: 3000 } } }));
+  assert.equal(reviewOf(unknown).decoded, false);
+});
+
 console.log("approvals");
 for (const [name, fn] of tests) {
   _resetApprovals();

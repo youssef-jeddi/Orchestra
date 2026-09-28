@@ -14,6 +14,7 @@ import crypto from "crypto";
 import { WETH_SEPOLIA, USDC_SEPOLIA } from "../integrations/uniswap/types";
 import { checkApproval } from "../integrations/uniswap/api";
 import { fetchQuoteWithRouting } from "../integrations/uniswap/routing";
+import { readPool, orderSides, lpPriceProblem, planMint, buildMintBatch, type LpSide, type PoolState } from "../integrations/uniswap/liquidity";
 import { TOKEN_DECIMALS, toTokenWei, symbolFromAddress, estimateUsd, checkSwapQuote, formatTokenAmount, type QuoteCheck } from "../policy";
 
 /** Uniswap's native-ETH sentinel. A WETH address would pull ERC-20 the Safe may not hold. */
@@ -209,43 +210,93 @@ const depositAdapter: IntentAdapter = {
   },
 };
 
-// ─── add_liquidity — check approvals, build quote data ───
+// ─── add_liquidity — full-range Uniswap v3 position, from the Safe ───
+// Build reads the pool and refuses a mispriced one; execute re-reads it and
+// re-checks at execution time (an approval can come minutes later), then runs
+// approve → mint → approval reset through the Safe. The position NFT goes to the Safe.
+
+function lpSide(address: string, symbol: string, amount: string | bigint): LpSide {
+  const native = String(symbol).toUpperCase() === "ETH";
+  const decimals = decimalsFor(address);
+  return {
+    address, symbol, decimals, native,
+    amount: typeof amount === "bigint" ? amount : ethers.parseUnits(String(amount), decimals),
+  };
+}
+
 const addLiquidityAdapter: IntentAdapter = {
   kind: "add_liquidity",
   async build(ctx) {
     const p = ctx.params;
-    const tokenA = p.tokenA || WETH_SEPOLIA;
-    const tokenB = p.tokenB || USDC_SEPOLIA;
-    const amountA = String(p.amountA || "0");
-    const amountB = String(p.amountB || "0");
-    const symbolA = p.symbolA || symbolFromAddress(tokenA, "WETH");
-    const symbolB = p.symbolB || symbolFromAddress(tokenB, "USDC");
-    const feeTier = p.feeTier || 3000;
+    if (!ctx.safeAddress) {
+      return { refusal: "Adding liquidity runs from your Safe. Create one first (the \"Create Safe\" button), then fund it." };
+    }
+    const a = lpSide(p.tokenA || WETH_SEPOLIA, p.symbolA || symbolFromAddress(p.tokenA || WETH_SEPOLIA, "WETH"), p.amountA || "0");
+    const b = lpSide(p.tokenB || USDC_SEPOLIA, p.symbolB || symbolFromAddress(p.tokenB || USDC_SEPOLIA, "USDC"), p.amountB || "0");
+    const fee = Number(p.feeTier) || 3000;
+    const pair = `${a.symbol}/${b.symbol} ${fee / 10000}%`;
 
-    console.log(`[adapter:add_liquidity] ${amountA} ${symbolA} + ${amountB} ${symbolB} (fee: ${feeTier / 10000}%)`);
+    let state: PoolState | null;
+    try {
+      state = await readPool(ctx.provider, a.address, b.address, fee);
+    } catch (err: any) {
+      return { refusal: `I couldn't read the Uniswap pool right now (${err.message}). Nothing was built.` };
+    }
+    if (!state) return { refusal: `There's no ${pair} Uniswap v3 pool on Sepolia.` };
 
-    let quoteData: Record<string, unknown> | null = null;
-    const swapper = ctx.safeAddress || ctx.walletAddress;
-    if (swapper) {
-      try {
-        const amountAWei = toTokenWei(amountA, tokenA).toString();
-        const amountBWei = toTokenWei(amountB, tokenB).toString();
-        const [approvalA, approvalB] = await Promise.all([
-          checkApproval({ walletAddress: swapper, token: tokenA, tokenOut: tokenB, amount: amountAWei }),
-          checkApproval({ walletAddress: swapper, token: tokenB, tokenOut: tokenA, amount: amountBWei }),
-        ]);
-        quoteData = {
-          tradeId: crypto.randomUUID(), routing: "CLASSIC", riskLevel: "autonomous",
-          approvalNeeded: !!(approvalA || approvalB),
-          approvalTxA: approvalA, approvalTxB: approvalB,
-          tokenA, tokenB, amountA: amountAWei, amountB: amountBWei, feeTier,
-        };
-      } catch (err: any) {
-        console.error(`[adapter:add_liquidity] approval check error: ${err.message}`);
-      }
+    const [t0, t1] = orderSides(a, b);
+    const problem = lpPriceProblem(state.sqrtPriceX96, t0, t1);
+    if (problem) {
+      console.warn(`[adapter:add_liquidity] refused: ${problem}`);
+      return { refusal: problem };
     }
 
-    return { payload: { quoteData } };
+    const plan = planMint(a, b, fee, state.sqrtPriceX96);
+    const usedOf = (side: LpSide) => (side === plan.token0 ? plan.used0 : plan.used1);
+    const human = (side: LpSide, v: bigint) => Number(ethers.formatUnits(v, side.decimals));
+    const usedA = human(a, usedOf(a));
+    const usedB = human(b, usedOf(b));
+    const leftover = usedOf(a) < a.amount || usedOf(b) < b.amount;
+    const summary = `Add liquidity to ${pair} (full range): ≈${formatTokenAmount(usedA, a.symbol)} ${a.symbol} + ≈${formatTokenAmount(usedB, b.symbol)} ${b.symbol}` +
+      (leftover ? " at the pool's ratio; the rest stays in your Safe" : "");
+    console.log(`[adapter:add_liquidity] ${summary} (pool ${state.pool})`);
+
+    const lpData = {
+      tokenA: a.address, symbolA: a.symbol, amountA: a.amount.toString(),
+      tokenB: b.address, symbolB: b.symbol, amountB: b.amount.toString(),
+      feeTier: fee, pool: state.pool, usedA, usedB,
+    };
+    return {
+      plan: { id: crypto.randomUUID(), summary, steps: ctx.planSteps, totalEstimatedValueUsd: ctx.totalEstimatedValueUsd },
+      payload: { lpData },
+    };
+  },
+
+  async execute(ctx, built) {
+    const d = (built.payload as any)?.lpData;
+    if (!d || !ctx.safeAddress) return null;
+    const agentKey = process.env.AGENT_PRIVATE_KEY;
+    if (!agentKey) throw new Error("AGENT_PRIVATE_KEY not set");
+
+    const a = lpSide(d.tokenA, d.symbolA, BigInt(d.amountA));
+    const b = lpSide(d.tokenB, d.symbolB, BigInt(d.amountB));
+    const fee = Number(d.feeTier) || 3000;
+    const state = await readPool(ctx.provider, a.address, b.address, fee);
+    if (!state) throw new Error("The Uniswap pool no longer exists.");
+    const [t0, t1] = orderSides(a, b);
+    const problem = lpPriceProblem(state.sqrtPriceX96, t0, t1);
+    if (problem) throw new Error(problem);
+
+    const plan = planMint(a, b, fee, state.sqrtPriceX96);
+    const batch = buildMintBatch(plan, ctx.safeAddress, Math.floor(Date.now() / 1000) + 20 * 60);
+    console.log(`[adapter:add_liquidity] EXECUTE via Safe ${ctx.safeAddress}: ${batch.length} op(s)`);
+    const { executeBatchViaSafe } = await import("../integrations/safe/transaction");
+    const txHash = await executeBatchViaSafe(ctx.safeAddress, agentKey, batch, "900000");
+
+    const tradeId = crypto.randomUUID();
+    const { logTradeResult } = await import("./logResult");
+    logTradeResult(tradeId, txHash, "success").catch(() => {});
+    return { txHash, explorerUrl: `https://sepolia.etherscan.io/tx/${txHash}`, tradeId };
   },
 };
 

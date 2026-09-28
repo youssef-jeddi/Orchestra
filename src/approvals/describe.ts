@@ -92,6 +92,29 @@ function decode(a: PendingApproval): { title: string; details: ReviewDetail[] } 
       ],
     };
   }
+  if (a.intentType === "add_liquidity") {
+    const d = (a.execution as any)?.lpData;
+    if (!d || typeof d.tokenA !== "string" || typeof d.tokenB !== "string") return null;
+    // tokenAt maps the WETH address to WETH; the stored symbol says whether it's paid in native ETH.
+    const side = (address: string, symbol: unknown) => (String(symbol).toUpperCase() === "ETH" ? TOKENS.ETH : tokenAt(address));
+    const tA = side(d.tokenA, d.symbolA);
+    const tB = side(d.tokenB, d.symbolB);
+    const fee = Number(d.feeTier);
+    if (!tA || !tB || !(fee > 0)) return null;
+    const maxA = Number(ethers.formatUnits(BigInt(d.amountA || 0), tA.decimals));
+    const maxB = Number(ethers.formatUnits(BigInt(d.amountB || 0), tB.decimals));
+    const details: ReviewDetail[] = [
+      { label: "You deposit at most", value: `${amount(maxA, tA.symbol)} + ${amount(maxB, tB.symbol)}` },
+    ];
+    if (typeof d.usedA === "number" && typeof d.usedB === "number") {
+      details.push({ label: "At the pool's current price, about", value: `${amount(d.usedA, tA.symbol)} + ${amount(d.usedB, tB.symbol)} (the rest stays in your Safe)` });
+    }
+    details.push(
+      { label: "Price range", value: "full range (refused if the pool's price is far from market)" },
+      { label: "Position goes to", value: "your Safe" },
+    );
+    return { title: `Add liquidity: ${tA.symbol}/${tB.symbol} ${fee / 10000}%`, details };
+  }
   return null;
 }
 

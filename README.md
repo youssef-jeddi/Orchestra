@@ -43,7 +43,7 @@ Every chat message goes through `POST /intent` (`src/intent/`):
 1. **Planner** (`planner.ts`, `prompt.ts`, `schema.ts`) — one LLM call turns the message and recent conversation into JSON: `actions` (swap, send, deposit, balance, price, add_liquidity), `clarify`, `reply` or `unsupported`. The output is validated against a strict Zod schema; an invalid reply gets one repair retry with the concrete errors, then the user is asked to rephrase. Unvalidated model output never reaches the rest of the pipeline.
 2. **Resolver** (`resolve.ts`) — turns the plan into exact values: token symbols → registry addresses, ENS → address, `"all"` / `"50%"` / `"$20"` → exact amounts. It **rejects amounts above your balance** before anything is built (no failed transaction, no wasted gas), keeps a little ETH for gas where your wallet pays it, and writes the summary from the resolved values — so what you approve is what executes. Anything ambiguous becomes a clarifying question, not a guess.
 3. **Policy** (`src/policy/`) — `decide()` computes the verdict from scratch, with no LLM input. See [Risk policy](#risk-policy).
-4. **Adapter** (`src/executor/adapters.ts`) — builds the transaction. Swaps fetch a Uniswap quote (v3 and v4 routes, native-ETH pools included) and are **refused if the quote returns more than 5% below market value** at the reference price feed (thin or mispriced pools — common on testnets). Auto-approved swaps and sends execute through the Safe with the agent wallet; deposits are only ever signed by your own wallet.
+4. **Adapter** (`src/executor/adapters.ts`) — builds the transaction. Swaps fetch a Uniswap quote (v3 and v4 routes, native-ETH pools included) and are **refused if the quote returns more than 5% below market value** at the reference price feed (thin or mispriced pools — common on testnets). Liquidity mints a **full-range Uniswap v3 position** from the Safe, and is refused when the pool's price is more than 5% from market (depositing at a wrong price hands value to arbitrageurs). Auto-approved swaps, sends and liquidity execute through the Safe with the agent wallet; deposits are only ever signed by your own wallet.
 
 Read-only requests (balance, price) and conversational replies return straight after the planner and resolver.
 
@@ -105,6 +105,7 @@ Once a wallet links Telegram, its risky transactions can only be approved there 
 ### Uniswap — Swap execution
 - Uniswap Trading API with Permit2; v3 and v4 routes (native-ETH pools included)
 - Quote sanity check against the reference price feed before anything is signed or executed
+- Full-range v3 liquidity positions from the Safe (*"add liquidity with 25 USDC and 0.01 ETH"*): exact-amount approvals reset after the mint, native ETH wrapped and refunded, position NFT held by the Safe
 - Sepolia USDC / WETH / ETH
 
 ### Ledger — Hardware security
@@ -156,6 +157,7 @@ cp .env.example .env
 | `TELEGRAM_BOT_TOKEN` | Telegram approvals — create a bot with @BotFather |
 | `PUBLIC_APP_URL` | Phone passkey approvals — the frontend's public **https** address |
 | `SWAP_MAX_SHORTFALL` | Quote guard threshold (default `0.05`) |
+| `LP_MAX_PRICE_DEVIATION` | Liquidity price guard (default `0.05`; `off` for testnet demos, where pools are far from market) |
 | `SESSION_SECRET`, `SESSION_TTL_HOURS` | Only to share sessions across instances / change the 8h lifetime |
 
 ### Run
@@ -196,7 +198,7 @@ forge script script/DeployOrchestraPolicy.s.sol --rpc-url $SEPOLIA_RPC_URL --bro
 ## Tests and evaluation
 
 ```bash
-npm test                 # policy, intent, approvals, Telegram, auth and passkey suites (no network)
+npm test                 # policy, intent, approvals, Telegram, auth, passkey and liquidity suites (no network)
 ```
 
 ```bash
@@ -230,7 +232,7 @@ src/
 │   ├── llm/                 # Groq / Claude completion client (with eval cache)
 │   ├── passkey/             # WebAuthn: desktop + phone passkeys, phone setup links
 │   ├── telegram/            # approval bot (linking, messages, long polling)
-│   ├── uniswap/             # Trading API client, routing (v3 + v4)
+│   ├── uniswap/             # Trading API client, routing (v3 + v4), full-range liquidity
 │   ├── safe/                # deployment, spending limits, Safe transactions
 │   └── zero-g/              # 0G storage (+ in-memory fallback), 0G compute
 ├── agents/                  # agent runtime: Watcher + legacy planner (0G Compute)

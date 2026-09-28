@@ -505,7 +505,7 @@ app.post("/intent", async (req, res) => {
     const execution = approvalExecution(intentType, result.payload);
     if (verdict === "NEEDS_APPROVAL" && adapter.execute && safeAddress && wallet && execution) {
       approval = createApproval({
-        wallet, safeAddress, intentType: intentType as "swap" | "send",
+        wallet, safeAddress, intentType: intentType as PendingApproval["intentType"],
         summary: plan.summary, valueUsd: action.valueUsd,
         reason: decision.reason, triggered: decision.triggered, execution,
       });
@@ -562,6 +562,7 @@ app.post("/intent", async (req, res) => {
 function approvalExecution(intentType: string, payload: Record<string, unknown> | undefined): Record<string, unknown> | null {
   if (intentType === "swap" && payload?.quoteData) return { quoteData: payload.quoteData };
   if (intentType === "send" && payload?.sendData) return { sendData: payload.sendData };
+  if (intentType === "add_liquidity" && payload?.lpData) return { lpData: payload.lpData };
   return null;
 }
 
