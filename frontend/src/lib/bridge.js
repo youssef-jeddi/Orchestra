@@ -207,6 +207,11 @@ export async function telegramLinkRequest(walletAddress) {
   });
 }
 
+/** Send a one-time phone passkey setup link to the linked Telegram (needs a session). */
+export async function requestPhoneSetup() {
+  return bridgeFetch('/passkey/phone-setup', { method: 'POST', body: '{}' });
+}
+
 export async function telegramLink(walletAddress, code, signature) {
   return bridgeFetch('/telegram/link', {
     method: 'POST', body: JSON.stringify({ walletAddress, code, signature }),

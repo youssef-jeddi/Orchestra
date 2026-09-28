@@ -9,7 +9,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { OrchestraProvider, useOrchestra } from '@/context/OrchestraContext';
 import {
   sendIntent, getPrices, getPasskeyStatus, getApproval,
-  getTelegramStatus, telegramLinkRequest, telegramLink,
+  getTelegramStatus, telegramLinkRequest, telegramLink, requestPhoneSetup,
 } from '@/lib/bridge';
 import { executeSwap, executeSend } from '@/lib/signing';
 import { registerPasskey, approveWithPasskey } from '@/lib/passkey';
@@ -477,7 +477,9 @@ function TelegramWait({ approval }) {
   }, [state, approval.id]);
 
   const text = {
-    pending: '📱 Sent to your Telegram. Check the details there and approve or reject.',
+    pending: approval.factor === 'phone-passkey'
+      ? '📱 Sent to your Telegram. Tap “Review & approve” on your phone and confirm with its passkey.'
+      : '📱 Sent to your Telegram. Check the details there and approve or reject.',
     executing: '⏳ Approved on your phone. Executing…',
     rejected: '🚫 Rejected on your phone. Nothing was executed.',
     expired: '⌛ Expired. Nothing was executed.',
@@ -518,7 +520,16 @@ function TelegramLink({ ledger, onError }) {
 
   if (!status?.enabled) return null;
   if (status.linked) {
-    return <span style={{ fontSize: 11, color: '#30D158' }} title="Risky transactions are approved in Telegram">📱 {status.username ? `@${status.username}` : 'Telegram'}</span>;
+    const who = status.username ? `@${status.username}` : 'Telegram';
+    if (status.phonePasskey) {
+      return <span style={{ fontSize: 11, color: '#30D158' }} title="Risky transactions are confirmed on your phone with its passkey">📱 {who} · 🔐 phone passkey</span>;
+    }
+    return (
+      <>
+        <span style={{ fontSize: 11, color: '#30D158' }} title="Risky transactions are approved in Telegram">📱 {who}</span>
+        {status.phoneAvailable && <PhoneSetupButton onDone={refresh} onError={onError} />}
+      </>
+    );
   }
   if (url) {
     return (
@@ -548,6 +559,38 @@ function TelegramLink({ ledger, onError }) {
   return (
     <button onClick={link} disabled={busy} style={pill(false)} title="Approve risky transactions from your phone">
       {busy ? 'Check your wallet…' : '📱 Link Telegram'}
+    </button>
+  );
+}
+
+// Ask the server to send a one-time phone passkey setup link to Telegram, then
+// poll until the phone has registered it.
+function PhoneSetupButton({ onDone, onError }) {
+  const [state, setState] = useState('idle'); // idle | sending | sent
+
+  useEffect(() => {
+    if (state !== 'sent') return;
+    const id = setInterval(onDone, 3000);
+    const stop = setTimeout(() => setState('idle'), 10 * 60_000); // the link expires
+    return () => { clearInterval(id); clearTimeout(stop); };
+  }, [state, onDone]);
+
+  const send = async () => {
+    setState('sending');
+    try {
+      await requestPhoneSetup();
+      setState('sent');
+    } catch (err) {
+      onError(`Phone setup failed: ${err.message}`);
+      setState('idle');
+    }
+  };
+
+  if (state === 'sent') return <span style={{ fontSize: 11, color: '#999' }}>📲 Open the link in Telegram on your phone…</span>;
+  return (
+    <button onClick={send} disabled={state === 'sending'} style={pill(false)}
+      title="Confirm risky transactions on your phone with a passkey, after seeing exactly what executes">
+      {state === 'sending' ? 'Sending…' : '🔐 Set up phone passkey'}
     </button>
   );
 }
