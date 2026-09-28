@@ -14,7 +14,10 @@ import type { StepT } from "./schema";
 export interface ResolveContext {
   /** A wallet is connected (relative amounts and balances need one). */
   connected: boolean;
+  /** Balances of the account actions spend from: the Safe if there is one, else the wallet. */
   getBalances(): Promise<Balances | null>;
+  /** Balances of the connected wallet itself — the source of a deposit into the Safe. */
+  getWalletBalances?(): Promise<Balances | null>;
   resolveEns(name: string): Promise<string | null>;
 }
 
@@ -28,7 +31,7 @@ export interface PlanStep {
 }
 
 export interface ResolvedStep {
-  action: "swap" | "send" | "add_liquidity" | "balance" | "price";
+  action: "swap" | "send" | "add_liquidity" | "deposit" | "balance" | "price";
   summary: string;
   plan: PlanStep;
   valueUsd: number;
@@ -112,6 +115,7 @@ async function resolveStep(step: StepT, order: number, ctx: ResolveContext): Pro
         amountIn = await resolveAmount(step.amount, step.unit, from, ctx, "swap");
         summary = `Swap ${amountIn} ${from.symbol} for ${to.symbol}`;
       }
+      await requireBalance(amountIn, from, ctx, "swap");
 
       const params = {
         tokenIn: from.address, tokenOut: to.address, amount: amountIn,
@@ -125,6 +129,7 @@ async function resolveStep(step: StepT, order: number, ctx: ResolveContext): Pro
       const token = requireToken(step.token);
       const { address, label } = await resolveRecipient(step.to, ctx);
       const amount = await resolveAmount(step.amount, step.unit, token, ctx, "send");
+      await requireBalance(amount, token, ctx, "send");
       const params = { token: token.address, to: address, amount, symbol: token.symbol };
       const valueUsd = computePlanValueUsd("send", params);
       const who = label ? `${label} (${address})` : address;
@@ -136,12 +141,31 @@ async function resolveStep(step: StepT, order: number, ctx: ResolveContext): Pro
       };
     }
 
+    case "deposit": {
+      const token = requireToken(step.token);
+      if (!ctx.connected) throw clarify("Connect a wallet first so I can move funds from it into your Safe.");
+      // The wallet funds the deposit and pays its gas, so amounts come from the wallet, not the Safe.
+      const fromWallet = () => (ctx.getWalletBalances ? ctx.getWalletBalances() : Promise.resolve(null));
+      const amount = await resolveAmount(step.amount, step.unit, token, ctx, "deposit", fromWallet);
+      await requireBalance(amount, token, ctx, "deposit", { getBalances: fromWallet, gasReserve: token.native ? ETH_GAS_RESERVE : 0 });
+      const params = { token: token.address, amount, symbol: token.symbol };
+      const valueUsd = computePlanValueUsd("deposit", params);
+      return {
+        action: "deposit",
+        summary: withUsd(`Move ${amount} ${token.symbol} from your wallet into your Safe`, valueUsd, token),
+        plan: planStep("native", "deposit", params, order, token.native ? "21000" : "80000"),
+        valueUsd,
+      };
+    }
+
     case "add_liquidity": {
       const a = requireToken(step.tokenA);
       const b = requireToken(step.tokenB);
       if (a.address === b.address) throw clarify("Liquidity needs two different tokens. Which pair do you want?");
       const amountA = await resolveAmount(step.amountA, "token", a, ctx, "deposit");
       const amountB = await resolveAmount(step.amountB, "token", b, ctx, "deposit");
+      await requireBalance(amountA, a, ctx, "deposit");
+      await requireBalance(amountB, b, ctx, "deposit");
       const params = {
         tokenA: a.address, tokenB: b.address, amountA, amountB,
         symbolA: a.symbol, symbolB: b.symbol, feeTier: 3000,
@@ -185,7 +209,14 @@ async function resolveRecipient(raw: string, ctx: ResolveContext): Promise<{ add
 
 type Purpose = "swap" | "send" | "deposit" | "receive";
 
-async function resolveAmount(raw: string, unit: "token" | "usd", token: TokenDef, ctx: ResolveContext, purpose: Purpose): Promise<string> {
+async function resolveAmount(
+  raw: string,
+  unit: "token" | "usd",
+  token: TokenDef,
+  ctx: ResolveContext,
+  purpose: Purpose,
+  getBalances: () => Promise<Balances | null> = () => ctx.getBalances()
+): Promise<string> {
   const relative = raw === "all" || raw === "max" || raw.endsWith("%");
 
   if (relative) {
@@ -194,9 +225,9 @@ async function resolveAmount(raw: string, unit: "token" | "usd", token: TokenDef
     if (!(fraction > 0 && fraction <= 1)) throw clarify(`${raw} isn't a valid share of your balance. What percentage did you mean?`);
     if (!ctx.connected) throw clarify(`Connect a wallet so I can work out ${raw} of your ${token.symbol}, or give me an exact amount.`);
 
-    const balances = await ctx.getBalances();
+    const balances = await getBalances();
     if (!balances) throw clarify(`I couldn't read your ${token.symbol} balance right now. Can you give me an exact amount?`);
-    const held = token.symbol === "ETH" ? balances.eth : token.symbol === "WETH" ? balances.weth : balances.usdc;
+    const held = heldBalance(balances, token);
     const spendable = token.native ? Math.max(0, held - ETH_GAS_RESERVE) : held;
     const amount = spendable * fraction;
     if (!(amount > 0)) throw clarify(`You don't have any ${token.symbol} to ${purpose}${token.native ? " after keeping a little for gas" : ""}.`);
@@ -211,6 +242,34 @@ async function resolveAmount(raw: string, unit: "token" | "usd", token: TokenDef
   }
   if (!(value > 0)) throw clarify(`How much ${token.symbol} do you want to ${purpose}?`);
   return unit === "usd" ? formatAmount(value, token) : trimDecimals(raw.startsWith(".") ? `0${raw}` : raw, token.decimals);
+}
+
+function heldBalance(balances: Balances, token: TokenDef): number {
+  return token.symbol === "ETH" ? balances.eth : token.symbol === "WETH" ? balances.weth : balances.usdc;
+}
+
+/**
+ * Refuse an amount the account doesn't hold, before any quote or transaction is
+ * built — otherwise the tx reverts on-chain and still burns gas. Skipped when no
+ * wallet is connected or the balance can't be read (the RPC timed out).
+ */
+async function requireBalance(
+  amount: string,
+  token: TokenDef,
+  ctx: ResolveContext,
+  purpose: Purpose,
+  opts: { getBalances?: () => Promise<Balances | null>; gasReserve?: number } = {}
+): Promise<void> {
+  if (!ctx.connected) return;
+  const balances = await (opts.getBalances ?? (() => ctx.getBalances()))();
+  if (!balances) return;
+  const held = heldBalance(balances, token);
+  const reserve = opts.gasReserve ?? 0;
+  if (Number(amount) + reserve > held) {
+    const have = held > 0 ? `${formatAmount(held, token)} ${token.symbol}` : `no ${token.symbol}`;
+    const gas = reserve > 0 ? ` plus ~${reserve} ${token.symbol} for gas` : "";
+    throw unsupported(`Not enough ${token.symbol}: you have ${have}, but this ${purpose} needs ${amount} ${token.symbol}${gas}.`);
+  }
 }
 
 // ── Formatting ──

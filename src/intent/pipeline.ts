@@ -38,7 +38,7 @@ export interface InterpretResult {
   planner: PlanResult;
 }
 
-const VALUE_BEARING = new Set(["swap", "send", "add_liquidity"]);
+const VALUE_BEARING = new Set(["swap", "send", "add_liquidity", "deposit"]);
 
 export async function interpretIntent(
   message: string,
@@ -93,6 +93,19 @@ export interface AssessInput {
 
 /** Deterministic verdict for an action. The LLM has no input here beyond the resolved plan. */
 export function assessAction(action: ActionPlan, input: AssessInput = {}): PolicyDecision & { typicalMaxUsd?: number } {
+  // A deposit is the user's own wallet funding their own Safe, signed in that
+  // wallet. The agent never moves it, so the agent limits don't apply.
+  if (action.intentType === "deposit") {
+    return {
+      verdict: "NEEDS_APPROVAL",
+      riskScore: 0,
+      reason: "Your own funds moving into your own Safe. You sign it in your wallet; it doesn't count toward your daily limit.",
+      requiresLedger: false,
+      triggered: [],
+      approvalMethod: "wallet",
+    };
+  }
+
   let profile = input.profile;
   let typicalMaxUsd: number | undefined;
 

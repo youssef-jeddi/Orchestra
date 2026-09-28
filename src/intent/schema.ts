@@ -54,7 +54,15 @@ export const AddLiquidityStep = z.object({
   amountB: Amount,
 });
 
-export const Step = z.discriminatedUnion("action", [SwapStep, SendStep, BalanceStep, PriceStep, AddLiquidityStep]);
+/** Move funds from the user's own wallet into their Safe (signed by the user). */
+export const DepositStep = z.object({
+  action: z.literal("deposit"),
+  token: TokenSymbol,
+  amount: Amount,
+  unit: Unit,
+});
+
+export const Step = z.discriminatedUnion("action", [SwapStep, SendStep, BalanceStep, PriceStep, AddLiquidityStep, DepositStep]);
 
 export const PlannerOutput = z.discriminatedUnion("type", [
   z.object({ type: z.literal("actions"), steps: z.array(Step).min(1).max(5) }),

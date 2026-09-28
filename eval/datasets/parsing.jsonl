@@ -55,3 +55,8 @@
 {"id":"turn-02","tags":["multi-turn"],"history":[{"role":"user","content":"send 5 usdc"},{"role":"assistant","content":"Who should I send it to? I need a 0x address or an ENS name."}],"message":"vitalik.eth","expect":{"type":"actions","steps":[{"action":"send","token":"USDC","amount":"5","to":"vitalik.eth"}]}}
 {"id":"turn-03","tags":["multi-turn"],"history":[{"role":"user","content":"send eth to vitalik.eth"},{"role":"assistant","content":"How much ETH do you want to send?"}],"message":"0.01 please","expect":{"type":"actions","steps":[{"action":"send","token":"ETH","amount":"0.01","to":"vitalik.eth"}]}}
 {"id":"turn-04","tags":["multi-turn"],"history":[{"role":"user","content":"swap 10 usdc for eth"},{"role":"assistant","content":"Swap 10 USDC for ETH"}],"message":"actually make it 20","expect":{"type":"actions","steps":[{"action":"swap","from":"USDC","to":"ETH","amount":"20"}]}}
+{"id":"deposit-01","tags":["deposit"],"message":"fund my safe with 0.01 eth","expect":{"type":"actions","steps":[{"action":"deposit","token":"ETH","amount":"0.01","unit":"token"}]}}
+{"id":"deposit-02","tags":["deposit"],"message":"deposit 20 usdc into my safe","expect":{"type":"actions","steps":[{"action":"deposit","token":"USDC","amount":"20","unit":"token"}]}}
+{"id":"deposit-03","tags":["deposit","usd"],"message":"top up the safe with $10 of ETH","expect":{"type":"actions","steps":[{"action":"deposit","token":"ETH","amount":"10","unit":"usd"}]}}
+{"id":"deposit-04","tags":["deposit","relative"],"message":"put all my usdc in my safe","expect":{"type":"actions","steps":[{"action":"deposit","token":"USDC","amount":"all","unit":"token"}]}}
+{"id":"deposit-05","tags":["deposit","clarify"],"message":"fund my safe","expect":{"type":"clarify"}}

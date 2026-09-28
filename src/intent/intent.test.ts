@@ -130,6 +130,75 @@ test("resolve: over-precise amounts are truncated to token decimals", async () =
   assert.equal((r as any).steps[0].plan.params.amount, "1.123456");
 });
 
+test("resolve: amount above the balance → unsupported before any tx is built", async () => {
+  const swap = await resolveSteps([step({ action: "swap", from: "USDC", to: "ETH", amount: "600" })], ctx());
+  assert.equal(swap.kind, "unsupported");
+  assert.match((swap as any).reason, /Not enough USDC: you have 500 USDC, but this swap needs 600 USDC/);
+
+  const out = await resolveSteps([step({ action: "swap", from: "USDC", to: "ETH", amount: "1", side: "out" })], ctx());
+  assert.equal(out.kind, "unsupported"); // needs ~2500 USDC
+
+  const send = await resolveSteps([step({ action: "send", token: "WETH", amount: "0.6", to: VITALIK })], ctx());
+  assert.equal(send.kind, "unsupported");
+
+  const empty = ctx({ getBalances: async () => ({ eth: 1, weth: 0, usdc: 0, totalUsd: 0 }) });
+  const none = await resolveSteps([step({ action: "swap", from: "USDC", to: "ETH", amount: "5" })], empty);
+  assert.match((none as any).reason, /you have no USDC/);
+});
+
+test("resolve: the full balance is spendable", async () => {
+  const r = await resolveSteps([step({ action: "swap", from: "ETH", to: "USDC", amount: "1" })], ctx());
+  assert.equal(r.kind, "ok");
+});
+
+test("resolve: balance check is skipped without a wallet or a readable balance", async () => {
+  const s = step({ action: "swap", from: "USDC", to: "ETH", amount: "600" });
+  assert.equal((await resolveSteps([s], ctx({ connected: false }))).kind, "ok");
+  assert.equal((await resolveSteps([s], ctx({ getBalances: async () => null }))).kind, "ok");
+});
+
+// A Safe holding little, funded from a wallet holding more.
+const depositCtx = (over: Partial<ResolveContext> = {}) => ctx({
+  getBalances: async () => ({ eth: 0, weth: 0, usdc: 0, totalUsd: 0 }),
+  getWalletBalances: async () => ({ eth: 1, weth: 0, usdc: 500, totalUsd: 0 }),
+  ...over,
+});
+
+test("resolve: deposit draws on the wallet balance, not the Safe's", async () => {
+  const r = await resolveSteps([step({ action: "deposit", token: "USDC", amount: "500" })], depositCtx());
+  assert.equal(r.kind, "ok");
+  const s = (r as any).steps[0];
+  assert.equal(s.plan.action, "deposit");
+  assert.deepEqual(s.plan.params, { token: USDC_SEPOLIA, amount: "500", symbol: "USDC" });
+  assert.equal(s.valueUsd, 500);
+  assert.equal(s.summary, "Move 500 USDC from your wallet into your Safe");
+});
+
+test("resolve: deposit of ETH keeps gas in the wallet", async () => {
+  const all = await resolveSteps([step({ action: "deposit", token: "ETH", amount: "all" })], depositCtx());
+  assert.equal(Number((all as any).steps[0].plan.params.amount), 1 - ETH_GAS_RESERVE);
+  const exact = await resolveSteps([step({ action: "deposit", token: "ETH", amount: "1" })], depositCtx());
+  assert.equal(exact.kind, "unsupported");
+  assert.match((exact as any).reason, /plus ~0\.002 ETH for gas/);
+});
+
+test("resolve: deposit needs a connected wallet", async () => {
+  const r = await resolveSteps([step({ action: "deposit", token: "ETH", amount: "0.1" })], depositCtx({ connected: false }));
+  assert.equal(r.kind, "clarify");
+});
+
+test("assessAction: a deposit is signed by the wallet and ignores the agent limits", async () => {
+  const r = await resolveSteps([step({ action: "deposit", token: "USDC", amount: "500" })], depositCtx());
+  const s = (r as any).steps[0];
+  const d = assessAction(
+    { id: "x", intentType: "deposit", summary: s.summary, steps: [s.plan], params: s.plan.params, valueUsd: s.valueUsd },
+    { profile: { dailyLimitUsd: 10 }, history: [{ valueUsd: 10, at: new Date().toISOString() }] }
+  );
+  assert.equal(d.verdict, "NEEDS_APPROVAL");
+  assert.equal(d.approvalMethod, "wallet");
+  assert.deepEqual(d.triggered, []);
+});
+
 test("resolve: balance without a wallet → clarify", async () => {
   assert.equal((await resolveSteps([step({ action: "balance" })], ctx({ connected: false }))).kind, "clarify");
 });
