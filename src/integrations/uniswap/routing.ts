@@ -18,17 +18,15 @@ export interface EnrichedQuote extends QuoteResponse {
 
 /**
  * Select which Uniswap protocols to route through based on risk classification.
- *
- * - autonomous (low risk, blue-chip): allow UniswapX for MEV protection + gasless
- * - requires_approval (high value / unverified): conservative AMM-only routing
+ * AMM-only (no UniswapX) for every tier: Safe execution needs an on-chain swap tx.
+ * V4 adds native-ETH pools (no wrap/unwrap); the API picks the better of V3/V4.
  */
 export function selectProtocols(riskLevel: RiskLevel): ProtocolVersion[] {
   switch (riskLevel) {
     case "autonomous":
-      return ["V3"];
     case "requires_approval":
     case "blocked":
-      return ["V3"];
+      return ["V3", "V4"];
   }
 }
 
