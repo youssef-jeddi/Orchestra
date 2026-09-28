@@ -71,6 +71,9 @@ import {
   hasPasskey,
   hasPhonePasskey,
   phoneRp,
+  browserRp,
+  rpForOrigin,
+  type RelyingParty,
 } from "../passkey";
 import { createSetupToken, getSetup, consumeSetup } from "../passkey/phoneSetup";
 
@@ -627,6 +630,14 @@ function sameWalletOrAbsent(bodyWallet: unknown, res: express.Response): boolean
   return false;
 }
 
+/** The passkey domain for a desktop request: localhost or PUBLIC_APP_URL, whichever the page is on. */
+function desktopRp(req: express.Request): RelyingParty {
+  const rp = rpForOrigin(req.headers.origin);
+  if (rp) return rp;
+  const phone = phoneRp();
+  throw new ApprovalError(400, `Passkeys only work on ${browserRp().origin}${phone ? ` or ${phone.origin}` : ""}. Open Orchestra there.`);
+}
+
 function sendError(res: express.Response, err: any, fallbackStatus = 500): void {
   res.status(err instanceof ApprovalError ? err.status : fallbackStatus).json({ error: err.message });
 }
@@ -660,7 +671,7 @@ app.get("/passkey/status", async (req, res) => {
   try {
     const wallet = String(req.query.wallet || "");
     if (!wallet) { res.status(400).json({ error: "wallet query param required" }); return; }
-    res.json({ registered: await hasPasskey(wallet) });
+    res.json({ registered: await hasPasskey(wallet, rpForOrigin(req.headers.origin) ?? browserRp()) });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
@@ -669,8 +680,8 @@ app.get("/passkey/status", async (req, res) => {
 app.post("/passkey/register-options", requireSession, async (req, res) => {
   try {
     const walletAddress = res.locals.wallet as string;
-    res.json(await registrationOptions(walletAddress));
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
+    res.json(await registrationOptions(walletAddress, desktopRp(req)));
+  } catch (e: any) { sendError(res, e); }
 });
 
 app.post("/passkey/register", requireSession, async (req, res) => {
@@ -678,10 +689,10 @@ app.post("/passkey/register", requireSession, async (req, res) => {
     const walletAddress = res.locals.wallet as string;
     const { response } = req.body;
     if (!response) { res.status(400).json({ error: "response required" }); return; }
-    await verifyRegistration(walletAddress, response);
+    await verifyRegistration(walletAddress, response, { rp: desktopRp(req) });
     console.log(`[passkey] registered for ${walletAddress}`);
     res.json({ status: "ok", registered: true });
-  } catch (e: any) { res.status(400).json({ error: e.message }); }
+  } catch (e: any) { sendError(res, e, 400); }
 });
 
 // Passkey options for one pending approval. The challenge is derived from the
@@ -692,7 +703,7 @@ app.post("/passkey/auth-options", requireSession, async (req, res) => {
     const { approvalId } = req.body;
     const a = requirePending(approvalId, walletAddress);
     requirePasskeyChannel(a);
-    const opts = await authenticationOptions(walletAddress, challengeBytes(a));
+    const opts = await authenticationOptions(walletAddress, challengeBytes(a), desktopRp(req));
     a.challenge = opts.challenge;
     res.json(opts);
   } catch (e: any) { sendError(res, e, 400); }
@@ -711,7 +722,7 @@ app.post("/passkey/approve", requireSession, async (req, res) => {
     a.challenge = undefined; // single-use, pass or fail
     if (!challenge) { res.status(400).json({ error: "Request passkey options for this approval first." }); return; }
 
-    const ok = await verifyAuthentication(walletAddress, response, challenge);
+    const ok = await verifyAuthentication(walletAddress, response, challenge, desktopRp(req));
     if (!ok) { res.status(401).json({ error: "Passkey verification failed" }); return; }
 
     claim(a.id, walletAddress);

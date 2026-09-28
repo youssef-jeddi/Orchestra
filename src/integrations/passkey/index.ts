@@ -49,6 +49,20 @@ export function phoneRp(): RelyingParty | null {
   }
 }
 
+/**
+ * The relying party for a desktop request, from its Origin header: the app can
+ * be opened on localhost or on PUBLIC_APP_URL (e.g. through a tunnel), and a
+ * passkey must be created/used for the domain the page is actually on. Unknown
+ * origins get null: the browser would refuse anyway, so say it clearly instead.
+ */
+export function rpForOrigin(origin: string | undefined): RelyingParty | null {
+  const browser = browserRp();
+  if (!origin || origin === browser.origin) return browser;
+  const phone = phoneRp();
+  if (phone && origin === phone.origin) return phone;
+  return null;
+}
+
 // Short-lived challenge store (in-memory) for flows that don't hold their own.
 const CHALLENGE_TTL_MS = 5 * 60_000;
 const challenges = new Map<string, { challenge: string; expires: number }>();
@@ -93,9 +107,9 @@ async function saveCreds(wallet: string, creds: StoredCred[]): Promise<void> {
   await write(storeKey(wallet), { creds });
 }
 
-export async function hasPasskey(wallet: string): Promise<boolean> {
-  const rp = browserRp().rpID;
-  return (await getCreds(wallet)).some((c) => c.rpID === rp);
+/** A passkey usable on `rp` (the desktop app's domain by default). */
+export async function hasPasskey(wallet: string, rp: RelyingParty = browserRp()): Promise<boolean> {
+  return (await getCreds(wallet)).some((c) => c.rpID === rp.rpID);
 }
 
 /** A passkey registered on the phone for the current PUBLIC_APP_URL domain. */

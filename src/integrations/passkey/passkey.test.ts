@@ -29,6 +29,15 @@ const test = (name: string, fn: () => void | Promise<void>) => tests.push([name,
     assert.equal(pk.phoneRp(), null);
   });
 
+  test("rpForOrigin: the passkey domain follows the page — localhost or PUBLIC_APP_URL, nothing else", () => {
+    process.env.PUBLIC_APP_URL = "https://phone.example.com";
+    assert.deepEqual(pk.rpForOrigin("http://localhost:3000"), { rpID: "localhost", origin: "http://localhost:3000" });
+    assert.deepEqual(pk.rpForOrigin(undefined), { rpID: "localhost", origin: "http://localhost:3000" });
+    assert.deepEqual(pk.rpForOrigin("https://phone.example.com"), { rpID: "phone.example.com", origin: "https://phone.example.com" });
+    assert.equal(pk.rpForOrigin("https://evil.example"), null);
+    assert.equal(pk.rpForOrigin("http://phone.example.com"), null); // scheme matters
+  });
+
   test("store: a legacy single credential still counts as the browser passkey", async () => {
     await storage.clear();
     await storage.write(`passkey:${WALLET.toLowerCase()}`, { id: "legacy", publicKey: "AA==", counter: 0 });
