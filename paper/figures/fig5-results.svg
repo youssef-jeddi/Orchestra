@@ -1,0 +1,59 @@
+<svg viewBox="0 0 900 554" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica Neue, Arial, sans-serif">
+<rect width="900" height="554" fill="#ffffff"/>
+<rect x="190" y="20" width="11" height="11" rx="2" fill="#2a78d6"/>
+<text x="206" y="30" font-size="11" fill="#1a1a19">Gatekeeper LLM (pre-fix)</text>
+<rect x="400" y="20" width="11" height="11" rx="2" fill="#eb6834"/>
+<text x="416" y="30" font-size="11" fill="#1a1a19">Deterministic (pre-fix)</text>
+<text x="190" y="52" font-size="10" font-style="italic" fill="#52514e">unsafe-approval rate per category (attack trials auto-executed), 3 trials/case</text>
+<text x="182" y="82.5" font-size="11" fill="#1a1a19" text-anchor="end">prompt injection</text>
+<rect x="190" y="64" width="61.8" height="13" rx="2" fill="#2a78d6"/>
+<text x="257.8" y="74" font-size="10" fill="#52514e">6% (1/18)</text>
+<rect x="190" y="80" width="185.5" height="13" rx="2" fill="#eb6834"/>
+<text x="381.5" y="90" font-size="10" fill="#52514e">17% (3/18)</text>
+<text x="182" y="127.5" font-size="11" fill="#1a1a19" text-anchor="end">unknown recipient</text>
+<rect x="190" y="109" width="556.5" height="13" rx="2" fill="#2a78d6"/>
+<text x="752.5" y="119" font-size="10" fill="#52514e">50% (3/6)</text>
+<rect x="190" y="125" width="0.0" height="13" rx="2" fill="#eb6834"/>
+<text x="196.0" y="135" font-size="10" fill="#52514e">0%</text>
+<text x="182" y="172.5" font-size="11" fill="#1a1a19" text-anchor="end">velocity</text>
+<rect x="190" y="154" width="556.5" height="13" rx="2" fill="#2a78d6"/>
+<text x="752.5" y="164" font-size="10" fill="#52514e">50% (3/6)</text>
+<rect x="190" y="170" width="0.0" height="13" rx="2" fill="#eb6834"/>
+<text x="196.0" y="180" font-size="10" fill="#52514e">0%</text>
+<text x="182" y="217.5" font-size="11" fill="#1a1a19" text-anchor="end">value misreport</text>
+<rect x="190" y="199" width="0.0" height="13" rx="2" fill="#2a78d6"/>
+<text x="196.0" y="209" font-size="10" fill="#52514e">0%</text>
+<rect x="190" y="215" width="371.0" height="13" rx="2" fill="#eb6834"/>
+<text x="567.0" y="225" font-size="10" fill="#52514e">33% (3/9)</text>
+<text x="182" y="262.5" font-size="11" fill="#1a1a19" text-anchor="end">unknown intent</text>
+<rect x="190" y="244" width="247.3" height="13" rx="2" fill="#2a78d6"/>
+<text x="443.3" y="254" font-size="10" fill="#52514e">22% (2/9)</text>
+<rect x="190" y="260" width="0.0" height="13" rx="2" fill="#eb6834"/>
+<text x="196.0" y="270" font-size="10" fill="#52514e">0%</text>
+<text x="182" y="307.5" font-size="11" fill="#1a1a19" text-anchor="end">benign large</text>
+<rect x="190" y="289" width="123.7" height="13" rx="2" fill="#2a78d6"/>
+<text x="319.7" y="299" font-size="10" fill="#52514e">11% (1/9)</text>
+<rect x="190" y="305" width="0.0" height="13" rx="2" fill="#eb6834"/>
+<text x="196.0" y="315" font-size="10" fill="#52514e">0%</text>
+<text x="182" y="352.5" font-size="11" fill="#1a1a19" text-anchor="end">unit confusion</text>
+<rect x="190" y="334" width="0.0" height="13" rx="2" fill="#2a78d6"/>
+<text x="196.0" y="344" font-size="10" fill="#52514e">0%</text>
+<rect x="190" y="350" width="0.0" height="13" rx="2" fill="#eb6834"/>
+<text x="196.0" y="360" font-size="10" fill="#52514e">0%</text>
+<text x="182" y="397.5" font-size="11" fill="#1a1a19" text-anchor="end">unverified token</text>
+<rect x="190" y="379" width="0.0" height="13" rx="2" fill="#2a78d6"/>
+<text x="196.0" y="389" font-size="10" fill="#52514e">0%</text>
+<rect x="190" y="395" width="0.0" height="13" rx="2" fill="#eb6834"/>
+<text x="196.0" y="405" font-size="10" fill="#52514e">0%</text>
+<text x="182" y="442.5" font-size="11" fill="#1a1a19" text-anchor="end">habit anomaly</text>
+<rect x="190" y="424" width="0.0" height="13" rx="2" fill="#2a78d6"/>
+<text x="196.0" y="434" font-size="10" fill="#52514e">0%</text>
+<rect x="190" y="440" width="0.0" height="13" rx="2" fill="#eb6834"/>
+<text x="196.0" y="450" font-size="10" fill="#52514e">0%</text>
+<text x="182" y="487.5" font-size="11" fill="#1a1a19" text-anchor="end">malformed</text>
+<rect x="190" y="469" width="0.0" height="13" rx="2" fill="#2a78d6"/>
+<text x="196.0" y="479" font-size="10" fill="#52514e">0%</text>
+<rect x="190" y="485" width="0.0" height="13" rx="2" fill="#eb6834"/>
+<text x="196.0" y="495" font-size="10" fill="#52514e">0%</text>
+<line x1="190" y1="58" x2="190" y2="504" stroke="#d9d8d4" stroke-width="1"/>
+</svg>

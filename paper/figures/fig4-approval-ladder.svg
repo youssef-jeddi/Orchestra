@@ -1,0 +1,47 @@
+<svg viewBox="0 0 900 300" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica Neue, Arial, sans-serif">
+  <defs>
+    <marker id="arr4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#52514e"/>
+    </marker>
+  </defs>
+  <rect width="900" height="300" fill="#ffffff"/>
+
+  <text x="60" y="40" font-size="11" font-weight="700" fill="#52514e">USD value of the intent → required authorization factor</text>
+
+  <!-- Band 1: auto -->
+  <rect x="60" y="80" width="240" height="72" rx="8" fill="#e2f4e2" stroke="#0ca30c" stroke-width="1.5"/>
+  <text x="180" y="107" font-size="12.5" font-weight="700" fill="#0a6b0a" text-anchor="middle">✓ AUTO_EXECUTE</text>
+  <text x="180" y="126" font-size="10" fill="#0a6b0a" text-anchor="middle">no human factor — within the</text>
+  <text x="180" y="140" font-size="10" fill="#0a6b0a" text-anchor="middle">remaining rolling-24 h budget</text>
+
+  <!-- Band 2: passkey -->
+  <rect x="304" y="80" width="260" height="72" rx="8" fill="#fef1d4" stroke="#b98200" stroke-width="1.5"/>
+  <text x="434" y="107" font-size="12.5" font-weight="700" fill="#7a5600" text-anchor="middle">! PASSKEY APPROVAL</text>
+  <text x="434" y="126" font-size="10" fill="#7a5600" text-anchor="middle">WebAuthn platform authenticator —</text>
+  <text x="434" y="140" font-size="10" fill="#7a5600" text-anchor="middle">human presence, software-rooted</text>
+
+  <!-- Band 3: ledger -->
+  <rect x="568" y="80" width="272" height="72" rx="8" fill="#e9f1fb" stroke="#2a78d6" stroke-width="1.5"/>
+  <text x="704" y="107" font-size="12.5" font-weight="700" fill="#1c5cab" text-anchor="middle">⬢ LEDGER HARDWARE</text>
+  <text x="704" y="126" font-size="10" fill="#1c5cab" text-anchor="middle">secure-element signature; the trusted</text>
+  <text x="704" y="140" font-size="10" fill="#1c5cab" text-anchor="middle">screen shows the clear-signed tx</text>
+
+  <!-- Axis ticks -->
+  <line x1="60" y1="152" x2="60" y2="168" stroke="#52514e" stroke-width="1.2"/>
+  <text x="60" y="184" font-size="11" font-weight="700" fill="#0b0b0b" text-anchor="middle">$0</text>
+  <line x1="302" y1="152" x2="302" y2="168" stroke="#52514e" stroke-width="1.2"/>
+  <text x="302" y="184" font-size="11" font-weight="700" fill="#0b0b0b" text-anchor="middle">$100</text>
+  <text x="302" y="199" font-size="9.5" fill="#52514e" text-anchor="middle">daily auto-approve limit</text>
+  <line x1="566" y1="152" x2="566" y2="168" stroke="#52514e" stroke-width="1.2"/>
+  <text x="566" y="184" font-size="11" font-weight="700" fill="#0b0b0b" text-anchor="middle">$1,000</text>
+  <text x="566" y="199" font-size="9.5" fill="#52514e" text-anchor="middle">hardware threshold</text>
+  <line x1="840" y1="152" x2="840" y2="168" stroke="#52514e" stroke-width="1.2"/>
+  <text x="840" y="184" font-size="11" font-weight="700" fill="#0b0b0b" text-anchor="middle">→ ∞</text>
+
+  <!-- escalation annotation -->
+  <line x1="200" y1="232" x2="700" y2="232" stroke="#52514e" stroke-width="1.3" stroke-dasharray="5 4" marker-end="url(#arr4)"/>
+  <text x="450" y="256" font-size="10.5" font-style="italic" fill="#52514e" text-anchor="middle">any escalation rule (unknown recipient · unverified token · velocity · habit anomaly)</text>
+  <text x="450" y="271" font-size="10.5" font-style="italic" fill="#52514e" text-anchor="middle">moves an intent at least one tier to the right — never to the left</text>
+
+  <text x="60" y="64" font-size="9.5" fill="#52514e">thresholds shown are the evaluation defaults; both are per-user policy, changeable only with a hardware-signed update</text>
+</svg>

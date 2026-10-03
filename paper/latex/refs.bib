@@ -1,0 +1,160 @@
+% Bibliography for the N3XT paper.
+% ⚠ VERIFY every entry (URL opens, claims match) before submission — the
+% originality statement is the author's. Cite only what the text actually uses.
+
+% ── Prompt injection & agent security ──
+
+@inproceedings{greshake2023,
+  author    = {Greshake, Kai and Abdelnabi, Sahar and Mishra, Shailesh and Endres, Christoph and Holz, Thorsten and Fritz, Mario},
+  title     = {Not What You've Signed Up For: Compromising Real-World {LLM}-Integrated Applications with Indirect Prompt Injection},
+  booktitle = {Proceedings of the 16th ACM Workshop on Artificial Intelligence and Security (AISec '23)},
+  year      = {2023},
+  note      = {arXiv:2302.12173}
+}
+
+@misc{liu2023promptinjection,
+  author = {Liu, Yi and Deng, Gelei and Li, Yuekang and Wang, Kailong and others},
+  title  = {Prompt Injection Attack against {LLM}-integrated Applications},
+  year   = {2023},
+  note   = {arXiv:2306.05499}
+}
+
+@inproceedings{debenedetti2024agentdojo,
+  author    = {Debenedetti, Edoardo and Zhang, Jie and Balunovi{\'c}, Mislav and Beurer-Kellner, Luca and Fischer, Marc and Tram{\`e}r, Florian},
+  title     = {AgentDojo: A Dynamic Environment to Evaluate Prompt Injection Attacks and Defenses for {LLM} Agents},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS), Datasets and Benchmarks Track},
+  year      = {2024},
+  note      = {arXiv:2406.13352}
+}
+
+@inproceedings{zhan2024injecagent,
+  author    = {Zhan, Qiusi and Liang, Zhixiang and Ying, Zifan and Kang, Daniel},
+  title     = {InjecAgent: Benchmarking Indirect Prompt Injections in Tool-Integrated Large Language Model Agents},
+  booktitle = {Findings of the Association for Computational Linguistics (ACL)},
+  year      = {2024},
+  note      = {arXiv:2403.02691}
+}
+
+@misc{owasp2025,
+  author       = {{OWASP GenAI Security Project}},
+  title        = {{OWASP} Top 10 for Large Language Model Applications (2026 edition)},
+  year         = {2026},
+  howpublished = {\url{https://owasp.org/www-project-top-10-for-large-language-model-applications/}},
+  note         = {LLM01: Prompt Injection; LLM08: Excessive Agency}
+}
+
+@misc{willison2025,
+  author       = {Willison, Simon},
+  title        = {The Lethal Trifecta for {AI} Agents: Private Data, Untrusted Content, and External Communication},
+  year         = {2025},
+  howpublished = {\url{https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/}}
+}
+
+% ── Agentic payments ──
+
+@misc{coinbase2025x402,
+  author       = {{x402 Foundation}},
+  title        = {x402: An Open, Neutral Standard for Internet-Native Payments},
+  year         = {2025},
+  howpublished = {\url{https://www.x402.org}},
+  note         = {HTTP 402-based machine payments; launched by Coinbase, now governed by the x402 Foundation (Linux Foundation)}
+}
+
+@misc{google2025ap2,
+  author       = {{Google}},
+  title        = {Agent Payments Protocol ({AP2})},
+  year         = {2025},
+  howpublished = {\url{https://github.com/google-agentic-commerce/AP2}},
+  note         = {Signed ``mandates'' as portable proof of user intent}
+}
+
+@misc{visa2025,
+  author       = {{Visa}},
+  title        = {Visa Intelligent Commerce: Enabling {AI} Agents to Pay},
+  year         = {2025},
+  howpublished = {\url{https://corporate.visa.com}}
+}
+
+@misc{mastercard2025,
+  author       = {{Mastercard}},
+  title        = {Mastercard Agent Pay},
+  year         = {2025},
+  howpublished = {\url{https://www.mastercard.com}}
+}
+
+% ── Delegation & account abstraction ──
+
+@misc{eip4337,
+  author       = {Buterin, Vitalik and Weiss, Yoav and Tirosh, Dror and Nacson, Shahaf and Forshtat, Alex and Gazso, Kristof and Hess, Tjaden},
+  title        = {{ERC}-4337: Account Abstraction Using Alt Mempool},
+  year         = {2021},
+  howpublished = {\url{https://eips.ethereum.org/EIPS/eip-4337}}
+}
+
+@misc{erc7715,
+  author       = {{Ethereum Community}},
+  title        = {{ERC}-7715: Grant Permissions from Wallets},
+  year         = {2024},
+  howpublished = {\url{https://eips.ethereum.org/EIPS/eip-7715}}
+}
+
+@misc{erc7710,
+  author       = {{Ethereum Community}},
+  title        = {{ERC}-7710: Smart Contract Delegation},
+  year         = {2024},
+  howpublished = {\url{https://eips.ethereum.org/EIPS/eip-7710}}
+}
+
+@misc{safedocs,
+  author       = {{Safe Ecosystem Foundation}},
+  title        = {Safe Modules: Allowance Module (Spending Limits for Delegates)},
+  howpublished = {\url{https://github.com/safe-global/safe-modules}},
+  year         = {2024}
+}
+
+@misc{eip712,
+  author       = {Bloemen, Remco and Logvinov, Leonid and Evans, Jacob},
+  title        = {{EIP}-712: Typed Structured Data Hashing and Signing},
+  year         = {2017},
+  howpublished = {\url{https://eips.ethereum.org/EIPS/eip-712}}
+}
+
+% ── Hardware anchoring & clear signing ──
+
+@misc{erc7730,
+  author       = {{Ledger}},
+  title        = {{ERC}-7730: Structured Data Clear Signing Format},
+  year         = {2024},
+  howpublished = {\url{https://eips.ethereum.org/EIPS/eip-7730}},
+  note         = {Draft; co-authored by Ledger engineers}
+}
+
+@misc{ledgerclear,
+  author       = {{Ledger}},
+  title        = {Clear Signing: Developer Documentation},
+  howpublished = {\url{https://developers.ledger.com}},
+  year         = {2024}
+}
+
+@misc{webauthn,
+  author       = {{W3C}},
+  title        = {Web Authentication: An {API} for Accessing Public Key Credentials, Level 2},
+  year         = {2021},
+  howpublished = {\url{https://www.w3.org/TR/webauthn-2/}}
+}
+
+% ── Context ──
+
+@misc{buterin2024,
+  author       = {Buterin, Vitalik},
+  title        = {The Promise and Challenges of Crypto + {AI} Applications},
+  year         = {2024},
+  howpublished = {\url{https://vitalik.eth.limo/general/2024/01/30/cryptoai.html}}
+}
+
+@misc{anthropic2024mcp,
+  author       = {{Anthropic}},
+  title        = {Introducing the Model Context Protocol},
+  year         = {2024},
+  howpublished = {\url{https://www.anthropic.com/news/model-context-protocol}}
+}

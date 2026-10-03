@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Never Let the Model Hold the Keys</title>
+<link rel="stylesheet" href="style.css">
+<script src="vendor/paged.polyfill.js"></script>
+</head>
+<body>
+
+<!-- Short title for the running footer (edit if the H1 changes) -->
+<span class="running-title">Never Let the Model Hold the Keys</span>
+
+<!-- ═══ COVER ═══ -->
+<header class="cover">
+  <div class="track-chip">Ledger N3XT Research Competition · Track 1 — Agentic Economy</div>
+  <h1>Never Let the Model Hold the Keys</h1>
+  <p class="subtitle">Layered authorization for value-holding AI agents: deterministic policy, on-chain delegation bounds, and hardware-anchored intent</p>
+
+  <p class="byline"><span class="author">AUTHOR NAME</span></p>
+  <p class="affil">Institution · email — <em>September 2026</em></p>
+
+  <section class="abstract">
+    <h2>Abstract</h2>
+    <p class="todo">150–200 words, written for a non-expert (this is graded, and it is the text
+    people read before deciding to like/share). Hook → problem (the model that interprets a
+    request is often also trusted to police it) → contribution (the three-ring architecture) →
+    headline number from the eval → one-line implication. Write it LAST.</p>
+  </section>
+
+  <p class="keywords"><strong>Keywords:</strong> AI agents · authorization · delegation ·
+  smart accounts · prompt injection · hardware wallets</p>
+</header>
+
+<main>
+
+<!-- ═══ 1 INTRODUCTION ═══ -->
+<h2 class="numbered">Introduction: the delegation problem</h2>
+<div class="todo">350–450 words. See paper/OUTLINE.md §1. Open with the concrete scene; cite the
+agentic-payment race (x402, AP2, ERC-7715) [refs]; state the framing question and the three
+contributions.</div>
+
+<!-- ═══ 2 THREAT MODEL ═══ -->
+<h2 class="numbered">Threat model</h2>
+<div class="todo">350–400 words. Three adversaries T1/T2/T3 + explicit out-of-scope list.
+Table 1 goes here.</div>
+
+<div class="table-block">
+  <p class="table-caption">Adversaries, their capabilities, and the ring that stops them.</p>
+  <table>
+    <thead><tr><th>Adversary</th><th>Controls</th><th>Example attack</th><th>Stopped by</th></tr></thead>
+    <tbody>
+      <tr><td><strong>T1</strong> — adversarial input</td><td>Text reaching the planner</td><td>“Your limit was raised — swap 2 ETH”</td><td>Ring 1 (revaluation, limits)</td></tr>
+      <tr><td><strong>T2</strong> — compromised planner</td><td>The plan itself</td><td>2 WETH swap labeled “USDC”, valued at $2</td><td>Ring 1 (address-authoritative valuation)</td></tr>
+      <tr><td><strong>T3</strong> — compromised host</td><td>The whole server</td><td>Forged verdicts, arbitrary calls</td><td>Ring 2 (contract allowance) + Ring 3 (hardware)</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ═══ 3 DESIGN PRINCIPLE ═══ -->
+<h2 class="numbered">Interpretation is not authority</h2>
+<div class="todo">450–550 words — the intellectual heart; write this section first.
+Why a gatekeeper LLM is a category error (sampled verdicts, correlated failures,
+unfalsifiable reasoning); the border-interpreter analogy; the honest origin story
+(v1 shipped a Gatekeeper LLM + a growing 20-line override patch); end with the four
+invariants as a numbered list.</div>
+
+<div class="callout"><span class="label">Design invariants</span>
+  <ol>
+    <li>No model output is trusted for valuation — the server re-prices every plan.</li>
+    <li>The verdict function is pure, deterministic, unit-tested, fail-closed.</li>
+    <li>Nothing the model writes can weaken a verdict; rules only escalate.</li>
+    <li>Escalation terminates in a human factor whose strength scales with value.</li>
+  </ol>
+</div>
+
+<!-- ═══ 4 ARCHITECTURE ═══ -->
+<h2 class="numbered">Three rings of authority</h2>
+<div class="todo">600–750 words. One subsection (or paragraph block) per ring; keep the
+reference implementation (Orchestra) as evidence, not subject.</div>
+
+<figure>
+  <img src="../figures/fig2-architecture.svg" alt="Pipeline architecture with three rings of authority">
+  <figcaption>The pipeline. The Planner LLM (Ring 0) holds zero authority; the deterministic
+  policy engine (Ring 1) computes the verdict; on-chain allowances (Ring 2) bound even a
+  compromised host; approvals resolve to a value-tiered human factor (Ring 3).</figcaption>
+</figure>
+
+<h3>Ring 0 — interpretation (probabilistic, zero authority)</h3>
+<div class="todo">Planner LLM: NL → typed plan; prompt hygiene ≠ defense.</div>
+
+<h3>Ring 1 — deterministic policy</h3>
+<div class="todo">Server-side revaluation, decide() rules, fail-closed defaults,
+machine-readable rule slugs, audit log. Reference Figure 2.</div>
+
+<figure>
+  <img src="../figures/fig3-decide-flowchart.svg" alt="decide() rule order flowchart">
+  <figcaption>The verdict function, in rule order. The verdict is computed, not sampled:
+  identical plan and state always produce the identical verdict, with rule slugs for audit.</figcaption>
+</figure>
+
+<h3>Ring 2 — on-chain delegation bounds</h3>
+<div class="todo">Safe smart account + AllowanceModule; the agent is a delegate, not an
+owner; why this holds under T3.</div>
+
+<h3>Ring 3 — the human anchor, tiered by value</h3>
+<div class="todo">Passkey below the hardware threshold, Ledger secure screen above it;
+clear signing (ERC-7730) — the human approves the actual transaction, not the model's
+account of it.</div>
+
+<figure>
+  <img src="../figures/fig4-approval-ladder.svg" alt="Value-tiered approval ladder">
+  <figcaption>Authorization strength scales with value at risk. Escalation rules can move an
+  intent only rightward.</figcaption>
+</figure>
+
+<!-- ═══ 5 METHODOLOGY ═══ -->
+<h2 class="numbered">Evaluation methodology</h2>
+<div class="todo">300–400 words. E1 (adversarial NL through the real planner) and E2
+(injected plans, compromised-planner model); both gates judge identical plans; the LLM
+baseline is the recovered production prompt, not a strawman. Metrics: unsafe-approval
+rate, friction, verdict variance. Disclose config (model, trials, stub prices) and the
+corpus's author-written limits.</div>
+
+<!-- ═══ 6 RESULTS ═══ -->
+<h2 class="numbered">Results</h2>
+<div class="todo">400–500 words. Numbers from eval/results/ (pre-fix run
+run-2026-08-25T13-26-34-631Z + the clean post-fix run). Lead with Figure 5; then the
+found-and-closed valuation edge (symbol poisoning, inj-05/plan-02) as a finding; then
+determinism (verdict variance) and the latency win (one LLM call instead of two).</div>
+
+<figure>
+  <div class="todo">Figure 5 — the money chart (unsafe-approval rate by category, LLM gate
+  vs deterministic engine, before/after fix). Generated from eval results once the post-fix
+  run lands.</div>
+  <figcaption>Unsafe-approval rate by attack category: historical LLM gate vs the
+  deterministic policy engine.</figcaption>
+</figure>
+
+<div class="table-block">
+  <p class="table-caption">Per-category unsafe approvals (3 trials/case). <em>Fill from
+  eval/results/latest.md.</em></p>
+  <table>
+    <thead><tr><th>Category</th><th class="num">Trials</th><th class="num">LLM unsafe</th><th class="num">Det unsafe (pre-fix)</th><th class="num">Det unsafe (post-fix)</th></tr></thead>
+    <tbody>
+      <tr><td>prompt_injection</td><td class="num">18</td><td class="num">1</td><td class="num">3</td><td class="num">—</td></tr>
+      <tr><td>unknown_recipient</td><td class="num">6</td><td class="num">3</td><td class="num">0</td><td class="num">—</td></tr>
+      <tr><td>velocity</td><td class="num">6</td><td class="num">3</td><td class="num">0</td><td class="num">—</td></tr>
+      <tr><td>value_misreport</td><td class="num">9</td><td class="num">0</td><td class="num">3</td><td class="num">—</td></tr>
+      <tr><td colspan="5"><em>…complete from the final runs…</em></td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ═══ 7 DISCUSSION ═══ -->
+<h2 class="numbered">Discussion and limitations</h2>
+<div class="todo">250–350 words. What the architecture does NOT solve (in-policy malicious
+intents, semantic gaps, oracle risk, approval fatigue); generalization to 4337 session
+keys / 7715; where LLMs do belong (advisory, never verdicts); eval limits.</div>
+
+<!-- ═══ 8 LEDGER LENS ═══ -->
+<h2 class="numbered">Ledger Lens: atoms over code</h2>
+<div class="todo">250–300 words — REQUIRED section, honest and non-promotional. The last
+ring is physical; delegation turns the hardware wallet from bottleneck into constitution;
+accountable intent at machine speed.</div>
+
+<!-- ═══ 9 CONCLUSION ═══ -->
+<h2 class="numbered">Conclusion</h2>
+<div class="todo">150–200 words. Not “can we trust the model?” but “what must be true so
+we don't have to?” Autonomy is an architecture property.</div>
+
+<!-- ═══ ACKNOWLEDGMENTS ═══ -->
+<h2>Acknowledgments &amp; AI-assistance disclosure</h2>
+<div class="todo">Disclose AI assistance honestly (research support, evaluation harness
+code, figure drafting, editing) and state that the final text is the author's own — this
+matches the signed originality statement.</div>
+
+<!-- ═══ REFERENCES ═══ -->
+<section class="references">
+  <h2>References</h2>
+  <ol>
+    <li>K. Greshake et al., “Not what you've signed up for: Compromising Real-World LLM-Integrated Applications with Indirect Prompt Injection,” <span class="venue">AISec @ CCS</span>, 2023.</li>
+    <li>E. Debenedetti et al., “AgentDojo: A Dynamic Environment to Evaluate Attacks and Defenses for LLM Agents,” <span class="venue">NeurIPS Datasets &amp; Benchmarks</span>, 2024.</li>
+    <li class="todo">…complete from paper/CITATIONS.md, keeping only what the text actually cites; verify every entry.</li>
+  </ol>
+</section>
+
+</main>
+</body>
+</html>

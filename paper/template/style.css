@@ -1,0 +1,281 @@
+/* ─── N3XT paper template ───
+   Single-column A4 research paper. Rendered by Brave/Chromium headless with
+   paged.js (vendored). Palette matches paper/figures/. */
+
+:root {
+  --ink: #1a1a19;
+  --ink-strong: #0b0b0b;
+  --muted: #52514e;
+  --accent: #2a78d6;
+  --accent-dark: #1c5cab;
+  --rule: #d9d8d4;
+  --panel: #f6f8fb;
+  --panel-warm: #faf9f7;
+  --sans: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --serif: Charter, "Iowan Old Style", Georgia, "Times New Roman", serif;
+  --mono: "SF Mono", Menlo, Consolas, monospace;
+}
+
+@page {
+  size: A4;
+  margin: 24mm 26mm 24mm 26mm;
+
+  @bottom-left {
+    content: string(papertitle);
+    font-family: var(--sans);
+    font-size: 8pt;
+    color: var(--muted);
+  }
+  @bottom-right {
+    content: counter(page) " / " counter(pages);
+    font-family: var(--sans);
+    font-size: 8pt;
+    color: var(--muted);
+  }
+}
+
+@page :first {
+  @bottom-left { content: none; }
+  @bottom-right { content: none; }
+}
+
+html { box-sizing: border-box; }
+*, *::before, *::after { box-sizing: inherit; }
+
+body {
+  font-family: var(--serif);
+  font-size: 11pt;
+  line-height: 1.55;
+  color: var(--ink);
+  margin: 0;
+  counter-reset: section figure table;
+}
+
+/* ─── Cover ─── */
+.cover { break-after: page; }
+
+.cover .track-chip {
+  display: inline-block;
+  font-family: var(--sans);
+  font-size: 8.5pt;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent-dark);
+  border: 1.2pt solid var(--accent);
+  border-radius: 999px;
+  padding: 3pt 10pt;
+  margin: 18mm 0 10mm;
+}
+
+.cover h1 {
+  font-family: var(--sans);
+  font-size: 26pt;
+  font-weight: 800;
+  line-height: 1.18;
+  color: var(--ink-strong);
+  margin: 0 0 6mm;
+  string-set: papertitle content(text);
+}
+/* If the title is long, set a short running title here instead: */
+.running-title { string-set: papertitle content(text); display: none; }
+
+.cover .subtitle {
+  font-family: var(--serif);
+  font-size: 13pt;
+  font-style: italic;
+  color: var(--muted);
+  margin: 0 0 14mm;
+  line-height: 1.4;
+}
+
+.cover .byline {
+  font-family: var(--sans);
+  font-size: 10.5pt;
+  margin-bottom: 2mm;
+}
+.cover .byline .author { font-weight: 700; }
+.cover .affil {
+  font-family: var(--sans);
+  font-size: 9pt;
+  color: var(--muted);
+  margin-bottom: 12mm;
+}
+
+.abstract {
+  background: var(--panel);
+  border: 0.6pt solid var(--rule);
+  border-left: 2.5pt solid var(--accent);
+  border-radius: 4pt;
+  padding: 6mm 7mm;
+  margin: 0 0 8mm;
+}
+.abstract h2 {
+  font-family: var(--sans);
+  font-size: 9.5pt;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent-dark);
+  margin: 0 0 3mm;
+}
+.abstract p { margin: 0; font-size: 10.5pt; }
+
+.keywords {
+  font-family: var(--sans);
+  font-size: 9pt;
+  color: var(--muted);
+}
+.keywords strong { color: var(--ink); }
+
+/* ─── Headings ─── */
+h2 {
+  font-family: var(--sans);
+  font-size: 14pt;
+  font-weight: 800;
+  color: var(--ink-strong);
+  margin: 9mm 0 3.5mm;
+  break-after: avoid;
+}
+h2.numbered { counter-increment: section; }
+h2.numbered::before {
+  content: counter(section) ".  ";
+  color: var(--accent);
+}
+
+h3 {
+  font-family: var(--sans);
+  font-size: 11pt;
+  font-weight: 700;
+  color: var(--ink-strong);
+  margin: 6mm 0 2.5mm;
+  break-after: avoid;
+}
+
+p { margin: 0 0 3.2mm; }
+p + p { text-indent: 0; }
+a { color: var(--accent-dark); text-decoration: none; }
+strong { color: var(--ink-strong); }
+
+ul, ol { margin: 0 0 3.2mm; padding-left: 6mm; }
+li { margin-bottom: 1.2mm; }
+
+/* ─── Figures ─── */
+figure {
+  break-inside: avoid;
+  margin: 6mm 0;
+  text-align: center;
+}
+figure img, figure svg, figure object {
+  max-width: 100%;
+  height: auto;
+}
+figcaption {
+  counter-increment: figure;
+  font-family: var(--sans);
+  font-size: 9pt;
+  color: var(--muted);
+  text-align: left;
+  margin-top: 2.5mm;
+  padding-top: 2mm;
+  border-top: 0.6pt solid var(--rule);
+}
+figcaption::before {
+  content: "Figure " counter(figure) " — ";
+  font-weight: 700;
+  color: var(--ink);
+}
+
+/* ─── Tables ─── */
+.table-block { break-inside: avoid; margin: 6mm 0; }
+.table-caption {
+  counter-increment: table;
+  font-family: var(--sans);
+  font-size: 9pt;
+  color: var(--muted);
+  margin-bottom: 2mm;
+}
+.table-caption::before {
+  content: "Table " counter(table) " — ";
+  font-weight: 700;
+  color: var(--ink);
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--sans);
+  font-size: 9.5pt;
+}
+th {
+  text-align: left;
+  font-weight: 700;
+  padding: 2mm 3mm;
+  border-bottom: 1.2pt solid var(--ink);
+}
+td {
+  padding: 2mm 3mm;
+  border-bottom: 0.6pt solid var(--rule);
+  vertical-align: top;
+}
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* ─── Callouts & quotes ─── */
+.callout {
+  break-inside: avoid;
+  background: var(--panel-warm);
+  border: 0.6pt solid var(--rule);
+  border-left: 2.5pt solid var(--accent);
+  border-radius: 4pt;
+  padding: 4mm 6mm;
+  margin: 5mm 0;
+  font-size: 10.5pt;
+}
+.callout .label {
+  font-family: var(--sans);
+  font-size: 8.5pt;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent-dark);
+  display: block;
+  margin-bottom: 1.5mm;
+}
+
+blockquote {
+  margin: 5mm 8mm;
+  padding-left: 5mm;
+  border-left: 1.5pt solid var(--accent);
+  font-style: italic;
+  color: var(--muted);
+  font-size: 11.5pt;
+}
+
+code {
+  font-family: var(--mono);
+  font-size: 9pt;
+  background: #f2f2f0;
+  border-radius: 2pt;
+  padding: 0.4pt 2.5pt;
+}
+
+/* ─── References ─── */
+.references ol {
+  padding-left: 8mm;
+  font-size: 9.5pt;
+  line-height: 1.45;
+}
+.references li { margin-bottom: 2mm; }
+.references .venue { font-style: italic; }
+
+/* ─── Authoring aids (must be gone before submission; build.sh warns) ─── */
+.todo {
+  background: #fff3c2;
+  border: 1pt dashed #b98200;
+  border-radius: 3pt;
+  padding: 3mm 4mm;
+  margin: 3mm 0;
+  font-family: var(--sans);
+  font-size: 9.5pt;
+  color: #6b4e00;
+}
+.todo::before { content: "✎ TO WRITE — "; font-weight: 700; }

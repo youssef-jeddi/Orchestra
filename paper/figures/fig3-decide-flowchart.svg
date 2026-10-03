@@ -1,0 +1,84 @@
+<svg viewBox="0 0 860 580" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica Neue, Arial, sans-serif">
+  <defs>
+    <marker id="arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#52514e"/>
+    </marker>
+  </defs>
+  <rect width="860" height="580" fill="#ffffff"/>
+
+  <text x="80" y="22" font-size="11" font-weight="700" fill="#52514e">plan enters (typed, server-revalued)</text>
+  <line x1="230" y1="30" x2="230" y2="42" stroke="#52514e" stroke-width="1.4" marker-end="url(#arr3)"/>
+
+  <!-- 1. balance -->
+  <rect x="80" y="44" width="300" height="50" rx="9" fill="#ffffff" stroke="#6b7686" stroke-width="1.3"/>
+  <text x="230" y="65" font-size="12" font-weight="700" fill="#0b0b0b" text-anchor="middle">1 · Read-only balance query?</text>
+  <text x="230" y="82" font-size="10" fill="#52514e" text-anchor="middle">no funds move</text>
+  <line x1="380" y1="69" x2="546" y2="69" stroke="#52514e" stroke-width="1.4" marker-end="url(#arr3)"/>
+  <text x="460" y="62" font-size="10" font-style="italic" fill="#52514e" text-anchor="middle">yes</text>
+  <rect x="550" y="47" width="240" height="44" rx="22" fill="#eef0f3" stroke="#6b7686" stroke-width="1.3"/>
+  <text x="670" y="74" font-size="12" font-weight="700" fill="#3d4650" text-anchor="middle">ⓘ INFO</text>
+
+  <line x1="230" y1="94" x2="230" y2="120" stroke="#52514e" stroke-width="1.4" marker-end="url(#arr3)"/>
+  <text x="240" y="112" font-size="10" font-style="italic" fill="#52514e">no</text>
+
+  <!-- 2. malformed -->
+  <rect x="80" y="122" width="300" height="50" rx="9" fill="#ffffff" stroke="#6b7686" stroke-width="1.3"/>
+  <text x="230" y="143" font-size="12" font-weight="700" fill="#0b0b0b" text-anchor="middle">2 · Plan malformed?</text>
+  <text x="230" y="160" font-size="10" fill="#52514e" text-anchor="middle">missing summary · no executable steps</text>
+  <line x1="380" y1="147" x2="546" y2="147" stroke="#52514e" stroke-width="1.4" marker-end="url(#arr3)"/>
+  <text x="460" y="140" font-size="10" font-style="italic" fill="#52514e" text-anchor="middle">yes</text>
+  <rect x="550" y="125" width="240" height="44" rx="22" fill="#fbe7e7" stroke="#d03b3b" stroke-width="1.3"/>
+  <text x="670" y="152" font-size="12" font-weight="700" fill="#8f2626" text-anchor="middle">✕ BLOCKED</text>
+
+  <line x1="230" y1="172" x2="230" y2="198" stroke="#52514e" stroke-width="1.4" marker-end="url(#arr3)"/>
+  <text x="240" y="190" font-size="10" font-style="italic" fill="#52514e">no</text>
+
+  <!-- 3. denylist -->
+  <rect x="80" y="200" width="300" height="50" rx="9" fill="#ffffff" stroke="#6b7686" stroke-width="1.3"/>
+  <text x="230" y="221" font-size="12" font-weight="700" fill="#0b0b0b" text-anchor="middle">3 · Token on deny-list?</text>
+  <text x="230" y="238" font-size="10" fill="#52514e" text-anchor="middle">threat-feed hook, any step, any token field</text>
+  <line x1="380" y1="225" x2="546" y2="225" stroke="#52514e" stroke-width="1.4" marker-end="url(#arr3)"/>
+  <text x="460" y="218" font-size="10" font-style="italic" fill="#52514e" text-anchor="middle">yes</text>
+  <rect x="550" y="203" width="240" height="44" rx="22" fill="#fbe7e7" stroke="#d03b3b" stroke-width="1.3"/>
+  <text x="670" y="230" font-size="12" font-weight="700" fill="#8f2626" text-anchor="middle">✕ BLOCKED</text>
+
+  <line x1="230" y1="250" x2="230" y2="276" stroke="#52514e" stroke-width="1.4" marker-end="url(#arr3)"/>
+  <text x="240" y="268" font-size="10" font-style="italic" fill="#52514e">no</text>
+
+  <!-- 4. unknown action -->
+  <rect x="80" y="278" width="300" height="50" rx="9" fill="#ffffff" stroke="#6b7686" stroke-width="1.3"/>
+  <text x="230" y="299" font-size="12" font-weight="700" fill="#0b0b0b" text-anchor="middle">4 · Action type unrecognized?</text>
+  <text x="230" y="316" font-size="10" fill="#52514e" text-anchor="middle">anything outside swap · send · add_liquidity</text>
+  <line x1="380" y1="303" x2="546" y2="303" stroke="#52514e" stroke-width="1.4" marker-end="url(#arr3)"/>
+  <text x="460" y="296" font-size="10" font-style="italic" fill="#52514e" text-anchor="middle">yes — fail closed</text>
+  <rect x="550" y="281" width="240" height="44" rx="22" fill="#fef1d4" stroke="#b98200" stroke-width="1.3"/>
+  <text x="670" y="308" font-size="12" font-weight="700" fill="#7a5600" text-anchor="middle">! NEEDS_APPROVAL</text>
+
+  <line x1="230" y1="328" x2="230" y2="354" stroke="#52514e" stroke-width="1.4" marker-end="url(#arr3)"/>
+  <text x="240" y="346" font-size="10" font-style="italic" fill="#52514e">no</text>
+
+  <!-- 5. escalation rules -->
+  <rect x="80" y="356" width="300" height="94" rx="9" fill="#ffffff" stroke="#6b7686" stroke-width="1.3"/>
+  <text x="230" y="377" font-size="12" font-weight="700" fill="#0b0b0b" text-anchor="middle">5 · Any escalation rule fired?</text>
+  <text x="230" y="396" font-size="10" fill="#52514e" text-anchor="middle">rolling 24 h daily limit · unverified token</text>
+  <text x="230" y="410" font-size="10" fill="#52514e" text-anchor="middle">unknown recipient · auto-approval count</text>
+  <text x="230" y="424" font-size="10" fill="#52514e" text-anchor="middle">habit anomaly (10× typical size)</text>
+  <text x="230" y="441" font-size="10" font-style="italic" fill="#52514e" text-anchor="middle">rules can only escalate, never weaken</text>
+  <line x1="380" y1="403" x2="546" y2="403" stroke="#52514e" stroke-width="1.4" marker-end="url(#arr3)"/>
+  <text x="460" y="396" font-size="10" font-style="italic" fill="#52514e" text-anchor="middle">yes</text>
+  <rect x="550" y="374" width="240" height="58" rx="22" fill="#fef1d4" stroke="#b98200" stroke-width="1.3"/>
+  <text x="670" y="397" font-size="12" font-weight="700" fill="#7a5600" text-anchor="middle">! NEEDS_APPROVAL</text>
+  <text x="670" y="415" font-size="10" fill="#7a5600" text-anchor="middle">passkey ≤ $1k · Ledger &gt; $1k</text>
+
+  <line x1="230" y1="450" x2="230" y2="476" stroke="#52514e" stroke-width="1.4" marker-end="url(#arr3)"/>
+  <text x="240" y="468" font-size="10" font-style="italic" fill="#52514e">no</text>
+
+  <!-- 6. auto -->
+  <rect x="110" y="478" width="240" height="48" rx="24" fill="#e2f4e2" stroke="#0ca30c" stroke-width="1.4"/>
+  <text x="230" y="499" font-size="12.5" font-weight="700" fill="#0a6b0a" text-anchor="middle">✓ AUTO_EXECUTE</text>
+  <text x="230" y="516" font-size="10" fill="#0a6b0a" text-anchor="middle">within every bound — no human factor</text>
+
+  <text x="550" y="472" font-size="10.5" font-style="italic" fill="#52514e">the verdict is computed, not sampled:</text>
+  <text x="550" y="487" font-size="10.5" font-style="italic" fill="#52514e">same plan + same state ⇒ same verdict,</text>
+  <text x="550" y="502" font-size="10.5" font-style="italic" fill="#52514e">with machine-readable rule slugs for audit</text>
+</svg>
