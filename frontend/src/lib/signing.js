@@ -14,7 +14,9 @@ const explorer = (h) => `https://sepolia.etherscan.io/tx/${h}`;
 
 // MetaMask signs on whatever network is active, so switch to Sepolia first
 // (adding it if the wallet doesn't know it). Throws if the user refuses.
-async function ensureSepolia() {
+// Also needed for EIP-712 signatures: MetaMask rejects typed data whose domain
+// chainId isn't the active network ("must match the active chainId").
+export async function ensureSepolia() {
   const eth = typeof window !== 'undefined' ? window.ethereum : null;
   if (!eth) throw new Error('MetaMask not available');
   const current = await eth.request({ method: 'eth_chainId' });

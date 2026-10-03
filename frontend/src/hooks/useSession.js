@@ -11,13 +11,15 @@ import { authLoginRequest, authLogin, getSession, setSessionToken, onSessionInva
 
 const storageKey = (wallet) => `orchestra:session:${wallet.toLowerCase()}`;
 
+// Treat a session as over a minute early, so a request doesn't race the expiry.
+const EXPIRY_SLACK_MS = 60_000;
+
 function loadToken(wallet) {
   try {
     const raw = localStorage.getItem(storageKey(wallet));
     if (!raw) return null;
     const { token, expiresAt } = JSON.parse(raw);
-    // Keep a minute of slack so a request doesn't race the expiry.
-    return token && Date.parse(expiresAt) > Date.now() + 60_000 ? token : null;
+    return token && Date.parse(expiresAt) > Date.now() + EXPIRY_SLACK_MS ? { token, expiresAt } : null;
   } catch {
     return null;
   }
@@ -35,10 +37,12 @@ export function useSession(ledger) {
   const wallet = ledger.walletAddress;
   const [status, setStatus] = useState('none'); // 'none' | 'signing' | 'ready' | 'error'
   const [error, setError] = useState(null);
+  const [expiresAt, setExpiresAt] = useState(null);
   const autoTried = useRef(null); // wallet we already auto-prompted for
 
+  /** Ask the wallet to sign in. Resolves true once a session is active. */
   const signIn = useCallback(async () => {
-    if (!wallet) return;
+    if (!wallet) return false;
     setStatus('signing');
     setError(null);
     try {
@@ -50,11 +54,14 @@ export function useSession(ledger) {
       const { token, expiresAt } = await authLogin(wallet, nonce, signature);
       saveToken(wallet, token, expiresAt);
       setSessionToken(token);
+      setExpiresAt(expiresAt);
       setStatus('ready');
+      return true;
     } catch (err) {
       setSessionToken(null);
       setError(err.message);
       setStatus('error');
+      return false;
     }
   }, [wallet, ledger]);
 
@@ -66,9 +73,9 @@ export function useSession(ledger) {
 
     const stored = loadToken(wallet);
     if (stored) {
-      setSessionToken(stored);
+      setSessionToken(stored.token);
       getSession()
-        .then(() => { if (alive) setStatus('ready'); })
+        .then(() => { if (alive) { setExpiresAt(stored.expiresAt); setStatus('ready'); } })
         .catch(() => { if (alive) { dropToken(wallet); setStatus('none'); } });
     } else if (autoTried.current !== wallet) {
       autoTried.current = wallet;
@@ -85,5 +92,18 @@ export function useSession(ledger) {
     setStatus('none');
   }), [wallet]);
 
-  return { status, error, signIn, ready: status === 'ready' };
+  // A session ends on its own after a few hours: show "Sign in" when it does,
+  // instead of keeping a dead token until a request fails.
+  useEffect(() => {
+    if (status !== 'ready' || !expiresAt || !wallet) return;
+    const ms = Date.parse(expiresAt) - Date.now() - EXPIRY_SLACK_MS;
+    const expire = () => { setSessionToken(null); dropToken(wallet); setStatus('none'); };
+    const id = setTimeout(expire, Math.max(0, ms));
+    return () => clearTimeout(id);
+  }, [status, expiresAt, wallet]);
+
+  /** True when signed in — asking the wallet to sign in first if needed. */
+  const ensure = useCallback(async () => (status === 'ready' ? true : signIn()), [status, signIn]);
+
+  return { status, error, signIn, ensure, ready: status === 'ready' };
 }

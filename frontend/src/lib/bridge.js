@@ -36,7 +36,9 @@ export async function bridgeFetch(path, options = {}) {
       sessionToken = null;
       sessionInvalidListeners.forEach((fn) => fn());
     }
-    throw new Error(data.error || `HTTP ${res.status}`);
+    const err = new Error(data.error || `HTTP ${res.status}`);
+    err.code = data.code; // e.g. 'session_required', so callers can sign in and retry
+    throw err;
   }
   return data;
 }

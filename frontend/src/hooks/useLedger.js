@@ -154,6 +154,9 @@ export function useLedger() {
       if (!eth) throw new Error('MetaMask not available');
       setDeviceStatus('signing');
       try {
+        // Orchestra's typed data (sign-in, Telegram link, Permit2) is bound to Sepolia.
+        const { ensureSepolia } = await import('@/lib/signing');
+        await ensureSepolia();
         onStatus?.('Confirm in MetaMask');
         const sig = await eth.request({
           method: 'eth_signTypedData_v4',

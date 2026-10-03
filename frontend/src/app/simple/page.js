@@ -214,7 +214,7 @@ function SimpleChat() {
                 {session.status === 'signing' ? 'Check your wallet…' : '✍️ Sign in'}
               </button>
             )}
-            <TelegramLink ledger={ledger} onError={(msg) => setMessages((m) => [...m, { role: 'agent', error: msg }])} />
+            <TelegramLink ledger={ledger} session={session} onError={(msg) => setMessages((m) => [...m, { role: 'agent', error: msg }])} />
             {session.ready && (passkeyReg
               ? <span style={{ fontSize: 11, color: '#30D158' }} title="Passkey registered">🔑 passkey</span>
               : <button onClick={registerPk} style={pill(false)} title="Register a device passkey">🔑 Add passkey</button>)}
@@ -506,7 +506,7 @@ function TelegramWait({ approval }) {
 }
 
 // Link a Telegram chat: the wallet signs a one-time code, then the user presses Start in Telegram.
-function TelegramLink({ ledger, onError }) {
+function TelegramLink({ ledger, session, onError }) {
   const [status, setStatus] = useState(null); // { enabled, linked, username }
   const [url, setUrl] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -535,7 +535,7 @@ function TelegramLink({ ledger, onError }) {
     return (
       <>
         <span style={{ fontSize: 11, color: '#30D158' }} title="Risky transactions are approved in Telegram">📱 {who}</span>
-        {status.phoneAvailable && <PhoneSetupButton onDone={refresh} onError={onError} />}
+        {status.phoneAvailable && <PhoneSetupButton session={session} onDone={refresh} onError={onError} />}
       </>
     );
   }
@@ -573,7 +573,7 @@ function TelegramLink({ ledger, onError }) {
 
 // Ask the server to send a one-time phone passkey setup link to Telegram, then
 // poll until the phone has registered it.
-function PhoneSetupButton({ onDone, onError }) {
+function PhoneSetupButton({ session, onDone, onError }) {
   const [state, setState] = useState('idle'); // idle | sending | sent
 
   useEffect(() => {
@@ -586,7 +586,15 @@ function PhoneSetupButton({ onDone, onError }) {
   const send = async () => {
     setState('sending');
     try {
-      await requestPhoneSetup();
+      // Setting up a phone passkey needs a wallet session: sign in first if there
+      // isn't one, and once more if the server says it has expired meanwhile.
+      if (!(await session.ensure())) throw new Error('Sign in with your wallet to set up the phone passkey.');
+      try {
+        await requestPhoneSetup();
+      } catch (err) {
+        if (err.code !== 'session_required' || !(await session.signIn())) throw err;
+        await requestPhoneSetup();
+      }
       setState('sent');
     } catch (err) {
       onError(`Phone setup failed: ${err.message}`);
