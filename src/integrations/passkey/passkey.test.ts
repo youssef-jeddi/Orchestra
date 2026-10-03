@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 
-delete process.env.ZERO_G_PRIVATE_KEY; // in-memory storage
+process.env.STORAGE_BACKEND = "memory"; // never touch the real data file
 delete process.env.PASSKEY_RP_ID;
 delete process.env.PASSKEY_ORIGIN;
 

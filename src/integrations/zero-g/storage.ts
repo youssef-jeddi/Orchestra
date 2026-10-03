@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as crypto from 'crypto';
+import { LocalStorage } from './memoryStorage';
 
 const INDEX_FILE = path.join(process.cwd(), 'storage-index.json');
 
@@ -147,7 +148,11 @@ class ZeroGStorage {
   }
 }
 
-// Auto-select backend: use 0G if env vars are set, otherwise in-memory
+// Backend selection (STORAGE_BACKEND):
+//   file   (default) local store persisted to STORAGE_FILE (default .orchestra/storage.json)
+//   memory           memory only — tests and the eval, so they never touch real data
+//   0g               0G decentralized storage; opt-in only, and it needs the ZERO_G_* keys
+// 0G is never picked implicitly: a stray ZERO_G_* value in .env can't change where data goes.
 let storageBackend: {
   write: (key: string, data: unknown) => Promise<void>;
   read: (key: string) => Promise<unknown | null>;
@@ -157,7 +162,12 @@ let storageBackend: {
   clear: () => Promise<void>;
 };
 
-if (process.env.ZERO_G_PRIVATE_KEY && process.env.ZERO_G_RPC_URL && process.env.ZERO_G_INDEXER_URL) {
+const STORAGE_MODE = (process.env.STORAGE_BACKEND || 'file').trim().toLowerCase();
+
+if (STORAGE_MODE === '0g') {
+  if (!(process.env.ZERO_G_PRIVATE_KEY && process.env.ZERO_G_RPC_URL && process.env.ZERO_G_INDEXER_URL)) {
+    throw new Error('[Storage] STORAGE_BACKEND=0g needs ZERO_G_PRIVATE_KEY, ZERO_G_RPC_URL and ZERO_G_INDEXER_URL');
+  }
   console.log('[Storage] Using 0G decentralized storage');
   const s = new ZeroGStorage();
   storageBackend = {
@@ -169,16 +179,21 @@ if (process.env.ZERO_G_PRIVATE_KEY && process.env.ZERO_G_RPC_URL && process.env.
     clear: s.clear.bind(s),
   };
 } else {
-  console.log('[Storage] Using in-memory storage (set ZERO_G_* env vars for decentralized storage)');
-  // Lazy import to avoid circular deps
-  const mem = require('./memoryStorage');
+  if (STORAGE_MODE !== 'file' && STORAGE_MODE !== 'memory') {
+    throw new Error(`[Storage] unknown STORAGE_BACKEND "${STORAGE_MODE}" (use file, memory or 0g)`);
+  }
+  const file = STORAGE_MODE === 'file'
+    ? path.resolve(process.env.STORAGE_FILE || path.join(process.cwd(), '.orchestra', 'storage.json'))
+    : null;
+  console.log(file ? `[Storage] Using local storage: ${file}` : '[Storage] Using in-memory storage (nothing survives a restart)');
+  const local = new LocalStorage(file);
   storageBackend = {
-    write: mem.write,
-    read: mem.read,
-    readMany: mem.readMany,
-    append: mem.append,
-    delete: mem.deleteKey,
-    clear: mem.clear,
+    write: local.write.bind(local),
+    read: local.read.bind(local),
+    readMany: local.readMany.bind(local),
+    append: local.append.bind(local),
+    delete: local.delete.bind(local),
+    clear: local.clear.bind(local),
   };
 }
 

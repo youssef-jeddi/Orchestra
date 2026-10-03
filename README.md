@@ -31,7 +31,7 @@ Built for **ETHGlobal Cannes 2026**. Runs on the Sepolia testnet.
 │           NEEDS_APPROVAL ─▶ server-held approval (payload + hash) ─▶    │
 │                 passkey · Telegram · phone passkey · your own wallet   │
 └────────────────────────────────────────────────────────────────────────┘
-      │ Groq / Claude     │ 0G Storage          │ Uniswap Trading API │ Sepolia
+      │ Groq / Claude     │ Local storage       │ Uniswap Trading API │ Sepolia
       │ (planner)         │ (profiles, passkeys,│ (v3 + v4 routes)    │ (Safe, RPC)
                           │  links, activity)
 ```
@@ -98,8 +98,8 @@ Once a wallet links Telegram, its risky transactions can only be approved there 
 
 ## Tracks
 
-### 0G — Decentralized storage and compute
-- **0G Storage** is the agent's persistent memory: per-wallet profiles and policies, activity (for the daily limit and habit baseline), passkeys, Telegram links, Safe records, plans and assessments. Unified `read()` / `write()` / `readMany()` / `append()` API, with an in-memory fallback when the `ZERO_G_*` variables aren't set (nothing survives a restart then).
+### 0G — Decentralized storage and compute (optional)
+- **Storage** keeps per-wallet profiles and policies, activity (for the daily limit and habit baseline), passkeys, Telegram links, Safe records, plans and assessments behind one `read()` / `write()` / `readMany()` / `append()` API. By default it's a local file (`.orchestra/storage.json`, git-ignored) that survives restarts with no setup; **0G Storage** is an opt-in backend (`STORAGE_BACKEND=0g` plus the `ZERO_G_*` keys) and is never selected implicitly.
 - **0G Compute** powers the agent runtime (`src/agents/runtime.ts`): the Watcher and the legacy planner agent the eval compares against, switchable between Groq and 0G Compute from the UI. The chat planner uses Groq or Claude (`src/integrations/llm`).
 
 ### Uniswap — Swap execution
@@ -151,7 +151,8 @@ cp .env.example .env
 | `UNISWAP_API_KEY` | Swaps — [hub.uniswap.org](https://hub.uniswap.org) |
 | `AGENT_PRIVATE_KEY` | The agent wallet — `npx tsx src/scripts/generate-agent-wallet.ts` |
 | `SEPOLIA_RPC_URL` | Sepolia RPC (defaults to a public node) |
-| `ZERO_G_PRIVATE_KEY`, `ZERO_G_RPC_URL`, `ZERO_G_INDEXER_URL` | Persistent 0G storage (otherwise in-memory) — tokens at [faucet.0g.ai](https://faucet.0g.ai) |
+| `STORAGE_BACKEND`, `STORAGE_FILE` | Where data is kept: a local file by default (`.orchestra/storage.json`); `memory` for throwaway runs; `0g` to opt into 0G Storage |
+| `ZERO_G_PRIVATE_KEY`, `ZERO_G_RPC_URL`, `ZERO_G_INDEXER_URL` | Only with `STORAGE_BACKEND=0g` — tokens at [faucet.0g.ai](https://faucet.0g.ai) |
 | `ZERO_G_API_KEY` | 0G Compute for the agent runtime |
 | `ORCHESTRA_POLICY_ADDRESS` | On-chain policy registry (optional) |
 | `LEDGER_APPROVAL=on` | Require a Ledger above the hardware threshold |
@@ -223,7 +224,7 @@ src/
 ├── policy/                  # deterministic risk engine (pure, tested)
 │   ├── index.ts             # decide(), habit profile, valuation
 │   ├── quoteCheck.ts        # swap quote vs market guard
-│   ├── store.ts             # per-wallet policy + activity (0G, cached)
+│   ├── store.ts             # per-wallet policy + activity (cached)
 │   └── prices.ts, priceFeed.ts
 ├── executor/adapters.ts     # swap · send · deposit · add / remove liquidity · balance
 ├── approvals/               # server-held approvals + clear-text description
@@ -235,7 +236,7 @@ src/
 │   ├── telegram/            # approval bot (linking, messages, long polling)
 │   ├── uniswap/             # Trading API client, routing (v3 + v4), liquidity (add, positions, remove)
 │   ├── safe/                # deployment, spending limits, Safe transactions
-│   └── zero-g/              # 0G storage (+ in-memory fallback), 0G compute
+│   └── zero-g/              # storage (local file by default, 0G opt-in), 0G compute
 ├── agents/                  # agent runtime: Watcher + legacy planner (0G Compute)
 └── scripts/                 # agent wallet generation, integration checks
 

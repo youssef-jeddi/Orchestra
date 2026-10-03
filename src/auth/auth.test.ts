@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { ethers } from "ethers";
 
 // In-memory storage for the per-wallet policy tests; set before the store loads.
+process.env.STORAGE_BACKEND = "memory"; // never touch the real data file
 delete process.env.ZERO_G_PRIVATE_KEY;
 
 const owner = ethers.Wallet.createRandom();

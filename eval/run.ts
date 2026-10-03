@@ -167,6 +167,7 @@ async function main() {
 
   // Deterministic environment — must be set before the app modules load.
   delete process.env.ZERO_G_PRIVATE_KEY;
+  process.env.STORAGE_BACKEND = "memory";
   if (args.provider) process.env.LLM_PROVIDER = args.provider;
   if (args.model) {
     if ((args.provider ?? process.env.LLM_PROVIDER) === "anthropic") process.env.ANTHROPIC_MODEL = args.model;
