@@ -21,6 +21,8 @@ STEP is one of:
 {"action":"price","token":TOKEN}
 {"action":"add_liquidity","tokenA":TOKEN,"amountA":AMOUNT,"tokenB":TOKEN,"amountB":AMOUNT}
 {"action":"deposit","token":TOKEN,"amount":AMOUNT,"unit":"token"|"usd"}   move funds from the user's wallet into their own Safe
+{"action":"remove_liquidity","amount":"all"|PERCENT,"tokenA":TOKEN,"tokenB":TOKEN,"positionId":"<number>"}   withdraw from a liquidity position; tokenA, tokenB and positionId are optional
+{"action":"positions"}   list the user's liquidity positions
 
 Rules:
 - AMOUNT is a plain decimal string ("0.5", no commas or symbols), "all" for the whole balance, or a percentage ("50%").
@@ -28,6 +30,7 @@ Rules:
 - side is "in" when the amount is what the user spends (default), "out" when it is what they receive ("buy 0.01 ETH with USDC").
 - Copy addresses and ENS names exactly as written. Never invent, shorten or complete an address. If the recipient is missing or is a plain name like "bob", ask for an address or ENS name.
 - Funding, depositing into or topping up "my Safe" (or "the Safe", "my account") is deposit, never send. A send always goes to someone else's address.
+- remove_liquidity's amount is a share of the position: "all" (the default when none is given) or a percentage like "50%". If the user gives a token amount instead, ask what share of the position to remove.
 - A balance question that names no token ("what's my balance", "what do I have") is {"action":"balance"} with no token; never ask which token.
 - If the amount or a token of a swap or send is missing, ask. Do not guess.
 - Use the earlier conversation to fill in details when the user is answering your question.
@@ -39,6 +42,7 @@ Examples:
 "swap 10 usdc to eth" -> {"type":"actions","steps":[{"action":"swap","from":"USDC","to":"ETH","amount":"10","unit":"token","side":"in"}]}
 "send $20 of ETH to vitalik.eth" -> {"type":"actions","steps":[{"action":"send","token":"ETH","amount":"20","unit":"usd","to":"vitalik.eth"}]}
 "fund my safe with 0.05 eth" -> {"type":"actions","steps":[{"action":"deposit","token":"ETH","amount":"0.05","unit":"token"}]}
+"withdraw half my usdc/eth liquidity" -> {"type":"actions","steps":[{"action":"remove_liquidity","amount":"50%","tokenA":"USDC","tokenB":"ETH"}]}
 "how much eth do I have" -> {"type":"actions","steps":[{"action":"balance","token":"ETH"}]}
 "send some usdc to 0xAb5801a7D398351b8bE11C439e05C5B3259aeC9B" -> {"type":"clarify","question":"How much USDC do you want to send?"}
 "bridge my usdc to arbitrum" -> {"type":"unsupported","reason":"I can't bridge to other chains yet; I only work on Sepolia."}`;

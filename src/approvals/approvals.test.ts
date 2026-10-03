@@ -200,6 +200,18 @@ test("describe: add liquidity is decoded from lpData — max deposit, expected u
   assert.equal(reviewOf(unknown).decoded, false);
 });
 
+test("describe: remove liquidity is decoded from lpRemoveData — position, share, back to the Safe", () => {
+  const a = createApproval(base({
+    intentType: "remove_liquidity",
+    execution: { lpRemoveData: { tokenId: "1234", percent: 50, token0: USDC_SEPOLIA, token1: "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14", symbol0: "USDC", symbol1: "WETH", fee: 3000 } },
+  }));
+  const r = reviewOf(a);
+  assert.equal(r.title, "Remove liquidity: USDC/ETH 0.3%");
+  assert.deepEqual(r.details.map((d) => d.value), ["#1234", "50%", "USDC and ETH at the pool's current price, plus the fees earned", "your Safe"]);
+  const bad = createApproval(base({ intentType: "remove_liquidity", execution: { lpRemoveData: { tokenId: "1234", percent: 150, token0: USDC_SEPOLIA, token1: USDC_SEPOLIA, fee: 3000 } } }));
+  assert.equal(reviewOf(bad).decoded, false);
+});
+
 console.log("approvals");
 for (const [name, fn] of tests) {
   _resetApprovals();

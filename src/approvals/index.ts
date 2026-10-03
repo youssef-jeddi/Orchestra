@@ -20,7 +20,7 @@ export interface PendingApproval {
   /** Lowercased wallet that owns the Safe. */
   wallet: string;
   safeAddress: string;
-  intentType: "swap" | "send" | "add_liquidity";
+  intentType: "swap" | "send" | "add_liquidity" | "remove_liquidity";
   summary: string;
   valueUsd: number;
   /** Why approval is required (policy reason + rule slugs). */
@@ -58,7 +58,7 @@ export interface PendingApproval {
 export interface NewApproval {
   wallet: string;
   safeAddress: string;
-  intentType: "swap" | "send" | "add_liquidity";
+  intentType: "swap" | "send" | "add_liquidity" | "remove_liquidity";
   summary: string;
   valueUsd: number;
   reason: string;

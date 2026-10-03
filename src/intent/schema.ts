@@ -62,7 +62,21 @@ export const DepositStep = z.object({
   unit: Unit,
 });
 
-export const Step = z.discriminatedUnion("action", [SwapStep, SendStep, BalanceStep, PriceStep, AddLiquidityStep, DepositStep]);
+/** Withdraw a share of a liquidity position. Tokens / positionId narrow down which one. */
+export const RemoveLiquidityStep = z.object({
+  action: z.literal("remove_liquidity"),
+  amount: Amount.default("all"),
+  tokenA: TokenSymbol.optional(),
+  tokenB: TokenSymbol.optional(),
+  positionId: z.preprocess((v) => (typeof v === "number" ? String(v) : v), z.string().regex(/^\d+$/, "positionId must be a number")).optional(),
+});
+
+/** List the user's liquidity positions. */
+export const PositionsStep = z.object({ action: z.literal("positions") });
+
+export const Step = z.discriminatedUnion("action", [
+  SwapStep, SendStep, BalanceStep, PriceStep, AddLiquidityStep, DepositStep, RemoveLiquidityStep, PositionsStep,
+]);
 
 export const PlannerOutput = z.discriminatedUnion("type", [
   z.object({ type: z.literal("actions"), steps: z.array(Step).min(1).max(5) }),

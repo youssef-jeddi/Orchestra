@@ -8,6 +8,7 @@ import { USDC_SEPOLIA, WETH_SEPOLIA } from "./types";
 import {
   fullRangeTicks, orderSides, poolPrice, lpPriceProblem, resolveMaxLpDeviation,
   expectedDeposit, planMint, buildMintBatch, POSITION_MANAGER_SEPOLIA, NPM_ABI, type LpSide,
+  amountsForLiquidity, planRemove, buildRemoveBatch, type Position,
 } from "./liquidity";
 
 const SAFE = "0x933f48ed12e2de3da82cc69c7a4f95c2adece3d1";
@@ -98,6 +99,65 @@ test("buildMintBatch (USDC + native ETH): ETH sent as value, multicall(mint, ref
   assert.equal(calls.length, 2);
   assert.equal(npm.parseTransaction({ data: calls[0] })!.name, "mint");
   assert.equal(npm.parseTransaction({ data: calls[1] })!.name, "refundETH");
+});
+
+// ── Removing liquidity ──
+const FAIR = Math.round(Math.log(1e12 / 2500) / Math.log(1.0001)); // WETH ≈ 2,500 USDC
+const position = (liquidity: bigint, tick = FAIR): Position => {
+  const { tickLower, tickUpper } = fullRangeTicks(3000);
+  const sqrtPriceX96 = sqrtAt(tick);
+  return {
+    tokenId: "1234", token0: { address: USDC_SEPOLIA, symbol: "USDC", decimals: 6 }, token1: { address: WETH_SEPOLIA, symbol: "WETH", decimals: 18 },
+    fee: 3000, tickLower, tickUpper, liquidity, fullRange: true, ...amountsForLiquidity(sqrtPriceX96, tickLower, tickUpper, liquidity),
+    owed0: 0n, owed1: 0n, sqrtPriceX96,
+  };
+};
+
+test("amountsForLiquidity: a full-range deposit's liquidity maps back to what went in", () => {
+  // Mint 25 USDC-worth at the fair price, then read it back.
+  const sqrtP = Number(sqrtAt(FAIR)) / 2 ** 96;
+  const L = BigInt(Math.floor(25_000_000 * sqrtP));
+  const { amount0, amount1 } = amountsForLiquidity(sqrtAt(FAIR), -887220, 887220, L);
+  assert.ok(Math.abs(Number(amount0) / 1e6 - 25) < 0.01, String(amount0));
+  assert.ok(Math.abs(Number(amount1) / 1e18 - 0.01) < 0.0001, String(amount1));
+  // Out of range: all in one token.
+  assert.equal(amountsForLiquidity(sqrtAt(FAIR), FAIR + 600, FAIR + 1200, L).amount1, 0n);
+  assert.equal(amountsForLiquidity(sqrtAt(FAIR), FAIR - 1200, FAIR - 600, L).amount0, 0n);
+});
+
+test("planRemove: 100% takes all liquidity and burns; 50% takes half; minimums 99%", () => {
+  const p = position(10n ** 15n);
+  const all = planRemove(p, 100);
+  assert.equal(all.liquidity, 10n ** 15n);
+  assert.equal(all.burn, true);
+  const half = planRemove(p, 50);
+  assert.equal(half.liquidity, 5n * 10n ** 14n);
+  assert.equal(half.burn, false);
+  assert.equal(half.amount0Min, (half.expected0 * 9900n) / 10000n);
+  assert.throws(() => planRemove(p, 0), /Invalid share/);
+  assert.throws(() => planRemove(p, 101), /Invalid share/);
+});
+
+test("buildRemoveBatch: decrease → collect to the manager → unwrap WETH → sweep USDC → burn, all to the Safe", () => {
+  const p = position(10n ** 15n);
+  const plan = planRemove(p, 100);
+  const [op] = buildRemoveBatch(p, plan, SAFE, 1_900_000_000, WETH_SEPOLIA);
+  assert.equal(op.to, POSITION_MANAGER_SEPOLIA);
+  assert.equal(op.value, "0");
+  const [calls] = npm.decodeFunctionData("multicall", op.data);
+  const parsed = calls.map((c: string) => npm.parseTransaction({ data: c })!);
+  assert.deepEqual(parsed.map((c: any) => c.name), ["decreaseLiquidity", "collect", "unwrapWETH9", "sweepToken", "burn"]);
+  assert.equal(parsed[0].args[0].liquidity, 10n ** 15n);
+  assert.equal(parsed[0].args[0].amount0Min, plan.amount0Min);
+  assert.equal(parsed[1].args[0].recipient, ethers.ZeroAddress); // collected to the manager, then unwrapped / swept
+  assert.equal(parsed[2].args[1].toLowerCase(), SAFE);
+  assert.equal(parsed[3].args[0], USDC_SEPOLIA);
+  assert.equal(parsed[3].args[2].toLowerCase(), SAFE);
+  assert.equal(String(parsed[4].args[0]), "1234");
+  // A partial removal keeps the position.
+  const [partial] = buildRemoveBatch(p, planRemove(p, 50), SAFE, 1_900_000_000, WETH_SEPOLIA);
+  const names = npm.decodeFunctionData("multicall", partial.data)[0].map((c: string) => npm.parseTransaction({ data: c })!.name);
+  assert.ok(!names.includes("burn"));
 });
 
 console.log(`\n${passed} passed`);

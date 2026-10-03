@@ -41,6 +41,7 @@ const EXAMPLES = [
   'Swap 2 USDC for ETH',
   'Send 5 USDC to vitalik.eth',
   'Fund my Safe with 0.01 ETH',
+  'Show my liquidity positions',
 ];
 
 // Statuses answered with plain text instead of a plan card.
@@ -370,12 +371,12 @@ function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing }) {
   const verdict = data.assessment?.verdict || 'UNKNOWN';
   const color = VERDICT_COLOR[verdict] || '#666';
   const triggered = data.assessment?.triggered || [];
-  const needsSign = !data.autoExecuted && (data.quoteData || data.sendData || data.depositData || data.lpData);
+  const needsSign = !data.autoExecuted && (data.quoteData || data.sendData || data.depositData || data.lpData || data.lpRemoveData);
   const isSwap = !!data.quoteData;
   const isDeposit = !!data.depositData;
   // Liquidity is added from the Safe, so it can only be approved through a server-held
   // approval (passkey / Telegram) — there is no "sign it in your wallet" path.
-  const isLp = !!data.lpData;
+  const isLp = !!(data.lpData || data.lpRemoveData);
   const method = data.assessment?.approvalMethod; // 'passkey' | 'ledger' | 'none'
   const usePasskey = needsSign && (method === 'passkey' || method === 'ledger') && passkeyReg && !!data.approval?.id;
 
@@ -385,7 +386,7 @@ function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing }) {
 
       {/* Plan summary */}
       {data.plan?.summary && (
-        <p style={{ margin: 0, fontSize: 15, color: '#E8E4DE' }}>
+        <p style={{ margin: 0, fontSize: 15, color: '#E8E4DE', whiteSpace: 'pre-line' }}>
           {data.plan.summary}
           {data.plan.totalEstimatedValueUsd > 0 && (
             <span style={{ color: '#777' }}> — ${Number(data.plan.totalEstimatedValueUsd).toFixed(2)}</span>
@@ -447,7 +448,7 @@ function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing }) {
             </button>
           ) : isLp ? (
             <span style={{ fontSize: 13, color: '#999', lineHeight: 1.5 }}>
-              Adding liquidity runs from your Safe: approve it with a passkey (add one top-right) or link Telegram, then ask again.
+              Liquidity runs from your Safe: approve it with a passkey (add one top-right) or link Telegram, then ask again.
             </span>
           ) : (
             <button onClick={onExecute} disabled={signing} style={approveBtn(signing)}>

@@ -43,3 +43,9 @@ export function lookupToken(raw: unknown): TokenDef | null {
   const symbol = ALIASES[key];
   return symbol ? TOKENS[symbol] : null;
 }
+
+/** The ERC-20 registry token at an address (WETH, not native ETH, for the WETH address). */
+export function tokenByAddress(address: string): TokenDef | null {
+  const a = address.toLowerCase();
+  return Object.values(TOKENS).find((t) => !t.native && t.address.toLowerCase() === a) ?? null;
+}

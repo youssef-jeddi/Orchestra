@@ -14,7 +14,7 @@ import { estimateUsd, resolveValuationSymbol } from "./prices";
 
 export type Verdict = "AUTO_EXECUTE" | "NEEDS_APPROVAL" | "BLOCKED" | "INFO";
 
-export type IntentType = "swap" | "send" | "add_liquidity" | "deposit" | "balance" | "unknown";
+export type IntentType = "swap" | "send" | "add_liquidity" | "remove_liquidity" | "deposit" | "balance" | "unknown";
 
 export const DEFAULT_DAILY_LIMIT = 100;
 
@@ -31,6 +31,7 @@ export function detectIntentType(steps: any[]): IntentType {
   if (action === "swap") return "swap";
   if (action === "send") return "send";
   if (action === "add_liquidity") return "add_liquidity";
+  if (action === "remove_liquidity") return "remove_liquidity";
   if (action === "balance") return "balance";
   return "unknown";
 }

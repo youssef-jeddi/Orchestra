@@ -115,6 +115,24 @@ function decode(a: PendingApproval): { title: string; details: ReviewDetail[] } 
     );
     return { title: `Add liquidity: ${tA.symbol}/${tB.symbol} ${fee / 10000}%`, details };
   }
+
+  if (a.intentType === "remove_liquidity") {
+    const d = (a.execution as any)?.lpRemoveData;
+    const t0 = d && typeof d.token0 === "string" ? tokenAt(d.token0) : null;
+    const t1 = d && typeof d.token1 === "string" ? tokenAt(d.token1) : null;
+    const percent = Number(d?.percent);
+    if (!t0 || !t1 || !/^\d+$/.test(String(d.tokenId)) || !(percent > 0 && percent <= 100)) return null;
+    const shown = (t: TokenDef) => (t.symbol === "WETH" ? "ETH" : t.symbol); // unwrapped on the way out
+    return {
+      title: `Remove liquidity: ${shown(t0)}/${shown(t1)} ${Number(d.fee) / 10000}%`,
+      details: [
+        { label: "Position", value: `#${d.tokenId}` },
+        { label: "Share removed", value: percent === 100 ? "all of it (the empty position is closed)" : `${percent}%` },
+        { label: "You get back", value: `${shown(t0)} and ${shown(t1)} at the pool's current price, plus the fees earned` },
+        { label: "Goes to", value: "your Safe" },
+      ],
+    };
+  }
   return null;
 }
 

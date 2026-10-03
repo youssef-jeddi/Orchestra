@@ -60,3 +60,9 @@
 {"id":"deposit-03","tags":["deposit","usd"],"message":"top up the safe with $10 of ETH","expect":{"type":"actions","steps":[{"action":"deposit","token":"ETH","amount":"10","unit":"usd"}]}}
 {"id":"deposit-04","tags":["deposit","relative"],"message":"put all my usdc in my safe","expect":{"type":"actions","steps":[{"action":"deposit","token":"USDC","amount":"all","unit":"token"}]}}
 {"id":"deposit-05","tags":["deposit","clarify"],"message":"fund my safe","expect":{"type":"clarify"}}
+{"id":"lp-add-01","tags":["liquidity"],"message":"add liquidity with 2 usdc and 0.0005 eth","expect":{"type":"actions","steps":[{"action":"add_liquidity","tokenA":"USDC","amountA":"2","tokenB":"ETH","amountB":"0.0005"}]}}
+{"id":"lp-remove-01","tags":["liquidity"],"message":"remove my liquidity","expect":{"type":"actions","steps":[{"action":"remove_liquidity","amount":"all"}]}}
+{"id":"lp-remove-02","tags":["liquidity"],"message":"withdraw half my usdc/eth position","expect":{"type":"actions","steps":[{"action":"remove_liquidity","amount":"50%","tokenA":"USDC","tokenB":"ETH"}]}}
+{"id":"lp-remove-03","tags":["liquidity"],"message":"remove liquidity from position 1234","expect":{"type":"actions","steps":[{"action":"remove_liquidity","amount":"all","positionId":"1234"}]}}
+{"id":"lp-remove-04","tags":["liquidity","clarify"],"message":"remove 10 usdc of liquidity","expect":{"type":"clarify"}}
+{"id":"lp-positions-01","tags":["liquidity","read"],"message":"show my liquidity positions","expect":{"type":"actions","steps":[{"action":"positions"}]}}

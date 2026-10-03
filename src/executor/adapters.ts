@@ -14,7 +14,12 @@ import crypto from "crypto";
 import { WETH_SEPOLIA, USDC_SEPOLIA } from "../integrations/uniswap/types";
 import { checkApproval } from "../integrations/uniswap/api";
 import { fetchQuoteWithRouting } from "../integrations/uniswap/routing";
-import { readPool, orderSides, lpPriceProblem, planMint, buildMintBatch, type LpSide, type PoolState } from "../integrations/uniswap/liquidity";
+import {
+  readPool, orderSides, lpPriceProblem, planMint, buildMintBatch,
+  readPositions, planRemove, buildRemoveBatch, positionOwner,
+  type LpSide, type PoolState,
+} from "../integrations/uniswap/liquidity";
+import { tokenByAddress } from "../intent/tokens";
 import { TOKEN_DECIMALS, toTokenWei, symbolFromAddress, estimateUsd, checkSwapQuote, formatTokenAmount, type QuoteCheck } from "../policy";
 
 /** Uniswap's native-ETH sentinel. A WETH address would pull ERC-20 the Safe may not hold. */
@@ -300,6 +305,54 @@ const addLiquidityAdapter: IntentAdapter = {
   },
 };
 
+// ─── remove_liquidity — withdraw a share of a position, from the Safe ───
+// The resolver picked the position and previewed the amounts. Execution re-reads
+// it (it may have changed since), checks the Safe still owns it, and runs
+// decreaseLiquidity → collect (with fees) → unwrap WETH / sweep → burn if emptied.
+const removeLiquidityAdapter: IntentAdapter = {
+  kind: "remove_liquidity",
+  async build(ctx) {
+    if (!ctx.safeAddress) return { refusal: "Liquidity positions live in your Safe, and you don't have one yet." };
+    const p = ctx.params;
+    const lpRemoveData = {
+      tokenId: String(p.tokenId), percent: Number(p.percent),
+      token0: p.token0, token1: p.token1, symbol0: p.symbol0, symbol1: p.symbol1, fee: Number(p.fee),
+    };
+    return {
+      plan: { id: crypto.randomUUID(), summary: ctx.planSummary, steps: ctx.planSteps, totalEstimatedValueUsd: ctx.totalEstimatedValueUsd },
+      payload: { lpRemoveData },
+    };
+  },
+
+  async execute(ctx, built) {
+    const d = (built.payload as any)?.lpRemoveData;
+    if (!d || !ctx.safeAddress) return null;
+    const agentKey = process.env.AGENT_PRIVATE_KEY;
+    if (!agentKey) throw new Error("AGENT_PRIVATE_KEY not set");
+
+    const owner = await positionOwner(ctx.provider, d.tokenId).catch(() => null);
+    if (!owner || owner.toLowerCase() !== ctx.safeAddress.toLowerCase()) {
+      throw new Error(`Position #${d.tokenId} is no longer held by your Safe.`);
+    }
+    const position = (await readPositions(ctx.provider, ctx.safeAddress, tokenByAddress)).find((x) => x.tokenId === d.tokenId);
+    if (!position || position.liquidity === 0n) throw new Error(`Position #${d.tokenId} has no liquidity left to remove.`);
+    if (position.token0.address.toLowerCase() !== String(d.token0).toLowerCase() || position.token1.address.toLowerCase() !== String(d.token1).toLowerCase()) {
+      throw new Error(`Position #${d.tokenId} doesn't hold the approved tokens.`);
+    }
+
+    const plan = planRemove(position, d.percent);
+    const batch = buildRemoveBatch(position, plan, ctx.safeAddress, Math.floor(Date.now() / 1000) + 20 * 60, WETH_SEPOLIA);
+    console.log(`[adapter:remove_liquidity] EXECUTE via Safe ${ctx.safeAddress}: ${d.percent}% of #${d.tokenId}${plan.burn ? " (+ burn)" : ""}`);
+    const { executeBatchViaSafe } = await import("../integrations/safe/transaction");
+    const txHash = await executeBatchViaSafe(ctx.safeAddress, agentKey, batch, "600000");
+
+    const tradeId = crypto.randomUUID();
+    const { logTradeResult } = await import("./logResult");
+    logTradeResult(tradeId, txHash, "success").catch(() => {});
+    return { txHash, explorerUrl: `https://sepolia.etherscan.io/tx/${txHash}`, tradeId };
+  },
+};
+
 // ─── swap — fetch Uniswap quote, optionally auto-execute via Safe ───
 const swapAdapter: IntentAdapter = {
   kind: "swap",
@@ -420,6 +473,7 @@ const REGISTRY: Record<string, IntentAdapter> = {
   [sendAdapter.kind]: sendAdapter,
   [depositAdapter.kind]: depositAdapter,
   [addLiquidityAdapter.kind]: addLiquidityAdapter,
+  [removeLiquidityAdapter.kind]: removeLiquidityAdapter,
   [swapAdapter.kind]: swapAdapter,
 };
 

@@ -38,7 +38,7 @@ export interface InterpretResult {
   planner: PlanResult;
 }
 
-const VALUE_BEARING = new Set(["swap", "send", "add_liquidity", "deposit"]);
+const VALUE_BEARING = new Set(["swap", "send", "add_liquidity", "remove_liquidity", "deposit"]);
 
 export async function interpretIntent(
   message: string,

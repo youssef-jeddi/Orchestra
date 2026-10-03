@@ -8,6 +8,7 @@ import { sanitizeHistory } from "./planner";
 import { assessAction } from "./pipeline";
 import { setPrices } from "../policy";
 import { WETH_SEPOLIA, USDC_SEPOLIA } from "../integrations/uniswap/types";
+import { amountsForLiquidity, type Position } from "../integrations/uniswap/liquidity";
 
 setPrices({ ETH: 2500, WETH: 2500, USDC: 1 });
 
@@ -197,6 +198,59 @@ test("assessAction: a deposit is signed by the wallet and ignores the agent limi
   assert.equal(d.verdict, "NEEDS_APPROVAL");
   assert.equal(d.approvalMethod, "wallet");
   assert.deepEqual(d.triggered, []);
+});
+
+// ── Liquidity positions ──
+const posAt = (tokenId: string, liquidity: bigint, owed = 0n): Position => {
+  const tick = Math.round(Math.log(1e12 / 2500) / Math.log(1.0001)); // WETH ≈ 2,500 USDC
+  const sqrtPriceX96 = BigInt(Math.round(Math.sqrt(1.0001 ** tick) * 2 ** 96));
+  return {
+    tokenId, token0: { address: USDC_SEPOLIA, symbol: "USDC", decimals: 6 }, token1: { address: WETH_SEPOLIA, symbol: "WETH", decimals: 18 },
+    fee: 3000, tickLower: -887220, tickUpper: 887220, liquidity, fullRange: true,
+    ...amountsForLiquidity(sqrtPriceX96, -887220, 887220, liquidity), owed0: owed, owed1: 0n, sqrtPriceX96,
+  };
+};
+// Liquidity worth ≈25 USDC + ≈0.01 WETH at the fair price.
+const L25 = BigInt(Math.floor(25_000_000 * Math.sqrt(1.0001 ** Math.round(Math.log(1e12 / 2500) / Math.log(1.0001)))));
+const lpCtx = (positions: Position[] | null) => ctx({ getPositions: async () => positions });
+
+test("resolve: positions lists each with its current value (WETH shown as ETH)", async () => {
+  const r = await resolveSteps([step({ action: "positions" })], lpCtx([posAt("7", L25, 5n)]));
+  const s = (r as any).steps[0];
+  assert.equal(s.action, "positions");
+  assert.match(s.summary, /You have 1 liquidity position:\n#7 USDC\/ETH 0\.3% \(full range\): ≈25 USDC \+ ≈0\.01 ETH, plus fees earned/);
+  const none = await resolveSteps([step({ action: "positions" })], lpCtx([]));
+  assert.equal((none as any).steps[0].summary, "You don't have any liquidity positions in your Safe.");
+  assert.equal((await resolveSteps([step({ action: "positions" })], lpCtx(null))).kind, "clarify");
+});
+
+test("resolve: remove liquidity picks the only matching position; share defaults to all", async () => {
+  const r = await resolveSteps([step({ action: "remove_liquidity", tokenA: "USDC", tokenB: "ETH" })], lpCtx([posAt("7", L25)]));
+  assert.equal(r.kind, "ok");
+  const s = (r as any).steps[0];
+  assert.equal(s.plan.action, "remove_liquidity");
+  assert.deepEqual({ id: s.plan.params.tokenId, pct: s.plan.params.percent }, { id: "7", pct: 100 });
+  assert.match(s.summary, /^Remove all of liquidity position #7 \(USDC\/ETH 0\.3%\): ≈25 USDC \+ ≈0\.01 ETH back to your Safe, plus fees earned$/);
+  assert.ok(Math.abs(s.valueUsd - 50) < 1, String(s.valueUsd));
+  const half = await resolveSteps([step({ action: "remove_liquidity", amount: "50%" })], lpCtx([posAt("7", L25)]));
+  assert.equal((half as any).steps[0].plan.params.percent, 50);
+});
+
+test("resolve: several positions → ask which; a position number picks one", async () => {
+  const two = [posAt("7", L25), posAt("9", L25 * 2n)];
+  const ask = await resolveSteps([step({ action: "remove_liquidity" })], lpCtx(two));
+  assert.equal(ask.kind, "clarify");
+  assert.match((ask as any).question, /Which position\?[\s\S]*#7[\s\S]*#9/);
+  const pick = await resolveSteps([step({ action: "remove_liquidity", positionId: 9 })], lpCtx(two));
+  assert.equal((pick as any).steps[0].plan.params.tokenId, "9");
+  assert.equal((await resolveSteps([step({ action: "remove_liquidity", positionId: "42" })], lpCtx(two))).kind, "clarify");
+});
+
+test("resolve: remove liquidity with nothing to remove, or a token amount instead of a share", async () => {
+  assert.equal((await resolveSteps([step({ action: "remove_liquidity" })], lpCtx([]))).kind, "unsupported");
+  assert.equal((await resolveSteps([step({ action: "remove_liquidity" })], lpCtx([posAt("7", 0n, 5n)]))).kind, "unsupported"); // fees only, no liquidity
+  const amount = await resolveSteps([step({ action: "remove_liquidity", amount: "10" })], lpCtx([posAt("7", L25)]));
+  assert.match((amount as any).question, /What share of the position/);
 });
 
 test("resolve: balance without a wallet → clarify", async () => {

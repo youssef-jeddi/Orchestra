@@ -21,6 +21,8 @@ import { detectExistingSafe } from "../safe/detect";
 import { setInitialSpendingLimits, updateSpendingLimit, buildLimitUpdateTx } from "../safe/spendingLimit";
 import { getAgentAddress } from "../safe/agentWallet";
 import { limitTxProblem } from "../safe/verifyLimitTx";
+import { readPositions, type Position } from "../uniswap/liquidity";
+import { tokenByAddress } from "../../intent/tokens";
 import { executePlan } from "../../executor";
 import {
   computeHabitProfile,
@@ -355,10 +357,15 @@ app.post("/intent", async (req, res) => {
 
     // The wallet's own balance only matters for deposits into the Safe — fetch it on demand.
     let walletBalancesP: Promise<Balances | null> | null = null;
+    let positionsP: Promise<Position[] | null> | null = null;
     const { outcome, planner } = await interpretIntent(message.trim(), sanitizeHistory(history), {
       connected: !!wallet,
       getBalances: () => balancesP,
       getWalletBalances: () => (walletBalancesP ??= wallet ? fetchBalances(provider, wallet) : Promise.resolve(null)),
+      // The Safe's liquidity positions, only read when a message asks about them.
+      getPositions: () => (positionsP ??= safeP.then((safe) => safe
+        ? withTimeout(readPositions(provider, safe, tokenByAddress).catch(() => null), 10_000, null)
+        : ([] as Position[]))),
       resolveEns: resolveEnsName,
     });
     const timing = () => ({ totalMs: Date.now() - started, plannerMs: planner.latencyMs, model: planner.model });
@@ -392,7 +399,7 @@ app.post("/intent", async (req, res) => {
         .join(" · ");
       res.json({
         status: "ok",
-        intentType: wantsBalance ? "balance" : "price",
+        intentType: wantsBalance ? "balance" : outcome.steps.some((s) => s.action === "positions") ? "positions" : "price",
         autoExecuted: false,
         safeAddress,
         plan: { id: crypto.randomUUID(), summary, steps: [], totalEstimatedValueUsd: 0 },
@@ -563,6 +570,7 @@ function approvalExecution(intentType: string, payload: Record<string, unknown> 
   if (intentType === "swap" && payload?.quoteData) return { quoteData: payload.quoteData };
   if (intentType === "send" && payload?.sendData) return { sendData: payload.sendData };
   if (intentType === "add_liquidity" && payload?.lpData) return { lpData: payload.lpData };
+  if (intentType === "remove_liquidity" && payload?.lpRemoveData) return { lpRemoveData: payload.lpRemoveData };
   return null;
 }
 

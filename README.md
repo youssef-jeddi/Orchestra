@@ -1,6 +1,6 @@
 # Orchestra
 
-An AI financial agent that manages your onchain portfolio through natural language. Talk to it like an assistant — *"swap 10 USDC for ETH"*, *"send 0.5 ETH to vitalik.eth"*, *"fund my Safe with 0.01 ETH"*, *"what's my balance?"* — and it handles the rest. Small, routine transactions execute instantly from your Safe; anything risky waits for your approval, which you can confirm on your phone after seeing exactly what will execute.
+An AI financial agent that manages your onchain portfolio through natural language. Talk to it like an assistant — *"swap 10 USDC for ETH"*, *"send 0.5 ETH to vitalik.eth"*, *"fund my Safe with 0.01 ETH"*, *"add liquidity with 25 USDC and 0.01 ETH"*, *"what's my balance?"* — and it handles the rest. Small, routine transactions execute instantly from your Safe; anything risky waits for your approval, which you can confirm on your phone after seeing exactly what will execute.
 
 The LLM only **interprets** what you asked. Whether funds move is decided by deterministic, tested code — the model can't approve anything.
 
@@ -40,12 +40,12 @@ Built for **ETHGlobal Cannes 2026**. Runs on the Sepolia testnet.
 
 Every chat message goes through `POST /intent` (`src/intent/`):
 
-1. **Planner** (`planner.ts`, `prompt.ts`, `schema.ts`) — one LLM call turns the message and recent conversation into JSON: `actions` (swap, send, deposit, balance, price, add_liquidity), `clarify`, `reply` or `unsupported`. The output is validated against a strict Zod schema; an invalid reply gets one repair retry with the concrete errors, then the user is asked to rephrase. Unvalidated model output never reaches the rest of the pipeline.
+1. **Planner** (`planner.ts`, `prompt.ts`, `schema.ts`) — one LLM call turns the message and recent conversation into JSON: `actions` (swap, send, deposit, add_liquidity, remove_liquidity, balance, price, positions), `clarify`, `reply` or `unsupported`. The output is validated against a strict Zod schema; an invalid reply gets one repair retry with the concrete errors, then the user is asked to rephrase. Unvalidated model output never reaches the rest of the pipeline.
 2. **Resolver** (`resolve.ts`) — turns the plan into exact values: token symbols → registry addresses, ENS → address, `"all"` / `"50%"` / `"$20"` → exact amounts. It **rejects amounts above your balance** before anything is built (no failed transaction, no wasted gas), keeps a little ETH for gas where your wallet pays it, and writes the summary from the resolved values — so what you approve is what executes. Anything ambiguous becomes a clarifying question, not a guess.
 3. **Policy** (`src/policy/`) — `decide()` computes the verdict from scratch, with no LLM input. See [Risk policy](#risk-policy).
-4. **Adapter** (`src/executor/adapters.ts`) — builds the transaction. Swaps fetch a Uniswap quote (v3 and v4 routes, native-ETH pools included) and are **refused if the quote returns more than 5% below market value** at the reference price feed (thin or mispriced pools — common on testnets). Liquidity mints a **full-range Uniswap v3 position** from the Safe, and is refused when the pool's price is more than 5% from market (depositing at a wrong price hands value to arbitrageurs). Auto-approved swaps, sends and liquidity execute through the Safe with the agent wallet; deposits are only ever signed by your own wallet.
+4. **Adapter** (`src/executor/adapters.ts`) — builds the transaction. Swaps fetch a Uniswap quote (v3 and v4 routes, native-ETH pools included) and are **refused if the quote returns more than 5% below market value** at the reference price feed (thin or mispriced pools — common on testnets). Liquidity mints a **full-range Uniswap v3 position** from the Safe, and is refused when the pool's price is more than 5% from market (depositing at a wrong price hands value to arbitrageurs). Removing liquidity finds the Safe's positions (asking which one when several match), withdraws a share or all of it together with the fees earned, and returns WETH as ETH; it isn't price-guarded, since refusing would only trap the funds. Auto-approved swaps, sends and liquidity execute through the Safe with the agent wallet; deposits are only ever signed by your own wallet.
 
-Read-only requests (balance, price) and conversational replies return straight after the planner and resolver.
+Read-only requests (balance, price, liquidity positions) and conversational replies return straight after the planner and resolver.
 
 ---
 
@@ -106,6 +106,7 @@ Once a wallet links Telegram, its risky transactions can only be approved there 
 - Uniswap Trading API with Permit2; v3 and v4 routes (native-ETH pools included)
 - Quote sanity check against the reference price feed before anything is signed or executed
 - Full-range v3 liquidity positions from the Safe (*"add liquidity with 25 USDC and 0.01 ETH"*): exact-amount approvals reset after the mint, native ETH wrapped and refunded, position NFT held by the Safe
+- Positions and removal (*"show my liquidity positions"*, *"withdraw half my USDC/ETH position"*, *"remove liquidity from #1234"*): decrease + collect fees in one call, WETH unwrapped to ETH, the NFT burned when emptied
 - Sepolia USDC / WETH / ETH
 
 ### Ledger — Hardware security
@@ -205,7 +206,7 @@ npm test                 # policy, intent, approvals, Telegram, auth, passkey an
 npm run eval             # score the planner + policy against labelled datasets
 ```
 
-`eval/run.ts` runs two suites: **parsing** (62 messages → expected structured plans, including typos, multi-turn answers and deposits) and **risk** (34 scenarios → expected verdicts, including prompt injection and social engineering). It reports exact/type match, false auto-executions, over-escalation and model latency, and can compare the pipeline against the legacy planner (`--target new,legacy`) or other models (`--provider`, `--model`). Prices, ENS and storage are fixed, and model responses are cached in `eval/.cache` (`--replay` fails on a cache miss instead of calling the API).
+`eval/run.ts` runs two suites: **parsing** (68 messages → expected structured plans, including typos, multi-turn answers, deposits and liquidity) and **risk** (34 scenarios → expected verdicts, including prompt injection and social engineering). It reports exact/type match, false auto-executions, over-escalation and model latency, and can compare the pipeline against the legacy planner (`--target new,legacy`) or other models (`--provider`, `--model`). Prices, ENS and storage are fixed, and model responses are cached in `eval/.cache` (`--replay` fails on a cache miss instead of calling the API).
 
 ---
 
@@ -224,7 +225,7 @@ src/
 │   ├── quoteCheck.ts        # swap quote vs market guard
 │   ├── store.ts             # per-wallet policy + activity (0G, cached)
 │   └── prices.ts, priceFeed.ts
-├── executor/adapters.ts     # swap · send · deposit · add_liquidity · balance
+├── executor/adapters.ts     # swap · send · deposit · add / remove liquidity · balance
 ├── approvals/               # server-held approvals + clear-text description
 ├── auth/                    # EIP-712 login, HMAC session tokens
 ├── integrations/
@@ -232,7 +233,7 @@ src/
 │   ├── llm/                 # Groq / Claude completion client (with eval cache)
 │   ├── passkey/             # WebAuthn: desktop + phone passkeys, phone setup links
 │   ├── telegram/            # approval bot (linking, messages, long polling)
-│   ├── uniswap/             # Trading API client, routing (v3 + v4), full-range liquidity
+│   ├── uniswap/             # Trading API client, routing (v3 + v4), liquidity (add, positions, remove)
 │   ├── safe/                # deployment, spending limits, Safe transactions
 │   └── zero-g/              # 0G storage (+ in-memory fallback), 0G compute
 ├── agents/                  # agent runtime: Watcher + legacy planner (0G Compute)

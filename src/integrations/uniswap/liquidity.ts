@@ -27,6 +27,15 @@ export const NPM_ABI = [
   "function mint((address token0,address token1,uint24 fee,int24 tickLower,int24 tickUpper,uint256 amount0Desired,uint256 amount1Desired,uint256 amount0Min,uint256 amount1Min,address recipient,uint256 deadline)) payable returns (uint256 tokenId,uint128 liquidity,uint256 amount0,uint256 amount1)",
   "function multicall(bytes[] data) payable returns (bytes[] results)",
   "function refundETH() payable",
+  "function positions(uint256 tokenId) view returns (uint96 nonce,address operator,address token0,address token1,uint24 fee,int24 tickLower,int24 tickUpper,uint128 liquidity,uint256 feeGrowthInside0LastX128,uint256 feeGrowthInside1LastX128,uint128 tokensOwed0,uint128 tokensOwed1)",
+  "function balanceOf(address owner) view returns (uint256)",
+  "function tokenOfOwnerByIndex(address owner,uint256 index) view returns (uint256)",
+  "function ownerOf(uint256 tokenId) view returns (address)",
+  "function decreaseLiquidity((uint256 tokenId,uint128 liquidity,uint256 amount0Min,uint256 amount1Min,uint256 deadline)) payable returns (uint256 amount0,uint256 amount1)",
+  "function collect((uint256 tokenId,address recipient,uint128 amount0Max,uint128 amount1Max)) payable returns (uint256 amount0,uint256 amount1)",
+  "function unwrapWETH9(uint256 amountMinimum,address recipient) payable",
+  "function sweepToken(address token,uint256 amountMinimum,address recipient) payable",
+  "function burn(uint256 tokenId) payable",
 ];
 const npm = new ethers.Interface(NPM_ABI);
 const erc20 = new ethers.Interface(["function approve(address spender, uint256 amount) returns (bool)"]);
@@ -161,4 +170,154 @@ export function buildMintBatch(plan: MintPlan, recipient: string, deadline: numb
     }
   }
   return batch;
+}
+
+// ═══ Removing liquidity ═══
+// Positions are read from the position manager (the Safe owns the NFTs). A
+// removal withdraws a share of the liquidity and collects it together with the
+// fees earned, in one multicall; WETH comes back as native ETH, the way the Safe
+// holds it. Removing everything also burns the empty NFT. No price guard here:
+// refusing would only trap funds in a mispriced pool — the minimum amounts
+// still protect against price moves between preview and execution.
+
+const MAX_UINT128 = (1n << 128n) - 1n;
+const MAX_POSITIONS = 20;
+
+export interface PositionToken {
+  address: string;
+  symbol: string;
+  decimals: number;
+}
+
+export interface Position {
+  tokenId: string;
+  token0: PositionToken;
+  token1: PositionToken;
+  fee: number;
+  tickLower: number;
+  tickUpper: number;
+  liquidity: bigint;
+  fullRange: boolean;
+  /** Current underlying amounts at the pool's price (smallest unit), fees excluded. */
+  amount0: bigint;
+  amount1: bigint;
+  /** Fees already credited to the position (more accrue until collected). */
+  owed0: bigint;
+  owed1: bigint;
+  sqrtPriceX96: bigint;
+}
+
+const sqrtAtTick = (tick: number) => Math.sqrt(1.0001 ** tick);
+
+/** Token amounts (smallest unit) that `liquidity` represents between two ticks at the current price. */
+export function amountsForLiquidity(sqrtPriceX96: bigint, tickLower: number, tickUpper: number, liquidity: bigint): { amount0: bigint; amount1: bigint } {
+  const L = Number(liquidity);
+  const sqrtP = Number(sqrtPriceX96) / 2 ** 96;
+  const sqrtA = sqrtAtTick(tickLower);
+  const sqrtB = sqrtAtTick(tickUpper);
+  let a0 = 0;
+  let a1 = 0;
+  if (sqrtP <= sqrtA) a0 = (L * (sqrtB - sqrtA)) / (sqrtA * sqrtB);
+  else if (sqrtP >= sqrtB) a1 = L * (sqrtB - sqrtA);
+  else {
+    a0 = (L * (sqrtB - sqrtP)) / (sqrtP * sqrtB);
+    a1 = L * (sqrtP - sqrtA);
+  }
+  return { amount0: BigInt(Math.floor(a0)), amount1: BigInt(Math.floor(a1)) };
+}
+
+/**
+ * The owner's open positions whose tokens are known (e.g. from the token registry).
+ * Unknown-token and fully withdrawn (liquidity 0, nothing owed) positions are skipped.
+ */
+export async function readPositions(
+  provider: ethers.Provider,
+  owner: string,
+  tokenInfo: (address: string) => PositionToken | null
+): Promise<Position[]> {
+  const pm = new ethers.Contract(POSITION_MANAGER_SEPOLIA, NPM_ABI, provider);
+  const count = Math.min(Number(await pm.balanceOf(owner)), MAX_POSITIONS);
+  const ids: bigint[] = await Promise.all(Array.from({ length: count }, (_, i) => pm.tokenOfOwnerByIndex(owner, i)));
+  const pools = new Map<string, Promise<PoolState | null>>();
+  const out: Position[] = [];
+  for (const id of ids) {
+    const p = await pm.positions(id);
+    const token0 = tokenInfo(p.token0);
+    const token1 = tokenInfo(p.token1);
+    const liquidity = BigInt(p.liquidity);
+    const owed0 = BigInt(p.tokensOwed0);
+    const owed1 = BigInt(p.tokensOwed1);
+    if (!token0 || !token1 || (liquidity === 0n && owed0 === 0n && owed1 === 0n)) continue;
+    const fee = Number(p.fee);
+    const key = `${p.token0}:${p.token1}:${fee}`;
+    if (!pools.has(key)) pools.set(key, readPool(provider, p.token0, p.token1, fee));
+    const pool = await pools.get(key)!;
+    if (!pool) continue;
+    const tickLower = Number(p.tickLower);
+    const tickUpper = Number(p.tickUpper);
+    const full = fullRangeTicks(fee);
+    const { amount0, amount1 } = amountsForLiquidity(pool.sqrtPriceX96, tickLower, tickUpper, liquidity);
+    out.push({
+      tokenId: id.toString(), token0, token1, fee, tickLower, tickUpper, liquidity,
+      fullRange: tickLower === full.tickLower && tickUpper === full.tickUpper,
+      amount0, amount1, owed0, owed1, sqrtPriceX96: pool.sqrtPriceX96,
+    });
+  }
+  return out;
+}
+
+export interface RemovePlan {
+  tokenId: string;
+  liquidity: bigint; // to remove
+  amount0Min: bigint;
+  amount1Min: bigint;
+  expected0: bigint;
+  expected1: bigint;
+  burn: boolean;
+}
+
+/** Remove `percent` (1–100) of a position, with minimums `slippage` below the expected amounts. */
+export function planRemove(position: Position, percent: number, slippage = LP_SLIPPAGE): RemovePlan {
+  if (!(percent > 0 && percent <= 100)) throw new Error(`Invalid share ${percent}%`);
+  const liquidity = percent === 100 ? position.liquidity : (position.liquidity * BigInt(Math.round(percent * 100))) / 10_000n;
+  const { amount0, amount1 } = amountsForLiquidity(position.sqrtPriceX96, position.tickLower, position.tickUpper, liquidity);
+  const keep = BigInt(Math.round((1 - slippage) * 10_000));
+  return {
+    tokenId: position.tokenId, liquidity,
+    expected0: amount0, expected1: amount1,
+    amount0Min: (amount0 * keep) / 10_000n, amount1Min: (amount1 * keep) / 10_000n,
+    burn: percent === 100,
+  };
+}
+
+/**
+ * One multicall to the position manager: decreaseLiquidity → collect (withdrawn
+ * tokens + all fees). With a WETH side the tokens are collected to the position
+ * manager, WETH is unwrapped to ETH and the other token swept, all to `recipient`.
+ */
+export function buildRemoveBatch(position: Position, plan: RemovePlan, recipient: string, deadline: number, weth: string): Array<{ to: string; value: string; data: string }> {
+  const calls: string[] = [];
+  if (plan.liquidity > 0n) {
+    calls.push(npm.encodeFunctionData("decreaseLiquidity", [{
+      tokenId: plan.tokenId, liquidity: plan.liquidity,
+      amount0Min: plan.amount0Min, amount1Min: plan.amount1Min, deadline,
+    }]));
+  }
+  const wethSide = [position.token0, position.token1].find((t) => t.address.toLowerCase() === weth.toLowerCase());
+  calls.push(npm.encodeFunctionData("collect", [{
+    tokenId: plan.tokenId, recipient: wethSide ? ethers.ZeroAddress : recipient,
+    amount0Max: MAX_UINT128, amount1Max: MAX_UINT128,
+  }]));
+  if (wethSide) {
+    const other = wethSide === position.token0 ? position.token1 : position.token0;
+    calls.push(npm.encodeFunctionData("unwrapWETH9", [0n, recipient]));
+    calls.push(npm.encodeFunctionData("sweepToken", [other.address, 0n, recipient]));
+  }
+  if (plan.burn) calls.push(npm.encodeFunctionData("burn", [plan.tokenId]));
+  return [{ to: POSITION_MANAGER_SEPOLIA, value: "0", data: npm.encodeFunctionData("multicall", [calls]) }];
+}
+
+/** The position's current owner (the Safe must still own it at execution). */
+export async function positionOwner(provider: ethers.Provider, tokenId: string): Promise<string> {
+  return new ethers.Contract(POSITION_MANAGER_SEPOLIA, NPM_ABI, provider).ownerOf(tokenId);
 }

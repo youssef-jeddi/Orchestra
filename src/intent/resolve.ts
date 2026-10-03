@@ -7,8 +7,9 @@
 
 import { ethers } from "ethers";
 import type { Balances } from "../executor/adapters";
-import { computePlanValueUsd, getPriceUsd, type IntentType } from "../policy";
+import { computePlanValueUsd, getPriceUsd, formatTokenAmount, type IntentType } from "../policy";
 import { lookupToken, SUPPORTED_SYMBOLS, type TokenDef } from "./tokens";
+import { planRemove, type Position } from "../integrations/uniswap/liquidity";
 import type { StepT } from "./schema";
 
 export interface ResolveContext {
@@ -18,6 +19,8 @@ export interface ResolveContext {
   getBalances(): Promise<Balances | null>;
   /** Balances of the connected wallet itself — the source of a deposit into the Safe. */
   getWalletBalances?(): Promise<Balances | null>;
+  /** The Safe's Uniswap liquidity positions ([] without a Safe, null if they couldn't be read). */
+  getPositions?(): Promise<Position[] | null>;
   resolveEns(name: string): Promise<string | null>;
 }
 
@@ -31,7 +34,7 @@ export interface PlanStep {
 }
 
 export interface ResolvedStep {
-  action: "swap" | "send" | "add_liquidity" | "deposit" | "balance" | "price";
+  action: "swap" | "send" | "add_liquidity" | "remove_liquidity" | "deposit" | "balance" | "price" | "positions";
   summary: string;
   plan: PlanStep;
   valueUsd: number;
@@ -158,6 +161,58 @@ async function resolveStep(step: StepT, order: number, ctx: ResolveContext): Pro
       };
     }
 
+    case "positions": {
+      if (!ctx.connected) throw clarify("Connect a wallet first so I can look up your liquidity positions.");
+      const positions = await loadPositions(ctx);
+      return { action: "positions", summary: describePositions(positions), plan: planStep("uniswap", "balance", {}, order), valueUsd: 0 };
+    }
+
+    case "remove_liquidity": {
+      if (!ctx.connected) throw clarify("Connect a wallet first so I can find your liquidity positions.");
+      const percent = sharePercent(step.amount);
+      const positions = await loadPositions(ctx);
+      const open = positions.filter((p) => p.liquidity > 0n);
+      const a = step.tokenA ? requireToken(step.tokenA) : null;
+      const b = step.tokenB ? requireToken(step.tokenB) : null;
+
+      let candidates: Position[];
+      if (step.positionId) {
+        candidates = open.filter((p) => p.tokenId === step.positionId);
+        if (candidates.length === 0) {
+          throw clarify(`I couldn't find an open position #${step.positionId} in your Safe. ${describePositions(positions)}`);
+        }
+      } else {
+        const holds = (p: Position, t: TokenDef) =>
+          [p.token0.address, p.token1.address].some((x) => x.toLowerCase() === t.address.toLowerCase());
+        candidates = open.filter((p) => (!a || holds(p, a)) && (!b || holds(p, b)));
+      }
+      if (candidates.length === 0) {
+        if (open.length === 0) throw unsupported("You don't have any liquidity positions in your Safe to remove.");
+        throw clarify(`None of your positions hold ${[a?.symbol, b?.symbol].filter(Boolean).join(" and ")}. ${describePositions(positions)}`);
+      }
+      if (candidates.length > 1) {
+        throw clarify(`Which position? ${candidates.map((p) => `\n${positionLine(p)}`).join("")}\nTell me its number, e.g. "remove liquidity from #${candidates[0].tokenId}".`);
+      }
+
+      const p = candidates[0];
+      const plan = planRemove(p, percent);
+      const back0 = Number(plan.expected0) / 10 ** p.token0.decimals;
+      const back1 = Number(plan.expected1) / 10 ** p.token1.decimals;
+      const valueUsd = back0 * getPriceUsd(p.token0.symbol) + back1 * getPriceUsd(p.token1.symbol);
+      const params = {
+        tokenId: p.tokenId, percent,
+        token0: p.token0.address, token1: p.token1.address,
+        symbol0: p.token0.symbol, symbol1: p.token1.symbol, fee: p.fee,
+      };
+      const share = percent === 100 ? "all" : `${percent}%`;
+      return {
+        action: "remove_liquidity",
+        summary: `Remove ${share} of liquidity position #${p.tokenId} (${pairName(p)}): ≈${formatTokenAmount(back0, shown(p.token0.symbol))} ${shown(p.token0.symbol)} + ≈${formatTokenAmount(back1, shown(p.token1.symbol))} ${shown(p.token1.symbol)} back to your Safe, plus fees earned`,
+        plan: planStep("uniswap", "remove_liquidity", params, order, "400000"),
+        valueUsd,
+      };
+    }
+
     case "add_liquidity": {
       const a = requireToken(step.tokenA);
       const b = requireToken(step.tokenB);
@@ -179,6 +234,43 @@ async function resolveStep(step: StepT, order: number, ctx: ResolveContext): Pro
       };
     }
   }
+}
+
+// ── Liquidity positions ──
+
+/** WETH comes back from a position as native ETH, so it's shown as ETH. */
+const shown = (symbol: string) => (symbol === "WETH" ? "ETH" : symbol);
+const pairName = (p: Position) => `${shown(p.token0.symbol)}/${shown(p.token1.symbol)} ${p.fee / 10000}%`;
+
+function positionLine(p: Position): string {
+  const a0 = Number(p.amount0) / 10 ** p.token0.decimals;
+  const a1 = Number(p.amount1) / 10 ** p.token1.decimals;
+  const range = p.fullRange ? "full range" : "custom range";
+  const fees = p.owed0 > 0n || p.owed1 > 0n ? ", plus fees earned" : "";
+  return `#${p.tokenId} ${pairName(p)} (${range}): ≈${formatTokenAmount(a0, shown(p.token0.symbol))} ${shown(p.token0.symbol)} + ≈${formatTokenAmount(a1, shown(p.token1.symbol))} ${shown(p.token1.symbol)}${fees}`;
+}
+
+function describePositions(positions: Position[]): string {
+  if (positions.length === 0) return "You don't have any liquidity positions in your Safe.";
+  const n = positions.length;
+  return `You have ${n} liquidity position${n === 1 ? "" : "s"}:${positions.map((p) => `\n${positionLine(p)}`).join("")}`;
+}
+
+async function loadPositions(ctx: ResolveContext): Promise<Position[]> {
+  const positions = ctx.getPositions ? await ctx.getPositions() : null;
+  if (!positions) throw clarify("I couldn't read your liquidity positions right now. Try again in a moment.");
+  return positions;
+}
+
+/** "all" / "max" → 100, "50%" → 50. A token amount isn't a share: ask. */
+function sharePercent(raw: string): number {
+  if (raw === "all" || raw === "max") return 100;
+  if (raw.endsWith("%")) {
+    const n = Number(raw.slice(0, -1));
+    if (n > 0 && n <= 100) return n;
+    throw clarify(`${raw} isn't a valid share. What percentage of the position should I remove?`);
+  }
+  throw clarify("What share of the position should I remove? Say \"all\" or a percentage like 50%.");
 }
 
 function requireToken(raw: string): TokenDef {
