@@ -5,18 +5,20 @@ import assert from "node:assert/strict";
 import { ethers } from "ethers";
 
 process.env.TELEGRAM_BOT_TOKEN = "test-token";
-// Stub the Bot API and record what's sent.
+// Stub the Bot API transport and record what's sent.
 const sent: { method: string; body: any }[] = [];
-globalThis.fetch = (async (url: string, init: any) => {
+let failNext = 0; // simulate dropped connections
+let apiError: string | null = null; // simulate an error answer from Telegram
+const stub = async (url: string, body: string) => {
   const method = String(url).split("/").pop()!;
-  sent.push({ method, body: JSON.parse(init?.body || "{}") });
-  return {
-    status: 200,
-    json: async () => ({ ok: true, result: method === "getMe" ? { username: "orchestra_test_bot" } : { message_id: 42 } }),
-  };
-}) as any;
+  sent.push({ method, body: JSON.parse(body || "{}") });
+  if (failNext > 0) { failNext--; throw Object.assign(new Error("socket hang up"), { code: "ECONNRESET" }); }
+  if (apiError) return { status: 400, text: JSON.stringify({ ok: false, description: apiError }) };
+  return { status: 200, text: JSON.stringify({ ok: true, result: method === "getMe" ? { username: "orchestra_test_bot" } : { message_id: 42 } }) };
+};
 
-import { linkRequest, confirmLink, sendApprovalMessage } from "./index";
+import { linkRequest, confirmLink, sendApprovalMessage, _setTransport } from "./index";
+_setTransport(stub);
 
 const owner = ethers.Wallet.createRandom();
 const attacker = ethers.Wallet.createRandom();
@@ -70,6 +72,24 @@ test("approval message: phone-passkey mode has only the review link and Reject �
     { text: "✖️ Reject", callback_data: "r:id-2" },
   ]);
   assert.ok(!kb.some((b: any) => String(b.callback_data).startsWith("a:")));
+});
+
+test("network failure: retried once, then a clear error; Telegram's own errors aren't retried", async () => {
+  sent.length = 0;
+  failNext = 1;
+  assert.equal(await sendApprovalMessage(7, "id-3", "<b>x</b>"), 42); // second attempt succeeds
+  assert.equal(sent.length, 2);
+
+  sent.length = 0;
+  failNext = 2;
+  await assert.rejects(sendApprovalMessage(7, "id-4", "<b>x</b>"), /Couldn't reach Telegram \(sendMessage: ECONNRESET\)/);
+  assert.equal(sent.length, 2);
+
+  sent.length = 0;
+  apiError = "Bad Request: chat not found";
+  await assert.rejects(sendApprovalMessage(7, "id-5", "<b>x</b>"), /chat not found/);
+  assert.equal(sent.length, 1); // no retry
+  apiError = null;
 });
 
 (async () => {

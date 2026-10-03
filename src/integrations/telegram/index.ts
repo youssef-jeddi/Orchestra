@@ -9,6 +9,7 @@
 // webhook URL is needed. Disabled unless TELEGRAM_BOT_TOKEN is set.
 
 import crypto from "crypto";
+import https from "https";
 import { ethers } from "ethers";
 import { read, write, deleteKey } from "../zero-g/storage";
 
@@ -20,23 +21,76 @@ export function telegramEnabled(): boolean {
   return !!process.env.TELEGRAM_BOT_TOKEN;
 }
 
-async function call<T = any>(method: string, body: Record<string, unknown> = {}, timeoutMs = 15_000): Promise<T> {
+/**
+ * One HTTPS request on its own fresh connection (agent: false). Deliberately not
+ * fetch(): Node's fetch pools and shares connections per host, and the long-poll
+ * getUpdates that is always in flight could leave every other Bot API call
+ * stuck behind it — sendMessage then hangs until the timeout.
+ */
+function postJson(url: string, body: string, timeoutMs: number): Promise<{ status: number; text: string }> {
+  return new Promise((resolve, reject) => {
+    const req = https.request(url, {
+      method: "POST",
+      agent: false,
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+    }, (res) => {
+      let text = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => (text += chunk));
+      res.on("end", () => resolve({ status: res.statusCode ?? 0, text }));
+      res.on("error", reject);
+    });
+    req.setTimeout(timeoutMs, () => req.destroy(Object.assign(new Error("timeout"), { name: "AbortError" })));
+    req.on("error", reject);
+    req.end(body);
+  });
+}
+
+type Transport = (url: string, body: string, timeoutMs: number) => Promise<{ status: number; text: string }>;
+let transport: Transport = postJson;
+
+/** Test hook: replace the HTTPS transport. */
+export function _setTransport(t: Transport): void {
+  transport = t;
+}
+
+async function callOnce<T>(method: string, body: Record<string, unknown>, timeoutMs: number): Promise<T> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) throw new Error("TELEGRAM_BOT_TOKEN is not set");
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const res = await transport(`${API}/bot${token}/${method}`, JSON.stringify(body), timeoutMs);
+  let data: { ok: boolean; result: T; description?: string };
   try {
-    const res = await fetch(`${API}/bot${token}/${method}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    const data = (await res.json()) as { ok: boolean; result: T; description?: string };
-    if (!data.ok) throw new Error(`Telegram ${method} failed: ${data.description || res.status}`);
-    return data.result;
-  } finally {
-    clearTimeout(timer);
+    data = JSON.parse(res.text);
+  } catch {
+    throw new TelegramApiError(`Telegram ${method} failed: HTTP ${res.status}`);
+  }
+  if (!data.ok) throw new TelegramApiError(`Telegram ${method} failed: ${data.description || res.status}`);
+  return data.result;
+}
+
+/** Telegram answered, with an error: retrying won't help. */
+class TelegramApiError extends Error {}
+
+/**
+ * One Bot API call. A network-level failure (timeout, dropped connection — e.g.
+ * a stale keep-alive socket after the laptop changed networks) is retried once;
+ * an error answer from Telegram is not. getUpdates isn't retried here: the
+ * polling loop already retries.
+ */
+async function call<T = any>(method: string, body: Record<string, unknown> = {}, timeoutMs = 10_000): Promise<T> {
+  const attempts = method === "getUpdates" ? 1 : 2;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await callOnce<T>(method, body, timeoutMs);
+    } catch (err: any) {
+      if (err instanceof TelegramApiError || (err?.message ?? "").includes("TELEGRAM_BOT_TOKEN")) throw err;
+      const reason = err?.name === "AbortError" ? `no answer within ${timeoutMs / 1000}s` : err?.code || err?.cause?.code || err?.message || "network error";
+      if (attempt < attempts) {
+        console.warn(`[telegram] ${method}: ${reason} — retrying`);
+        continue;
+      }
+      throw new Error(`Couldn't reach Telegram (${method}: ${reason}). Check the server's internet connection and try again.`);
+    }
   }
 }
 
