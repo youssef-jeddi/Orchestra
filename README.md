@@ -159,6 +159,7 @@ cp .env.example .env
 | `TELEGRAM_BOT_TOKEN` | Telegram approvals — create a bot with @BotFather |
 | `PUBLIC_APP_URL` | Phone passkey approvals — the frontend's public **https** address |
 | `PRIVY_APP_ID` | Sign-in with a passkey, email or any wallet (see below); without it, MetaMask + Ledger |
+| `PRIVY_APP_SECRET` | Lets passkey users approve with their sign-in passkey (server only) |
 | `SWAP_MAX_SHORTFALL` | Quote guard threshold (default `0.05`) |
 | `LP_MAX_PRICE_DEVIATION` | Liquidity price guard (default `0.05`; `off` for testnet demos, where pools are far from market) |
 | `SESSION_SECRET`, `SESSION_TTL_HOURS` | Only to share sessions across instances / change the 8h lifetime |
@@ -183,6 +184,7 @@ Newcomers sign up with a passkey (or email) and get a wallet without installing 
 1. Create an app at [dashboard.privy.io](https://dashboard.privy.io) and put its ID in `PRIVY_APP_ID` (the frontend reads it from the root `.env` too).
 2. In the dashboard: enable the **Passkey**, **Email** and **Wallet** login methods, turn on **identity tokens**, and add `http://localhost:3000` (and your public URL) to the allowed origins.
 3. Restart both servers; **Sign in** in `/simple` opens Privy's window.
+4. Optional: put the dashboard's app secret in `PRIVY_APP_SECRET` (backend only). A passkey user's sign-in passkey then also approves risky transactions; Privy creates it in our page, so it's bound to our domain and the server checks it against the public key in the user's Privy record. Without the secret they register a second passkey with **Add passkey**.
 
 ### Telegram and phone passkey approvals (optional)
 

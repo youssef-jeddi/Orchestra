@@ -18,6 +18,7 @@ import {
   generateAuthenticationOptions,
   verifyAuthenticationResponse,
 } from "@simplewebauthn/server";
+import { decodeCredentialPublicKey } from "@simplewebauthn/server/helpers";
 import { read, write } from "../zero-g/storage";
 
 export interface RelyingParty {
@@ -86,6 +87,8 @@ interface StoredCred {
   rpID: string;
   label: PasskeyLabel;
   createdAt?: string;
+  /** Where it was created when not registered here: the Privy sign-in passkey. */
+  source?: "privy";
 }
 
 const storeKey = (wallet: string) => `passkey:${wallet.toLowerCase()}`;
@@ -166,6 +169,42 @@ export async function verifyRegistration(
     rpID: rp.rpID,
     label: opts.label ?? "browser",
     createdAt: new Date().toISOString(),
+  });
+  await saveCreds(wallet, creds);
+  return true;
+}
+
+/**
+ * Add a passkey that was created outside our registration flow: the Privy
+ * sign-in passkey, which Privy creates in our page, so on our own domain. The
+ * public key must be a COSE key (base64 or base64url) and the id a credential
+ * id; anything else is refused, so a bad record fails closed. Returns whether
+ * the wallet now holds the credential.
+ */
+export async function addExternalCredential(
+  wallet: string,
+  cred: { id: string; publicKey: string; rpID: string; source: "privy" }
+): Promise<boolean> {
+  let id: string;
+  let publicKey: Uint8Array<ArrayBuffer>;
+  try {
+    id = Buffer.from(cred.id, "base64").toString("base64url"); // assertions report base64url ids
+    publicKey = new Uint8Array(Buffer.from(cred.publicKey, "base64"));
+    const cose = decodeCredentialPublicKey(publicKey);
+    if (!id || !(cose instanceof Map) || cose.get(1) === undefined || cose.get(3) === undefined) return false; // kty, alg
+  } catch {
+    return false;
+  }
+  const creds = await getCreds(wallet);
+  if (creds.some((c) => c.id === id && c.rpID === cred.rpID)) return true; // keep its counter
+  creds.push({
+    id,
+    publicKey: Buffer.from(publicKey).toString("base64"),
+    counter: 0,
+    rpID: cred.rpID,
+    label: "browser",
+    createdAt: new Date().toISOString(),
+    source: cred.source,
   });
   await saveCreds(wallet, creds);
   return true;

@@ -2,12 +2,45 @@
 // Run with `npm run test:privy`.
 
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import { ethers } from "ethers";
 import { generateKeyPair, SignJWT, type CryptoKey } from "jose";
+import { isoCBOR } from "@simplewebauthn/server/helpers";
 
 process.env.STORAGE_BACKEND = "memory";
 const APP_ID = "test-privy-app";
 process.env.PRIVY_APP_ID = APP_ID;
+
+const RP = { rpID: "localhost", origin: "http://localhost:3000" };
+
+/** A software passkey: a P-256 key like a phone's secure chip holds, signing WebAuthn assertions. */
+function softPasskey() {
+  const { privateKey, publicKey } = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const jwk = publicKey.export({ format: "jwk" });
+  const cose = isoCBOR.encode(new Map<number, number | Uint8Array>([
+    [1, 2], [3, -7], [-1, 1], // kty EC2, alg ES256, crv P-256
+    [-2, Buffer.from(jwk.x!, "base64url")], [-3, Buffer.from(jwk.y!, "base64url")],
+  ]));
+  const id = crypto.randomBytes(16).toString("base64url");
+  return {
+    id,
+    publicKey: Buffer.from(cose).toString("base64url"),
+    assert(challenge: string, origin = RP.origin, rpID = RP.rpID) {
+      const flags = Buffer.from([0x05]); // user present + verified
+      const authData = Buffer.concat([crypto.createHash("sha256").update(rpID).digest(), flags, Buffer.alloc(4)]);
+      const clientData = Buffer.from(JSON.stringify({ type: "webauthn.get", challenge, origin }));
+      const signature = crypto.sign("sha256", Buffer.concat([authData, crypto.createHash("sha256").update(clientData).digest()]), privateKey);
+      return {
+        id, rawId: id, type: "public-key", clientExtensionResults: {},
+        response: {
+          authenticatorData: authData.toString("base64url"),
+          clientDataJSON: clientData.toString("base64url"),
+          signature: signature.toString("base64url"),
+        },
+      };
+    },
+  };
+}
 
 const embedded = ethers.Wallet.createRandom().address;
 const external = ethers.Wallet.createRandom().address;
@@ -19,7 +52,9 @@ const test = (name: string, fn: () => void | Promise<void>) => tests.push([name,
 
 (async () => {
   const auth = await import("./index");
-  const { privyLogin, _setVerificationKey } = await import("./privy");
+  const { privyLogin, verifyPrivyUser, importPrivyPasskeys, _setVerificationKey, _setUserFetcher } = await import("./privy");
+  const passkey = await import("../integrations/passkey");
+  const storage = await import("../integrations/zero-g/storage");
   auth._setSecret("test-secret-test-secret-test-secret!");
 
   const privy = await generateKeyPair("ES256");
@@ -91,6 +126,71 @@ const test = (name: string, fn: () => void | Promise<void>) => tests.push([name,
     } finally {
       process.env.PRIVY_APP_ID = APP_ID;
     }
+  });
+
+  // ── Sign-in passkey → approval passkey ──
+  const signInKey = softPasskey();
+  const passkeyUser = async () => verifyPrivyUser(await idToken({ accounts: [
+    { type: "passkey", credential_id: signInKey.id, lv: 1 },
+    { type: "wallet", address: embedded, chain_type: "ethereum", wallet_client_type: "privy", id: "w1", lv: 1 },
+  ] }), embedded);
+  // What Privy's API returns for the user: the passkey with its public key.
+  const privyApi = (publicKey = signInKey.publicKey) => {
+    const calls: string[] = [];
+    _setUserFetcher(async (id) => {
+      calls.push(id);
+      return { id, linked_accounts: [{ type: "passkey", credential_id: signInKey.id, public_key: publicKey }] } as any;
+    });
+    return calls;
+  };
+
+  test("the sign-in passkey approves: its assertion over an approval challenge verifies", async () => {
+    await storage.clear();
+    const calls = privyApi();
+    assert.equal(await importPrivyPasskeys(await passkeyUser(), embedded, RP.rpID), 1);
+    assert.deepEqual(calls, ["did:privy:user1"]);
+    assert.equal(await passkey.hasPasskey(embedded), true);
+
+    const challenge = Buffer.from(crypto.randomBytes(32)).toString("base64url"); // stands in for the payload-hash challenge
+    assert.equal(await passkey.verifyAuthentication(embedded, signInKey.assert(challenge), challenge, RP), true);
+  });
+
+  test("another key, another challenge or another domain doesn't pass", async () => {
+    const challenge = crypto.randomBytes(32).toString("base64url");
+    const other = softPasskey();
+    const forged = { ...other.assert(challenge), id: signInKey.id, rawId: signInKey.id }; // claims the sign-in passkey's id
+    await assert.rejects(async () => assert.equal(await passkey.verifyAuthentication(embedded, forged, challenge, RP), true));
+    await assert.rejects(passkey.verifyAuthentication(embedded, signInKey.assert("other-challenge"), challenge, RP));
+    await assert.rejects(passkey.verifyAuthentication(embedded, signInKey.assert(challenge, "https://evil.example", "evil.example"), challenge, RP));
+  });
+
+  test("signing in again keeps one credential and its counter", async () => {
+    privyApi();
+    assert.equal(await importPrivyPasskeys(await passkeyUser(), embedded, RP.rpID), 1);
+    const stored = (await storage.read(`passkey:${embedded.toLowerCase()}`)) as any;
+    assert.equal(stored.creds.length, 1);
+    assert.equal(stored.creds[0].source, "privy");
+  });
+
+  test("a public key that isn't a COSE key is refused (fails closed)", async () => {
+    await storage.clear();
+    privyApi(Buffer.from("not a key").toString("base64url"));
+    assert.equal(await importPrivyPasskeys(await passkeyUser(), embedded, RP.rpID), 0);
+    assert.equal(await passkey.hasPasskey(embedded), false);
+  });
+
+  test("no passkey on the account, or no app secret: nothing is imported", async () => {
+    await storage.clear();
+    const calls = privyApi();
+    const walletUser = await verifyPrivyUser(await idToken(), external); // the default accounts have a passkey…
+    const noPasskey = { ...walletUser, linked_accounts: walletUser.linked_accounts.filter((a) => a.type !== "passkey") };
+    assert.equal(await importPrivyPasskeys(noPasskey, external, RP.rpID), 0);
+    assert.equal(calls.length, 0, "Privy's API isn't called for users without a passkey");
+
+    _setUserFetcher(null);
+    delete process.env.PRIVY_APP_SECRET;
+    assert.equal(await importPrivyPasskeys(await passkeyUser(), embedded, RP.rpID), 0);
+    assert.equal(await passkey.hasPasskey(embedded), false);
   });
 
   console.log("privy");

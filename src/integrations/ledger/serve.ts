@@ -32,8 +32,8 @@ import {
   type ActivityRecord,
 } from "../../policy";
 import { getPolicyProfile, getRecentActivity, recordActivity, readUserProfile, writeUserProfile } from "../../policy/store";
-import { loginRequest, login, requireSession, sessionWallet, AuthError } from "../../auth";
-import { privyLogin } from "../../auth/privy";
+import { loginRequest, login, issueToken, requireSession, sessionWallet, AuthError } from "../../auth";
+import { verifyPrivyUser, importPrivyPasskeys } from "../../auth/privy";
 import { getAdapter, type Balances } from "../../executor/adapters";
 import { interpretIntent, assessAction } from "../../intent/pipeline";
 import { sanitizeHistory } from "../../intent/planner";
@@ -929,11 +929,22 @@ app.post("/auth/login", (req, res) => {
 
 // Privy sign-in (passkey/email with an embedded wallet, or an external wallet):
 // the identity token proves the user owns the wallet, so no second signature.
+// A Privy sign-in passkey also becomes the wallet's approval passkey.
 app.post("/auth/privy", async (req, res) => {
   try {
     const { walletAddress, identityToken } = req.body || {};
-    const session = await privyLogin(identityToken, walletAddress);
+    const user = await verifyPrivyUser(identityToken, walletAddress);
+    const session = issueToken(walletAddress);
     console.log(`[auth] session issued for ${session.wallet} (Privy)`);
+    const rp = rpForOrigin(req.headers.origin);
+    if (rp) {
+      try {
+        const n = await importPrivyPasskeys(user, walletAddress, rp.rpID);
+        if (n) console.log(`[passkey] sign-in passkey ready for approvals on ${rp.rpID} (${session.wallet})`);
+      } catch (e: any) {
+        console.warn(`[passkey] couldn't load the Privy passkey for ${session.wallet}: ${e.message}`);
+      }
+    }
     res.json(session);
   } catch (e: any) { res.status(e instanceof AuthError ? e.status : 400).json({ error: e.message }); }
 });
