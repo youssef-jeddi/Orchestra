@@ -33,6 +33,7 @@ import {
 } from "../../policy";
 import { getPolicyProfile, getRecentActivity, recordActivity, readUserProfile, writeUserProfile } from "../../policy/store";
 import { loginRequest, login, requireSession, sessionWallet, AuthError } from "../../auth";
+import { privyLogin } from "../../auth/privy";
 import { getAdapter, type Balances } from "../../executor/adapters";
 import { interpretIntent, assessAction } from "../../intent/pipeline";
 import { sanitizeHistory } from "../../intent/planner";
@@ -910,6 +911,17 @@ app.post("/auth/login", (req, res) => {
     const { walletAddress, nonce, signature } = req.body || {};
     const session = login(walletAddress, nonce, signature);
     console.log(`[auth] session issued for ${session.wallet}`);
+    res.json(session);
+  } catch (e: any) { res.status(e instanceof AuthError ? e.status : 400).json({ error: e.message }); }
+});
+
+// Privy sign-in (passkey/email with an embedded wallet, or an external wallet):
+// the identity token proves the user owns the wallet, so no second signature.
+app.post("/auth/privy", async (req, res) => {
+  try {
+    const { walletAddress, identityToken } = req.body || {};
+    const session = await privyLogin(identityToken, walletAddress);
+    console.log(`[auth] session issued for ${session.wallet} (Privy)`);
     res.json(session);
   } catch (e: any) { res.status(e instanceof AuthError ? e.status : 400).json({ error: e.message }); }
 });
