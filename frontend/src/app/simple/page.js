@@ -88,11 +88,12 @@ function SimpleChat() {
   const [prices, setPrices] = useState(null);
   const [passkeyReg, setPasskeyReg] = useState(false);
 
-  // Check passkey registration when a wallet connects.
+  // Check passkey registration when a wallet connects, and again once signed in:
+  // a Privy sign-in passkey becomes the approval passkey during sign-in.
   useEffect(() => {
     if (!ledger.walletAddress) { setPasskeyReg(false); return; }
     getPasskeyStatus(ledger.walletAddress).then((d) => setPasskeyReg(!!d.registered)).catch(() => {});
-  }, [ledger.walletAddress]);
+  }, [ledger.walletAddress, session.ready]);
 
   // Live price ticker — refresh every 60s.
   useEffect(() => {

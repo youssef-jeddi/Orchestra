@@ -82,18 +82,21 @@ export function useSession(ledger) {
   }, [wallet, ledger]);
 
   // New wallet: reuse a stored token if the server still accepts it, else ask once.
+  // Privy wallets always get a fresh session: it costs no prompt, and signing in is
+  // when the server picks up the user's sign-in passkey for approvals.
   useEffect(() => {
     let alive = true;
     setSessionToken(null);
     if (!wallet) return;
 
-    const stored = loadToken(wallet);
+    const privy = viaPrivy(ledger);
+    const stored = privy ? null : loadToken(wallet);
     if (stored) {
       setSessionToken(stored.token);
       getSession()
         .then(() => { if (alive) { setExpiresAt(stored.expiresAt); setStatus('ready'); } })
         .catch(() => { if (alive) { dropToken(wallet); setStatus('none'); } });
-    } else if (autoTried.current !== wallet) {
+    } else if (privy || autoTried.current !== wallet) {
       autoTried.current = wallet;
       // Signing in is the side effect here; signIn only marks 'signing' before it awaits the server.
       signIn(); // eslint-disable-line react-hooks/set-state-in-effect
