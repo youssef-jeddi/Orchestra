@@ -158,6 +158,7 @@ cp .env.example .env
 | `LEDGER_APPROVAL=on` | Require a Ledger above the hardware threshold |
 | `TELEGRAM_BOT_TOKEN` | Telegram approvals — create a bot with @BotFather |
 | `PUBLIC_APP_URL` | Phone passkey approvals — the frontend's public **https** address |
+| `PRIVY_APP_ID` | Sign-in with a passkey, email or any wallet (see below); without it, MetaMask + Ledger |
 | `SWAP_MAX_SHORTFALL` | Quote guard threshold (default `0.05`) |
 | `LP_MAX_PRICE_DEVIATION` | Liquidity price guard (default `0.05`; `off` for testnet demos, where pools are far from market) |
 | `SESSION_SECRET`, `SESSION_TTL_HOURS` | Only to share sessions across instances / change the 8h lifetime |
@@ -174,6 +175,14 @@ cd frontend
 npm install
 npm run dev              # frontend on http://localhost:3000 — open /simple
 ```
+
+### Privy sign-in (optional)
+
+Newcomers sign up with a passkey (or email) and get a wallet without installing anything; people who already use crypto connect MetaMask, Phantom, Coinbase, Rabby or Trust (WalletConnect). Either way the wallet owns their Safe, and the bridge session comes from Privy's identity token (`POST /auth/privy`), so there's no second signature. Ledger still connects directly.
+
+1. Create an app at [dashboard.privy.io](https://dashboard.privy.io) and put its ID in `PRIVY_APP_ID` (the frontend reads it from the root `.env` too).
+2. In the dashboard: enable the **Passkey**, **Email** and **Wallet** login methods, turn on **identity tokens**, and add `http://localhost:3000` (and your public URL) to the allowed origins.
+3. Restart both servers; **Sign in** in `/simple` opens Privy's window.
 
 ### Telegram and phone passkey approvals (optional)
 
