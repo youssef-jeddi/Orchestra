@@ -25,6 +25,9 @@ export const privyConfig = {
   },
   // Only users who arrive without a wallet get one: the passkey/email path.
   embeddedWallets: { ethereum: { createOnLogin: 'users-without-wallets' } },
-  defaultChain: sepolia,
+  // Embedded wallets start on the first supported chain. No `defaultChain`: with it,
+  // Privy switches an external wallet's network right after connecting, while the
+  // wallet is still busy with sign-in, which crashed MetaMask's popup (ORC-62).
+  // ensureSepolia switches before the first transaction or Permit2 signature.
   supportedChains: [sepolia],
 };
