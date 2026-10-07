@@ -13,6 +13,7 @@ import {
 } from '@/lib/bridge';
 import { executeSwap, executeSend } from '@/lib/signing';
 import { registerPasskey, approveWithPasskey } from '@/lib/passkey';
+import { PRIVY_APP_ID } from '@/lib/privy';
 
 const ACCENT = '#C084FC';
 
@@ -220,14 +221,16 @@ function SimpleChat() {
               : <button onClick={registerPk} style={pill(false)} title="Register a device passkey">🔑 Add passkey</button>)}
             <button onClick={ledger.disconnect} style={pill(false)} title="Disconnect">
               <span style={{ width: 6, height: 6, borderRadius: 3, background: '#30D158', display: 'inline-block' }} />
-              {ledger.connectionType === 'metamask' ? '🦊 ' : ''}
+              {ledger.connectionType === 'metamask' ? '🦊 ' : ledger.connectionType === 'privy' ? '🔑 ' : ''}
               {ledger.walletAddress.slice(0, 6)}…{ledger.walletAddress.slice(-4)}
             </button>
           </div>
         ) : (
           <div style={{ display: 'flex', gap: 8 }}>
             <button onClick={ledger.connect} style={pill(false)}>Ledger</button>
-            <button onClick={ledger.connectMetaMask} style={pill(true)}>🦊 MetaMask</button>
+            {PRIVY_APP_ID
+              ? <button onClick={ledger.privyLogin} style={pill(true)} title="Passkey, email, or the wallet you already have">Sign in</button>
+              : <button onClick={ledger.connectMetaMask} style={pill(true)}>🦊 MetaMask</button>}
           </div>
         )}
       </header>

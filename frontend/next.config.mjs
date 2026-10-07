@@ -1,25 +1,30 @@
 import { readFileSync } from 'fs';
 
-// The phone opens approval pages on PUBLIC_APP_URL (e.g. a cloudflared tunnel in
-// dev); the dev server must accept that host. It's configured once, in the
-// backend's .env at the repo root — read from there unless set for the frontend.
-function publicAppUrl() {
-  if (process.env.PUBLIC_APP_URL) return process.env.PUBLIC_APP_URL;
+// Some settings are shared with the backend and configured once, in its .env at
+// the repo root — read from there unless set for the frontend.
+function rootEnv(name) {
+  if (process.env[name]) return process.env[name];
   try {
     const env = readFileSync(new URL('../.env', import.meta.url), 'utf8');
-    return env.match(/^PUBLIC_APP_URL=(.*)$/m)?.[1].trim().replace(/^["']|["']$/g, '') || undefined;
+    return env.match(new RegExp(`^${name}=(.*)$`, 'm'))?.[1].trim().replace(/^["']|["']$/g, '') || undefined;
   } catch {
     return undefined;
   }
 }
 
+// The phone opens approval pages on PUBLIC_APP_URL (e.g. a cloudflared tunnel in
+// dev); the dev server must accept that host.
 const publicHost = (() => {
-  try { return new URL(publicAppUrl()).hostname; } catch { return null; }
+  try { return new URL(rootEnv('PUBLIC_APP_URL')).hostname; } catch { return null; }
 })();
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   allowedDevOrigins: publicHost ? [publicHost] : [],
+  // Privy's app ID is public; the backend verifies sign-ins against the same app.
+  env: {
+    NEXT_PUBLIC_PRIVY_APP_ID: process.env.NEXT_PUBLIC_PRIVY_APP_ID || rootEnv('PRIVY_APP_ID') || '',
+  },
   transpilePackages: [
     'three',
     '@react-three/fiber',

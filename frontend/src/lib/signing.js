@@ -1,9 +1,10 @@
 // ── Shared signing / execution helpers ──
 // Turns the bridge's unsigned payloads (sendData / quoteData) into broadcast
-// transactions. Supports both connection types:
-//   • Ledger   — sign the raw tx locally, broadcast via the bridge.
-//   • MetaMask — hand the tx to the extension (eth_sendTransaction), which signs
-//                and broadcasts itself (and manages nonces/gas).
+// transactions. Supports both kinds of wallet:
+//   • Ledger    — sign the raw tx locally, broadcast via the bridge.
+//   • Providers — MetaMask, or a Privy wallet (passkey account or a connected
+//                 MetaMask/Phantom/WalletConnect…): hand the tx to the wallet
+//                 (eth_sendTransaction), which signs and broadcasts it itself.
 // Used by the /simple route; the full app has its own inline copy of this flow.
 
 import { broadcast, submitSwap, getNonce } from './bridge';
@@ -12,19 +13,23 @@ const CHAIN_ID = 11155111; // Sepolia
 const CHAIN_ID_HEX = '0xaa36a7';
 const explorer = (h) => `https://sepolia.etherscan.io/tx/${h}`;
 
-// MetaMask signs on whatever network is active, so switch to Sepolia first
+/** True for wallets that sign through an EIP-1193 provider (everything but Ledger). */
+export function usesProvider(ledger) {
+  return !!ledger.connectionType && ledger.connectionType !== 'ledger';
+}
+
+// Wallets sign on whatever network is active, so switch to Sepolia first
 // (adding it if the wallet doesn't know it). Throws if the user refuses.
-// Also needed for EIP-712 signatures: MetaMask rejects typed data whose domain
+// Also needed for EIP-712 signatures: wallets reject typed data whose domain
 // chainId isn't the active network ("must match the active chainId").
-export async function ensureSepolia() {
-  const eth = typeof window !== 'undefined' ? window.ethereum : null;
-  if (!eth) throw new Error('MetaMask not available');
+export async function ensureSepolia(eth) {
+  if (!eth) throw new Error('Wallet not available');
   const current = await eth.request({ method: 'eth_chainId' });
   if (String(current).toLowerCase() === CHAIN_ID_HEX) return;
   try {
     await eth.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: CHAIN_ID_HEX }] });
   } catch (err) {
-    if (err?.code !== 4902) throw new Error('Switch MetaMask to the Sepolia test network to continue.');
+    if (err?.code !== 4902) throw new Error('Switch your wallet to the Sepolia test network to continue.');
     await eth.request({
       method: 'wallet_addEthereumChain',
       params: [{
@@ -38,7 +43,7 @@ export async function ensureSepolia() {
   }
   const after = await eth.request({ method: 'eth_chainId' });
   if (String(after).toLowerCase() !== CHAIN_ID_HEX) {
-    throw new Error('Switch MetaMask to the Sepolia test network to continue.');
+    throw new Error('Switch your wallet to the Sepolia test network to continue.');
   }
 }
 
@@ -48,12 +53,11 @@ function toHex(v) {
   try { return '0x' + BigInt(v).toString(16); } catch { return '0x0'; }
 }
 
-// MetaMask: sign + broadcast in one call, returns the tx hash.
-async function mmSend(ledger, tx) {
-  const eth = typeof window !== 'undefined' ? window.ethereum : null;
-  if (!eth) throw new Error('MetaMask not available');
-  await ensureSepolia();
-  // chainId makes MetaMask reject the tx outright if the network changed underneath us.
+// Provider wallets: sign + broadcast in one call, returns the tx hash.
+async function providerSend(ledger, tx) {
+  const eth = ledger.getProvider();
+  await ensureSepolia(eth);
+  // chainId makes the wallet reject the tx outright if the network changed underneath us.
   return eth.request({
     method: 'eth_sendTransaction',
     params: [{ from: ledger.walletAddress, to: tx.to, data: tx.data || '0x', value: toHex(tx.value), chainId: CHAIN_ID_HEX }],
@@ -79,8 +83,8 @@ async function ledgerSendTx(ledger, tx, gasLimit) {
 }
 
 async function sendTx(ledger, tx, gasLimit) {
-  return ledger.connectionType === 'metamask'
-    ? mmSend(ledger, tx)
+  return usesProvider(ledger)
+    ? providerSend(ledger, tx)
     : ledgerSendTx(ledger, tx, gasLimit);
 }
 
@@ -116,7 +120,7 @@ export async function executeSwap(ledger, data) {
   const q = data.quoteData;
   if (!q) throw new Error('No quote to sign');
   // The Permit2 typed data is bound to Sepolia too, so switch before any signature.
-  if (ledger.connectionType === 'metamask') await ensureSepolia();
+  if (usesProvider(ledger)) await ensureSepolia(ledger.getProvider());
 
   // 1. Permit2 / ERC20 approval.
   if (q.approvalNeeded && q.approvalTx) {
@@ -137,7 +141,7 @@ export async function executeSwap(ledger, data) {
       message: q.permitData.values,
     };
     const sig = await ledger.signTyped(typedData);
-    // Ledger returns {v,r,s}; MetaMask returns a serialized hex string.
+    // Ledger returns {v,r,s}; provider wallets return a serialized hex string.
     permit2Signature = typeof sig === 'string'
       ? sig
       : ethers.Signature.from({ v: sig.v, r: sig.r, s: sig.s }).serialized;

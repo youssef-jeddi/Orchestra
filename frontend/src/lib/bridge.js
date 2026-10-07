@@ -51,6 +51,11 @@ export async function authLogin(walletAddress, nonce, signature) {
   return bridgeFetch('/auth/login', { method: 'POST', body: JSON.stringify({ walletAddress, nonce, signature }) });
 }
 
+// Privy sign-in: the identity token proves the wallet is the user's, no signature needed.
+export async function authPrivy(walletAddress, identityToken) {
+  return bridgeFetch('/auth/privy', { method: 'POST', body: JSON.stringify({ walletAddress, identityToken }) });
+}
+
 export async function getSession() {
   return bridgeFetch('/auth/session');
 }

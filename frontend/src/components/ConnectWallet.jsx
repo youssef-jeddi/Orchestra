@@ -1,6 +1,7 @@
 'use client';
 
 import { useOrchestra } from '@/context/OrchestraContext';
+import { PRIVY_APP_ID } from '@/lib/privy';
 
 const STATUS_COLORS = {
   disconnected: 'rgba(255,255,255,0.15)',
@@ -10,9 +11,11 @@ const STATUS_COLORS = {
   signing: 'rgba(192,132,252,0.5)',
 };
 
+const walletIcon = (type) => (type === 'metamask' ? '🦊 ' : type === 'privy' ? '🔑 ' : '');
+
 export default function ConnectWallet() {
   const { ledger, bridge } = useOrchestra();
-  const { deviceStatus, walletAddress, connectionType, connect, connectMetaMask, disconnect } = ledger;
+  const { deviceStatus, walletAddress, connectionType, connect, connectMetaMask, privyLogin, disconnect } = ledger;
 
   const isConnected = deviceStatus === 'ready' || deviceStatus === 'connected' || deviceStatus === 'signing';
   const label = deviceStatus === 'scanning'
@@ -20,7 +23,7 @@ export default function ConnectWallet() {
     : deviceStatus === 'signing'
       ? 'Signing...'
       : isConnected && walletAddress
-        ? `${connectionType === 'metamask' ? '🦊 ' : ''}${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`
+        ? `${walletIcon(connectionType)}${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`
         : 'Connect Ledger';
 
   const borderColor = STATUS_COLORS[deviceStatus] || STATUS_COLORS.disconnected;
@@ -86,10 +89,10 @@ export default function ConnectWallet() {
       {!isConnected && (
         <button
           className="cw-mm"
-          onClick={connectMetaMask}
+          onClick={PRIVY_APP_ID ? privyLogin : connectMetaMask}
           disabled={deviceStatus === 'scanning'}
         >
-          🦊 MetaMask
+          {PRIVY_APP_ID ? 'Sign in' : '🦊 MetaMask'}
         </button>
       )}
     </>
