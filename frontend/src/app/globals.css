@@ -20,9 +20,13 @@ body {
   font-family: var(--font-inter, sans-serif);
   font-weight: 300;
   line-height: 1.8;
-  cursor: none;
   -webkit-font-smoothing: antialiased;
   overflow-x: hidden;
+}
+
+/* The system cursor is hidden only while <CustomCursor> draws its own (see that component). */
+body.custom-cursor {
+  cursor: none;
 }
 
 /* Subtle noise texture overlay */
