@@ -34,7 +34,7 @@ export interface PlanStep {
 }
 
 export interface ResolvedStep {
-  action: "swap" | "send" | "add_liquidity" | "remove_liquidity" | "deposit" | "balance" | "price" | "positions";
+  action: "swap" | "send" | "add_liquidity" | "remove_liquidity" | "deposit" | "balance" | "price" | "positions" | "address";
   summary: string;
   plan: PlanStep;
   valueUsd: number;
@@ -95,6 +95,16 @@ async function resolveStep(step: StepT, order: number, ctx: ResolveContext): Pro
         plan: planStep("native", "balance", {}, order),
         valueUsd: 0,
         token: token?.symbol,
+      };
+    }
+
+    case "address": {
+      if (!ctx.connected) throw clarify("Sign in first so I can show your address.");
+      return {
+        action: "address",
+        summary: "Your addresses",
+        plan: planStep("native", "balance", {}, order),
+        valueUsd: 0,
       };
     }
 

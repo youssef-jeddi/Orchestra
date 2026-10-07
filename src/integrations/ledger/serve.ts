@@ -390,17 +390,20 @@ app.post("/intent", async (req, res) => {
     const balanceAddress = safeAddress || wallet || null;
     const infoAssessment = { verdict: "INFO", riskScore: 0, reasons: ["Read-only query — no funds move."], requiresLedger: false, triggered: [], approvalMethod: "none" };
 
-    // ── Read-only: balance / price ──
+    // ── Read-only: balance / price / positions / address ──
     if (outcome.kind === "read") {
       const wantsBalance = outcome.steps.some((s) => s.action === "balance");
       const balances = wantsBalance ? await balancesP : null;
       const prices = outcome.steps.filter((s) => s.action === "price").map((s) => s.price!);
       const summary = outcome.steps
-        .map((s) => (s.action === "balance" ? describeBalances(balances, s.token) : s.summary))
+        .map((s) => (s.action === "balance" ? describeBalances(balances, s.token)
+          : s.action === "address" ? describeAddresses(wallet!, safeAddress)
+          : s.summary))
         .join(" · ");
+      const has = (action: string) => outcome.steps.some((s) => s.action === action);
       res.json({
         status: "ok",
-        intentType: wantsBalance ? "balance" : outcome.steps.some((s) => s.action === "positions") ? "positions" : "price",
+        intentType: wantsBalance ? "balance" : has("positions") ? "positions" : has("address") ? "address" : "price",
         autoExecuted: false,
         safeAddress,
         plan: { id: crypto.randomUUID(), summary, steps: [], totalEstimatedValueUsd: 0 },
@@ -650,6 +653,15 @@ function desktopRp(req: express.Request): RelyingParty {
 
 function sendError(res: express.Response, err: any, fallbackStatus = 500): void {
   res.status(err instanceof ApprovalError ? err.status : fallbackStatus).json({ error: err.message });
+}
+
+// Addresses come from the session and the Safe lookup, never from the model.
+function describeAddresses(wallet: string, safe: string | null): string {
+  const lines = [`Your wallet: ${wallet}`];
+  lines.push(safe
+    ? `Your Safe (the account Orchestra trades from): ${safe}\nTo add funds to your account, send them to the Safe address.`
+    : "You don't have a Safe yet. Create one to start trading.");
+  return lines.join("\n");
 }
 
 function describeBalances(b: Balances | null, token?: string): string {

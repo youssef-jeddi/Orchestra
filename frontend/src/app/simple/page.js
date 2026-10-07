@@ -389,7 +389,7 @@ function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing }) {
 
       {/* Plan summary */}
       {data.plan?.summary && (
-        <p style={{ margin: 0, fontSize: 15, color: '#E8E4DE', whiteSpace: 'pre-line' }}>
+        <p style={{ margin: 0, fontSize: 15, color: '#E8E4DE', whiteSpace: 'pre-line', overflowWrap: 'anywhere' }}>
           {data.plan.summary}
           {data.plan.totalEstimatedValueUsd > 0 && (
             <span style={{ color: '#777' }}> — ${Number(data.plan.totalEstimatedValueUsd).toFixed(2)}</span>

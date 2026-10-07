@@ -200,6 +200,20 @@ test("assessAction: a deposit is signed by the wallet and ignores the agent limi
   assert.deepEqual(d.triggered, []);
 });
 
+// ── Own address ──
+test("resolve: address is a read-only step and needs a signed-in wallet", async () => {
+  const s = step({ action: "address" });
+  const r = await resolveSteps([s], ctx());
+  assert.equal(r.kind, "ok");
+  assert.equal((r as any).steps[0].action, "address");
+  assert.equal((r as any).steps[0].valueUsd, 0);
+  assert.equal((await resolveSteps([s], ctx({ connected: false }))).kind, "clarify");
+});
+
+test("schema: the address step carries no address the model could fill in", () => {
+  assert.deepEqual(step({ action: "address", address: "0x1234" }), { action: "address" });
+});
+
 // ── Liquidity positions ──
 const posAt = (tokenId: string, liquidity: bigint, owed = 0n): Position => {
   const tick = Math.round(Math.log(1e12 / 2500) / Math.log(1.0001)); // WETH ≈ 2,500 USDC

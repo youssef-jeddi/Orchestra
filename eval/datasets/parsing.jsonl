@@ -27,6 +27,10 @@
 {"id":"balance-03","tags":["balance"],"message":"show my portfolio","expect":{"type":"actions","steps":[{"action":"balance"}]}}
 {"id":"balance-04","tags":["balance"],"message":"do I have any weth?","expect":{"type":"actions","steps":[{"action":"balance","token":"WETH"}]}}
 {"id":"balance-05","tags":["balance"],"message":"balance","expect":{"type":"actions","steps":[{"action":"balance"}]}}
+{"id":"address-01","tags":["address"],"message":"what's my address?","expect":{"type":"actions","steps":[{"action":"address"}]}}
+{"id":"address-02","tags":["address"],"message":"show me my wallet address","expect":{"type":"actions","steps":[{"action":"address"}]}}
+{"id":"address-03","tags":["address"],"message":"where do I send money to fund my account","expect":{"type":"actions","steps":[{"action":"address"}]}}
+{"id":"address-04","tags":["address"],"message":"c'est quoi mon adresse ?","expect":{"type":"actions","steps":[{"action":"address"}]}}
 {"id":"price-01","tags":["price"],"message":"what's the price of eth","expect":{"type":"actions","steps":[{"action":"price","token":"ETH"}]}}
 {"id":"price-02","tags":["price"],"message":"how much is 1 ETH worth right now?","expect":{"type":"actions","steps":[{"action":"price","token":"ETH"}]}}
 {"id":"price-03","tags":["price"],"message":"usdc price","expect":{"type":"actions","steps":[{"action":"price","token":"USDC"}]}}
