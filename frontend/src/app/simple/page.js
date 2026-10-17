@@ -9,10 +9,10 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { OrchestraProvider, useOrchestra } from '@/context/OrchestraContext';
 import {
   sendIntent, getPrices, getPasskeyStatus, getApproval,
-  getTelegramStatus, telegramLinkRequest, telegramLink, requestPhoneSetup,
+  getTelegramStatus, telegramLinkRequest, telegramLink, listPasskeys,
 } from '@/lib/bridge';
 import { executeSwap, executeSend } from '@/lib/signing';
-import { registerPasskey, approveWithPasskey } from '@/lib/passkey';
+import { registerPasskey, approveWithPasskey, setUpPhonePasskey, removePasskey } from '@/lib/passkey';
 import { PRIVY_APP_ID } from '@/lib/privy';
 
 const ACCENT = '#C084FC';
@@ -87,13 +87,16 @@ function SimpleChat() {
   const [signingIdx, setSigningIdx] = useState(null);
   const [prices, setPrices] = useState(null);
   const [passkeyReg, setPasskeyReg] = useState(false);
+  const [showPasskeys, setShowPasskeys] = useState(false);
+  const showError = useCallback((msg) => setMessages((m) => [...m, { role: 'agent', error: msg }]), []);
 
   // Check passkey registration when a wallet connects, and again once signed in:
   // a Privy sign-in passkey becomes the approval passkey during sign-in.
-  useEffect(() => {
+  const refreshPasskeyStatus = useCallback(() => {
     if (!ledger.walletAddress) { setPasskeyReg(false); return; }
     getPasskeyStatus(ledger.walletAddress).then((d) => setPasskeyReg(!!d.registered)).catch(() => {});
-  }, [ledger.walletAddress, session.ready]);
+  }, [ledger.walletAddress]);
+  useEffect(() => { refreshPasskeyStatus(); }, [refreshPasskeyStatus, session.ready]);
 
   // Live price ticker — refresh every 60s.
   useEffect(() => {
@@ -218,7 +221,7 @@ function SimpleChat() {
             )}
             <TelegramLink ledger={ledger} session={session} onError={(msg) => setMessages((m) => [...m, { role: 'agent', error: msg }])} />
             {session.ready && (passkeyReg
-              ? <span style={{ fontSize: 11, color: '#30D158' }} title="Passkey registered">🔑 passkey</span>
+              ? <button onClick={() => setShowPasskeys((v) => !v)} style={pill(showPasskeys)} title="See, add or remove this account's passkeys">🔑 Passkeys</button>
               : <button onClick={registerPk} style={pill(false)} title="Register a device passkey">🔑 Add passkey</button>)}
             <button onClick={ledger.disconnect} style={pill(false)} title="Disconnect">
               <span style={{ width: 6, height: 6, borderRadius: 3, background: '#30D158', display: 'inline-block' }} />
@@ -236,6 +239,9 @@ function SimpleChat() {
         )}
       </header>
 
+      {connected && session.ready && showPasskeys && (
+        <PasskeyPanel onAdd={registerPk} onChange={refreshPasskeyStatus} onClose={() => setShowPasskeys(false)} onError={showError} />
+      )}
       {connected && session.ready && <SafeSetup safe={safe} ledger={ledger} onError={(msg) => setMessages((m) => [...m, { role: 'agent', error: msg }])} />}
 
       {/* Messages */}
@@ -575,6 +581,74 @@ function TelegramLink({ ledger, session, onError }) {
   );
 }
 
+// The account's passkeys. Adding or removing one asks for an existing passkey
+// first (the server checks it); the last one can't be removed.
+function PasskeyPanel({ onAdd, onChange, onClose, onError }) {
+  const [passkeys, setPasskeys] = useState(null);
+  const [busy, setBusy] = useState(null); // passkey id being removed, or 'add'
+
+  const load = useCallback(() => {
+    listPasskeys().then((d) => setPasskeys(d.passkeys)).catch((err) => onError(`Couldn't load your passkeys: ${err.message}`));
+  }, [onError]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const remove = async (p) => {
+    if (!window.confirm(`Remove the ${passkeyName(p).toLowerCase()} on ${p.rpID}? It will no longer approve transactions.`)) return;
+    setBusy(p.id);
+    try {
+      setPasskeys((await removePasskey(p.id)).passkeys);
+      onChange();
+    } catch (err) {
+      onError(`Couldn't remove the passkey: ${err.message}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const add = async () => {
+    setBusy('add');
+    try {
+      await onAdd();
+      load();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const only = passkeys?.length === 1;
+  return (
+    <div style={{ marginTop: 12, padding: '10px 12px', border: '1px solid #1c1c22', borderRadius: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+        <span style={{ fontSize: 12, color: '#999' }}>Passkeys that can approve your transactions</span>
+        <button onClick={onClose} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: 16 }} title="Close">×</button>
+      </div>
+      {!passkeys && <p style={{ fontSize: 12, color: '#555', margin: 0 }}>Loading…</p>}
+      {passkeys?.map((p) => (
+        <div key={`${p.rpID}:${p.id}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 0', borderTop: '1px solid #1c1c22' }}>
+          <span style={{ fontSize: 13, color: '#E8E4DE' }}>{p.label === 'phone' ? '📱' : '🔑'} {passkeyName(p)}</span>
+          <span style={{ fontSize: 11, color: '#666' }}>
+            {p.rpID}{p.createdAt ? ` · added ${new Date(p.createdAt).toLocaleDateString()}` : ''}
+          </span>
+          <button onClick={() => remove(p)} disabled={!!busy || only} style={{ ...pill(false), marginLeft: 'auto', padding: '4px 10px', fontSize: 12, opacity: only ? 0.5 : 1 }}
+            title={only ? 'Your only passkey: add another before removing it' : 'Remove (confirm with one of your passkeys)'}>
+            {busy === p.id ? 'Confirm with your passkey…' : 'Remove'}
+          </button>
+        </div>
+      ))}
+      <button onClick={add} disabled={!!busy} style={{ ...pill(false), marginTop: 8, fontSize: 12, padding: '5px 12px' }}
+        title="Add a passkey on this device (confirm with an existing one first)">
+        {busy === 'add' ? 'Follow the passkey prompts…' : '+ Add another passkey'}
+      </button>
+    </div>
+  );
+}
+
+function passkeyName(p) {
+  if (p.source === 'privy') return 'Sign-in passkey';
+  return p.label === 'phone' ? 'Phone passkey' : 'Browser passkey';
+}
+
 // Ask the server to send a one-time phone passkey setup link to Telegram, then
 // poll until the phone has registered it.
 function PhoneSetupButton({ session, onDone, onError }) {
@@ -594,10 +668,10 @@ function PhoneSetupButton({ session, onDone, onError }) {
       // isn't one, and once more if the server says it has expired meanwhile.
       if (!(await session.ensure())) throw new Error('Sign in with your wallet to set up the phone passkey.');
       try {
-        await requestPhoneSetup();
+        await setUpPhonePasskey();
       } catch (err) {
         if (err.code !== 'session_required' || !(await session.signIn())) throw err;
-        await requestPhoneSetup();
+        await setUpPhonePasskey();
       }
       setState('sent');
     } catch (err) {
