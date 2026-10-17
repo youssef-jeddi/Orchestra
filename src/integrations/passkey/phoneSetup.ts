@@ -11,6 +11,8 @@ export const SETUP_TTL_MS = 10 * 60_000;
 interface SetupEntry {
   wallet: string;
   expires: number;
+  /** Asked for after a check with an existing passkey (needed once the wallet has one). */
+  ownerChecked: boolean;
   /** Registration challenge issued for this link, once the phone asked for options. */
   challenge?: string;
   /** The options carrying `challenge`, returned again if the page asks twice. */
@@ -19,10 +21,10 @@ interface SetupEntry {
 
 const setups = new Map<string, SetupEntry>();
 
-export function createSetupToken(wallet: string, now = Date.now()): string {
+export function createSetupToken(wallet: string, { ownerChecked = false, now = Date.now() }: { ownerChecked?: boolean; now?: number } = {}): string {
   for (const [t, e] of setups) if (e.expires < now) setups.delete(t);
   const token = crypto.randomBytes(24).toString("base64url");
-  setups.set(token, { wallet: wallet.toLowerCase(), expires: now + SETUP_TTL_MS });
+  setups.set(token, { wallet: wallet.toLowerCase(), expires: now + SETUP_TTL_MS, ownerChecked });
   return token;
 }
 

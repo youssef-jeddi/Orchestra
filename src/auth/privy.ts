@@ -11,13 +11,15 @@
 //
 // With PRIVY_APP_SECRET too, a user's Privy sign-in passkey also becomes their
 // approval passkey (importPrivyPasskeys): Privy creates it in our page, so it's
-// bound to our domain, and its public key is in the user's Privy record.
+// bound to our domain, and its public key is in the user's Privy record. Only
+// for a wallet with no passkey yet: a passkey added to the Privy account later
+// doesn't get in this way (adding one needs an existing passkey, see passkey/).
 
 import { ethers } from "ethers";
 import { createRemoteJWKSet, type CryptoKey, type JWTVerifyGetKey } from "jose";
 import { PrivyClient, verifyIdentityToken, type User } from "@privy-io/node";
 import { issueToken, AuthError } from "./index";
-import { addExternalCredential } from "../integrations/passkey";
+import { addExternalCredentials } from "../integrations/passkey";
 
 const PRIVY_API_URL = "https://api.privy.io";
 
@@ -91,21 +93,22 @@ function getUserFetcher(): UserFetcher | null {
 
 /**
  * Save the user's Privy passkeys as approval passkeys for `wallet` on `rpID`
- * (the domain they signed in on). Returns how many the wallet now holds.
+ * (the domain they signed in on), if the wallet has no passkey yet. Returns how
+ * many the wallet holds and how many were added now.
  * Without PRIVY_APP_SECRET, or for users without a passkey, it does nothing and
  * they register one with "Add passkey" as before.
  */
-export async function importPrivyPasskeys(user: User, wallet: string, rpID: string): Promise<number> {
-  if (!user.linked_accounts.some((a) => a.type === "passkey")) return 0;
+export async function importPrivyPasskeys(user: User, wallet: string, rpID: string): Promise<{ held: number; added: number }> {
+  const none = { held: 0, added: 0 };
+  if (!user.linked_accounts.some((a) => a.type === "passkey")) return none;
   const fetcher = getUserFetcher();
-  if (!fetcher) return 0;
+  if (!fetcher) return none;
   const full = await fetcher(user.id);
-  let added = 0;
-  for (const a of full.linked_accounts) {
-    if (a.type !== "passkey" || !a.credential_id || !a.public_key) continue;
-    if (await addExternalCredential(wallet, { id: a.credential_id, publicKey: a.public_key, rpID, source: "privy" })) added++;
-  }
-  return added;
+  const passkeys = full.linked_accounts.flatMap((a) =>
+    a.type === "passkey" && a.credential_id && a.public_key
+      ? [{ id: a.credential_id, publicKey: a.public_key, rpID, source: "privy" as const }]
+      : []);
+  return addExternalCredentials(wallet, passkeys);
 }
 
 /** Test hook: verify against a fixed key instead of Privy's JWKS. */

@@ -10,6 +10,10 @@
 // verified assertion commits to exactly that payload. It still doesn't sign the
 // tx bytes themselves — the server builds and executes them.
 //
+// A wallet's first passkey only needs its session. Adding or removing one
+// after that needs a check with an existing passkey first (ownerCheckOptions /
+// verifyOwner), or a session alone could add its own passkey and approve anything.
+//
 // WebAuthn crypto is handled by @simplewebauthn/server — never hand-rolled.
 
 import {
@@ -19,6 +23,7 @@ import {
   verifyAuthenticationResponse,
 } from "@simplewebauthn/server";
 import { decodeCredentialPublicKey } from "@simplewebauthn/server/helpers";
+import crypto from "crypto";
 import { read, write } from "../zero-g/storage";
 
 export interface RelyingParty {
@@ -66,17 +71,29 @@ export function rpForOrigin(origin: string | undefined): RelyingParty | null {
 
 // Short-lived challenge store (in-memory) for flows that don't hold their own.
 const CHALLENGE_TTL_MS = 5 * 60_000;
-const challenges = new Map<string, { challenge: string; expires: number }>();
-
-function setChallenge(key: string, challenge: string): void {
-  challenges.set(key.toLowerCase(), { challenge, expires: Date.now() + CHALLENGE_TTL_MS });
+interface HeldChallenge {
+  challenge: string;
+  expires: number;
+  /** A registration challenge issued after a check with an existing passkey. */
+  ownerChecked?: boolean;
 }
-function takeChallenge(key: string): string | null {
+const challenges = new Map<string, HeldChallenge>();
+
+function setChallenge(key: string, challenge: string, ownerChecked = false): void {
+  challenges.set(key.toLowerCase(), { challenge, expires: Date.now() + CHALLENGE_TTL_MS, ownerChecked });
+}
+function takeChallenge(key: string): HeldChallenge | null {
   const k = key.toLowerCase();
   const e = challenges.get(k);
   challenges.delete(k); // single-use
   if (!e || e.expires < Date.now()) return null;
-  return e.challenge;
+  return e;
+}
+
+export class PasskeyError extends Error {
+  constructor(public status: number, message: string, public code?: string) {
+    super(message);
+  }
 }
 
 interface StoredCred {
@@ -115,6 +132,16 @@ export async function hasPasskey(wallet: string, rp: RelyingParty = browserRp())
   return (await getCreds(wallet)).some((c) => c.rpID === rp.rpID);
 }
 
+/** Any passkey at all, on any domain: then adding another needs an owner check. */
+export async function hasAnyPasskey(wallet: string): Promise<boolean> {
+  return (await getCreds(wallet)).length > 0;
+}
+
+/** The domains (RP IDs) the wallet's passkeys work on. */
+export async function passkeyDomains(wallet: string): Promise<string[]> {
+  return [...new Set((await getCreds(wallet)).map((c) => c.rpID))];
+}
+
 /** A passkey registered on the phone for the current PUBLIC_APP_URL domain. */
 export async function hasPhonePasskey(wallet: string): Promise<boolean> {
   const rp = phoneRp();
@@ -124,8 +151,12 @@ export async function hasPhonePasskey(wallet: string): Promise<boolean> {
 
 // ── Registration ──
 
-/** Options to create a passkey on `rp`. Without `holdChallenge`, the challenge is kept per wallet. */
-export async function registrationOptions(wallet: string, rp: RelyingParty = browserRp(), holdChallenge = false) {
+/**
+ * Options to create a passkey on `rp`. Without `holdChallenge`, the challenge is
+ * kept per wallet, marked with `ownerChecked` (an existing passkey was checked
+ * first, see verifyOwner).
+ */
+export async function registrationOptions(wallet: string, rp: RelyingParty = browserRp(), holdChallenge = false, ownerChecked = false) {
   const existing = (await getCreds(wallet)).filter((c) => c.rpID === rp.rpID);
   const opts = await generateRegistrationOptions({
     rpName: RP_NAME,
@@ -136,18 +167,25 @@ export async function registrationOptions(wallet: string, rp: RelyingParty = bro
     excludeCredentials: existing.map((c) => ({ id: c.id, transports: c.transports as any })),
     authenticatorSelection: { residentKey: "preferred", userVerification: "preferred" },
   });
-  if (!holdChallenge) setChallenge(`reg:${wallet}:${rp.rpID}`, opts.challenge);
+  if (!holdChallenge) setChallenge(`reg:${wallet}:${rp.rpID}`, opts.challenge, ownerChecked);
   return opts;
 }
 
+/**
+ * Verify a new passkey and add it to the wallet. Refused when the wallet already
+ * has a passkey and the ceremony didn't start with an owner check — checked here,
+ * at the moment of adding, so a challenge handed out while the wallet had none
+ * can't add a second one later. A held challenge passes its own `ownerChecked`.
+ */
 export async function verifyRegistration(
   wallet: string,
   response: any,
-  opts: { rp?: RelyingParty; challenge?: string; label?: PasskeyLabel } = {}
+  opts: { rp?: RelyingParty; challenge?: string; ownerChecked?: boolean; label?: PasskeyLabel } = {}
 ): Promise<boolean> {
   const rp = opts.rp ?? browserRp();
-  const expectedChallenge = opts.challenge ?? takeChallenge(`reg:${wallet}:${rp.rpID}`);
-  if (!expectedChallenge) throw new Error("No or expired registration challenge");
+  const held = opts.challenge ? { challenge: opts.challenge, ownerChecked: !!opts.ownerChecked } : takeChallenge(`reg:${wallet}:${rp.rpID}`);
+  if (!held) throw new Error("No or expired registration challenge");
+  const expectedChallenge = held.challenge;
 
   const verification = await verifyRegistrationResponse({
     response,
@@ -160,7 +198,9 @@ export async function verifyRegistration(
   }
 
   const cred = verification.registrationInfo.credential;
-  const creds = (await getCreds(wallet)).filter((c) => c.id !== cred.id);
+  const existing = await getCreds(wallet);
+  if (existing.length && !held.ownerChecked) throw ownerCheckNeeded();
+  const creds = existing.filter((c) => c.id !== cred.id);
   creds.push({
     id: cred.id,
     publicKey: Buffer.from(cred.publicKey).toString("base64"),
@@ -174,40 +214,56 @@ export async function verifyRegistration(
   return true;
 }
 
+export interface ExternalCredential {
+  id: string;
+  publicKey: string;
+  rpID: string;
+  source: "privy";
+}
+
 /**
- * Add a passkey that was created outside our registration flow: the Privy
- * sign-in passkey, which Privy creates in our page, so on our own domain. The
- * public key must be a COSE key (base64 or base64url) and the id a credential
- * id; anything else is refused, so a bad record fails closed. Returns whether
- * the wallet now holds the credential.
+ * Add passkeys that were created outside our registration flow: the Privy
+ * sign-in passkeys, which Privy creates in our page, so on our own domain. Each
+ * public key must be a COSE key (base64 or base64url) and each id a credential
+ * id; anything else is skipped, so a bad record fails closed.
+ *
+ * Only a wallet with no passkey yet takes new ones: the session is all that
+ * stands behind them, like any first passkey. Ones it already holds are kept
+ * (with their counter). Returns how many of `list` the wallet holds and how many
+ * were newly added.
  */
-export async function addExternalCredential(
-  wallet: string,
-  cred: { id: string; publicKey: string; rpID: string; source: "privy" }
-): Promise<boolean> {
-  let id: string;
-  let publicKey: Uint8Array<ArrayBuffer>;
-  try {
-    id = Buffer.from(cred.id, "base64").toString("base64url"); // assertions report base64url ids
-    publicKey = new Uint8Array(Buffer.from(cred.publicKey, "base64"));
-    const cose = decodeCredentialPublicKey(publicKey);
-    if (!id || !(cose instanceof Map) || cose.get(1) === undefined || cose.get(3) === undefined) return false; // kty, alg
-  } catch {
-    return false;
-  }
+export async function addExternalCredentials(wallet: string, list: ExternalCredential[]): Promise<{ held: number; added: number }> {
   const creds = await getCreds(wallet);
-  if (creds.some((c) => c.id === id && c.rpID === cred.rpID)) return true; // keep its counter
-  creds.push({
-    id,
-    publicKey: Buffer.from(publicKey).toString("base64"),
-    counter: 0,
-    rpID: cred.rpID,
-    label: "browser",
-    createdAt: new Date().toISOString(),
-    source: cred.source,
-  });
-  await saveCreds(wallet, creds);
-  return true;
+  const firstPasskeys = creds.length === 0;
+  let held = 0;
+  let added = 0;
+  for (const cred of list) {
+    let id: string;
+    let publicKey: Uint8Array<ArrayBuffer>;
+    try {
+      id = Buffer.from(cred.id, "base64").toString("base64url"); // assertions report base64url ids
+      publicKey = new Uint8Array(Buffer.from(cred.publicKey, "base64"));
+      const cose = decodeCredentialPublicKey(publicKey);
+      if (!id || !(cose instanceof Map) || cose.get(1) === undefined || cose.get(3) === undefined) continue; // kty, alg
+    } catch {
+      continue;
+    }
+    if (creds.some((c) => c.id === id && c.rpID === cred.rpID)) { held++; continue; } // keep its counter
+    if (!firstPasskeys) continue;
+    creds.push({
+      id,
+      publicKey: Buffer.from(publicKey).toString("base64"),
+      counter: 0,
+      rpID: cred.rpID,
+      label: "browser",
+      createdAt: new Date().toISOString(),
+      source: cred.source,
+    });
+    held++;
+    added++;
+  }
+  if (added) await saveCreds(wallet, creds);
+  return { held, added };
 }
 
 // ── Authentication ──
@@ -227,9 +283,77 @@ export async function authenticationOptions(wallet: string, challenge?: Uint8Arr
   return opts;
 }
 
+// ── Listing and removing ──
+
+export interface PasskeyView {
+  id: string;
+  rpID: string;
+  label: PasskeyLabel;
+  source?: "privy";
+  createdAt?: string;
+}
+
+/** The wallet's passkeys, without their keys. */
+export async function listPasskeys(wallet: string): Promise<PasskeyView[]> {
+  return (await getCreds(wallet)).map(({ id, rpID, label, source, createdAt }) => ({ id, rpID, label, source, createdAt }));
+}
+
+/**
+ * Remove one of the wallet's passkeys; the caller has checked the owner first
+ * (verifyOwner). The last one stays: without any, a session alone could add one
+ * again, so losing every passkey goes through recovery instead.
+ */
+export async function removePasskey(wallet: string, id: string): Promise<PasskeyView> {
+  const creds = await getCreds(wallet);
+  const cred = creds.find((c) => c.id === id);
+  if (!cred) throw new PasskeyError(404, "This passkey isn't on this account.");
+  if (creds.length === 1) throw new PasskeyError(409, "This is the account's only passkey. Add another before removing it.", "last_passkey");
+  await saveCreds(wallet, creds.filter((c) => c !== cred));
+  const { rpID, label, source, createdAt } = cred;
+  return { id, rpID, label, source, createdAt };
+}
+
+// ── Owner check: an existing passkey before adding another ──
+
+function ownerCheckNeeded(): PasskeyError {
+  return new PasskeyError(403, "This account already has a passkey. Confirm with it first.", "passkey_required");
+}
+
+/**
+ * Options to check an existing passkey of the wallet on `rp`, over a fresh
+ * random challenge kept for verifyOwner. When the wallet's passkeys all live on
+ * other domains, says where to go: the browser would refuse them here.
+ */
+export async function ownerCheckOptions(wallet: string, rp: RelyingParty = browserRp()) {
+  const domains = await passkeyDomains(wallet);
+  if (!domains.includes(rp.rpID)) {
+    throw new PasskeyError(403, `This account's passkey works on ${domains.join(", ")}. Open Orchestra there to change the account's passkeys.`, "passkey_elsewhere");
+  }
+  const opts = await authenticationOptions(wallet, new Uint8Array(crypto.randomBytes(32)), rp);
+  setChallenge(`owner:${wallet}:${rp.rpID}`, opts.challenge);
+  return opts;
+}
+
+/**
+ * Check `assertion` against the challenge from ownerCheckOptions (single-use).
+ * Throws unless an existing passkey signed it.
+ */
+export async function verifyOwner(wallet: string, assertion: any, rp: RelyingParty = browserRp()): Promise<void> {
+  if (!assertion) throw ownerCheckNeeded();
+  const held = takeChallenge(`owner:${wallet}:${rp.rpID}`);
+  if (!held) throw new PasskeyError(400, "The passkey check expired. Try again.");
+  let ok = false;
+  try {
+    ok = await verifyAuthentication(wallet, assertion, held.challenge, rp);
+  } catch (e: any) {
+    throw new PasskeyError(401, `Passkey verification failed: ${e.message}`);
+  }
+  if (!ok) throw new PasskeyError(401, "Passkey verification failed");
+}
+
 /** Verify an assertion. Returns true only if the passkey signature checks out. */
 export async function verifyAuthentication(wallet: string, response: any, challenge?: string, rp: RelyingParty = browserRp()): Promise<boolean> {
-  const expectedChallenge = challenge ?? takeChallenge(`auth:${wallet}:${rp.rpID}`);
+  const expectedChallenge = challenge ?? takeChallenge(`auth:${wallet}:${rp.rpID}`)?.challenge;
   if (!expectedChallenge) throw new Error("No or expired authentication challenge");
 
   const creds = await getCreds(wallet);

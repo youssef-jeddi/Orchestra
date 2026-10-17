@@ -72,7 +72,13 @@ import {
   authenticationOptions,
   verifyAuthentication,
   hasPasskey,
+  hasAnyPasskey,
   hasPhonePasskey,
+  ownerCheckOptions,
+  verifyOwner,
+  listPasskeys,
+  removePasskey,
+  PasskeyError,
   phoneRp,
   browserRp,
   rpForOrigin,
@@ -652,7 +658,37 @@ function desktopRp(req: express.Request): RelyingParty {
 }
 
 function sendError(res: express.Response, err: any, fallbackStatus = 500): void {
+  if (err instanceof PasskeyError) { res.status(err.status).json({ error: err.message, code: err.code }); return; }
   res.status(err instanceof ApprovalError ? err.status : fallbackStatus).json({ error: err.message });
+}
+
+/**
+ * Adding a passkey to a wallet that already has one takes a check with an
+ * existing passkey (`assertion`, over the challenge from /passkey/confirm-options).
+ * Returns whether that check was made; a wallet's first passkey needs none.
+ */
+async function checkOwnerToAddPasskey(wallet: string, req: express.Request): Promise<boolean> {
+  if (!(await hasAnyPasskey(wallet))) return false;
+  await verifyOwner(wallet, req.body?.assertion, desktopRp(req));
+  return true;
+}
+
+/** Tell the user on Telegram whenever a passkey is added or removed, so a change they didn't make doesn't go unnoticed. */
+async function notifyPasskeyChange(wallet: string, text: string): Promise<void> {
+  const link = telegramEnabled() ? await getLink(wallet) : null;
+  if (link) await sendText(link.chatId, text);
+}
+
+function notifyNewPasskey(wallet: string, where: string): void {
+  notifyPasskeyChange(wallet,
+    `🔑 A new passkey was added to your Orchestra account (${where}). It can approve transactions.\n` +
+    "If this wasn't you, remove it in Orchestra (🔑 Passkeys) and reject any approval you didn't ask for.").catch(() => {});
+}
+
+/** Where a passkey lives, in the user's words. */
+function describePasskey(p: { label: string; rpID: string; source?: string }): string {
+  const what = p.source === "privy" ? "sign-in passkey" : p.label === "phone" ? "phone passkey" : "browser passkey";
+  return `${what} on ${p.rpID}`;
 }
 
 // Addresses come from the session and the Safe lookup, never from the model.
@@ -698,11 +734,27 @@ app.get("/passkey/status", async (req, res) => {
 });
 
 // Registering a passkey for a wallet requires a session for that wallet;
-// otherwise anyone could register one for a wallet that has none.
+// otherwise anyone could register one for a wallet that has none. Once the
+// wallet has a passkey, adding another also takes that passkey: a session alone
+// (stolen token, someone in the user's email) mustn't be able to add its own.
+//
+// 1. confirm-options → a check with an existing passkey, or { required: false }
+// 2. register-options with that check's assertion → options to create the new one
+// 3. register → the new passkey is verified and saved
+app.post("/passkey/confirm-options", requireSession, async (req, res) => {
+  try {
+    const walletAddress = res.locals.wallet as string;
+    if (!(await hasAnyPasskey(walletAddress))) { res.json({ required: false }); return; }
+    res.json({ required: true, options: await ownerCheckOptions(walletAddress, desktopRp(req)) });
+  } catch (e: any) { sendError(res, e); }
+});
+
 app.post("/passkey/register-options", requireSession, async (req, res) => {
   try {
     const walletAddress = res.locals.wallet as string;
-    res.json(await registrationOptions(walletAddress, desktopRp(req)));
+    const rp = desktopRp(req);
+    const ownerChecked = await checkOwnerToAddPasskey(walletAddress, req);
+    res.json(await registrationOptions(walletAddress, rp, false, ownerChecked));
   } catch (e: any) { sendError(res, e); }
 });
 
@@ -711,10 +763,34 @@ app.post("/passkey/register", requireSession, async (req, res) => {
     const walletAddress = res.locals.wallet as string;
     const { response } = req.body;
     if (!response) { res.status(400).json({ error: "response required" }); return; }
-    await verifyRegistration(walletAddress, response, { rp: desktopRp(req) });
+    const rp = desktopRp(req);
+    await verifyRegistration(walletAddress, response, { rp });
     console.log(`[passkey] registered for ${walletAddress}`);
+    notifyNewPasskey(walletAddress, describePasskey({ label: "browser", rpID: rp.rpID }));
     res.json({ status: "ok", registered: true });
   } catch (e: any) { sendError(res, e, 400); }
+});
+
+// The account's passkeys, and removing one (with a check by an existing passkey,
+// from confirm-options; the last one can't be removed).
+app.get("/passkey/list", requireSession, async (_req, res) => {
+  try {
+    res.json({ passkeys: await listPasskeys(res.locals.wallet as string) });
+  } catch (e: any) { sendError(res, e); }
+});
+
+app.post("/passkey/remove", requireSession, async (req, res) => {
+  try {
+    const walletAddress = res.locals.wallet as string;
+    const { id, assertion } = req.body || {};
+    if (typeof id !== "string" || !id) { res.status(400).json({ error: "id required" }); return; }
+    await verifyOwner(walletAddress, assertion, desktopRp(req));
+    const removed = await removePasskey(walletAddress, id);
+    console.log(`[passkey] removed ${removed.label} passkey on ${removed.rpID} for ${walletAddress}`);
+    notifyPasskeyChange(walletAddress,
+      `🗑 A passkey was removed from your Orchestra account (${describePasskey(removed)}). It can no longer approve transactions.`).catch(() => {});
+    res.json({ status: "ok", passkeys: await listPasskeys(walletAddress) });
+  } catch (e: any) { sendError(res, e); }
 });
 
 // Passkey options for one pending approval. The challenge is derived from the
@@ -787,13 +863,16 @@ function requirePhoneRp() {
   return rp;
 }
 
-app.post("/passkey/phone-setup", requireSession, async (_req, res) => {
+// Once the wallet has a passkey, asking for the link takes it too (see confirm-options):
+// relinking Telegram only needs the wallet, so Telegram alone doesn't prove the owner.
+app.post("/passkey/phone-setup", requireSession, async (req, res) => {
   try {
     const wallet = res.locals.wallet as string;
     const rp = requirePhoneRp();
     const link = telegramEnabled() ? await getLink(wallet) : null;
     if (!link) { res.status(400).json({ error: "Link Telegram first: the setup link is sent there." }); return; }
-    const token = createSetupToken(wallet);
+    const ownerChecked = await checkOwnerToAddPasskey(wallet, req);
+    const token = createSetupToken(wallet, { ownerChecked });
     await sendLinkMessage(
       link.chatId,
       "Set up a passkey on this phone for Orchestra. Once it's set up, risky transactions are confirmed here with it. Open the link on this phone (valid 10 minutes, one use).",
@@ -825,7 +904,7 @@ app.post("/phone/setup/verify", async (req, res) => {
     const entry = getSetup(token);
     if (!entry || !entry.challenge) { res.status(404).json({ error: "This setup link is invalid, used or expired. Ask for a new one in Orchestra." }); return; }
     consumeSetup(token); // single-use, pass or fail
-    await verifyRegistration(entry.wallet, response, { rp, challenge: entry.challenge, label: "phone" });
+    await verifyRegistration(entry.wallet, response, { rp, challenge: entry.challenge, ownerChecked: entry.ownerChecked, label: "phone" });
     console.log(`[passkey] phone passkey registered for ${entry.wallet}`);
     const link = await getLink(entry.wallet);
     if (link) sendText(link.chatId, "✅ Phone passkey set up. From now on, risky transactions are confirmed on this phone with it.").catch(() => {});
@@ -939,8 +1018,9 @@ app.post("/auth/privy", async (req, res) => {
     const rp = rpForOrigin(req.headers.origin);
     if (rp) {
       try {
-        const n = await importPrivyPasskeys(user, walletAddress, rp.rpID);
-        if (n) console.log(`[passkey] sign-in passkey ready for approvals on ${rp.rpID} (${session.wallet})`);
+        const { held, added } = await importPrivyPasskeys(user, walletAddress, rp.rpID);
+        if (held) console.log(`[passkey] sign-in passkey ready for approvals on ${rp.rpID} (${session.wallet})`);
+        if (added) notifyNewPasskey(session.wallet, describePasskey({ label: "browser", rpID: rp.rpID, source: "privy" }));
       } catch (e: any) {
         console.warn(`[passkey] couldn't load the Privy passkey for ${session.wallet}: ${e.message}`);
       }
