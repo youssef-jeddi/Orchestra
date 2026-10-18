@@ -19,6 +19,7 @@ export default function PolicyPanel() {
   const { ledger } = useOrchestra();
   const [open, setOpen] = useState(false);
   const [values, setValues] = useState({});      // string-valued form fields
+  const [loaded, setLoaded] = useState({});      // what the server had, to send only what changed
   const [habit, setHabit] = useState(null);
   const [status, setStatus] = useState('');
   const [saving, setSaving] = useState(false);
@@ -41,6 +42,7 @@ export default function PolicyPanel() {
       const next = {};
       for (const f of FIELDS) next[f.key] = policy?.[f.key] != null ? String(policy[f.key]) : '';
       setValues(next);
+      setLoaded(next);
     } catch (err) {
       setStatus(`Error: ${err.message}`);
     }
@@ -57,13 +59,17 @@ export default function PolicyPanel() {
     setSaving(true);
     setStatus('Saving…');
     try {
-      // '' → null clears the field; otherwise parse a number.
+      // Only changed fields are sent ('' → null clears one). The server asks for proof before it
+      // raises a limit, which this panel can't give: its plain message is shown (use Limits on /simple).
       const patch = {};
       for (const f of FIELDS) {
         const raw = values[f.key];
+        if ((raw ?? '') === (loaded[f.key] ?? '')) continue;
         patch[f.key] = raw === '' || raw == null ? null : Number(raw);
       }
+      if (Object.keys(patch).length === 0) { setStatus('Nothing to save.'); return; }
       await setPolicy(patch);
+      setLoaded({ ...values });
       setStatus('Guardrails saved.');
       if (wallet) { try { setHabit(await getHabit(wallet)); } catch {} }
     } catch (err) {

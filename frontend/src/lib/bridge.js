@@ -167,6 +167,19 @@ export async function setPolicy(policy) {
   });
 }
 
+/**
+ * Step 1 of raising a limit: { required: false } if the change can go straight through, or the
+ * passkey options / wallet typed data to answer (the change is the same body POST /policy takes).
+ */
+export async function limitsConfirmOptions(change) {
+  return bridgeFetch('/policy/confirm-options', { method: 'POST', body: JSON.stringify(change) });
+}
+
+/** Save a limit change ({ policy?, removeAddress?, confirmation? }). Resolves with the saved limits. */
+export async function saveLimitChange(change) {
+  return bridgeFetch('/policy', { method: 'POST', body: JSON.stringify(change) });
+}
+
 export async function getHabit(walletAddress) {
   return bridgeFetch(`/habit?wallet=${walletAddress}`);
 }

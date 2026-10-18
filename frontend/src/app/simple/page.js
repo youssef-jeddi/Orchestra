@@ -17,6 +17,8 @@ import { shortAddress } from '@/lib/onboarding';
 import { SIGN_REFUSED, PASSKEY_PROMPT, isPasskeyRequired, shouldOfferPasskey, userMaySign, pendingRequest, verifyStepFor, passkeyDraft, SOCIAL_NONE, SOCIAL_WRONG_ACCOUNT } from '@/lib/emailPasskey';
 import EmailPasskeySetup from '@/components/EmailPasskeySetup';
 import SocialPasskeySetup from '@/components/SocialPasskeySetup';
+import LimitsSheet from '@/components/LimitsSheet';
+import { LIMITS_BUTTON_HINT } from '@/lib/limits';
 import {
   ruleHint, declineLabel, declinedText, expiredText, ALREADY_SETTLED, approvalControls,
 } from '@/lib/approvalCard';
@@ -74,6 +76,7 @@ function SimpleChat() {
   const [prices, setPrices] = useState(null);
   const [passkeyReg, setPasskeyReg] = useState(false);
   const [showPasskeys, setShowPasskeys] = useState(false);
+  const [showLimits, setShowLimits] = useState(false);
   const showError = useCallback((msg) => setMessages((m) => [...m, { role: 'agent', error: msg }]), []);
   const [setupOpen, setSetupOpen] = useState(false); // an email user's first-passkey steps
   const held = useRef(pendingRequest()); // the request held back until a passkey exists
@@ -265,6 +268,7 @@ function SimpleChat() {
               </button>
             )}
             <TelegramLink ledger={ledger} session={session} onError={(msg) => setMessages((m) => [...m, { role: 'agent', error: msg }])} />
+            {session.ready && <button onClick={() => setShowLimits((v) => !v)} style={pill(showLimits)} title={LIMITS_BUTTON_HINT}>Limits</button>}
             {session.ready && (passkeyReg
               ? <button onClick={() => setShowPasskeys((v) => !v)} style={pill(showPasskeys)} title="See, add or remove your passkeys">🔑 Passkeys</button>
               : <button onClick={registerPk} style={pill(false)} title={emailWallet ? 'Add a passkey on this device' : ADD_PASSKEY_HINT}>🔑 Add passkey</button>)}
@@ -297,6 +301,9 @@ function SimpleChat() {
       )}
       {connected && session.ready && showPasskeys && (
         <PasskeyPanel onAdd={registerPk} onChange={refreshPasskeyStatus} onClose={() => setShowPasskeys(false)} onError={showError} />
+      )}
+      {connected && session.ready && showLimits && (
+        <LimitsSheet ledger={ledger} onClose={() => setShowLimits(false)} buttonStyle={approveBtn} />
       )}
       {connected && session.ready && <SafeSetup safe={safe} canFund={userMaySign({ emailWallet, hasPasskey: session.hasPasskey }, 'deposit')} ledger={ledger} onError={(msg) => setMessages((m) => [...m, { role: 'agent', error: msg }])} />}
 
