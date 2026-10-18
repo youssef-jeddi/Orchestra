@@ -3,6 +3,8 @@
 // free of jargon, and the Safe is "your account". Run with `npm run test:plain`.
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { Step } from "./schema";
 import { resolveSteps, type ResolveContext } from "./resolve";
 import { assessAction } from "./pipeline";
@@ -14,6 +16,8 @@ import { lpPriceProblem } from "../integrations/uniswap/liquidity";
 import { createApproval, type NewApproval } from "../approvals";
 import { describeApproval, describeOutcome, reviewOf } from "../approvals/describe";
 import { USDC_SEPOLIA } from "../integrations/uniswap/types";
+// @ts-expect-error plain JS helper shared with the frontend, no type declarations
+import * as ui from "../../frontend/src/lib/plainLanguage.js";
 
 setPrices({ ETH: 2500, WETH: 2500, USDC: 1 });
 
@@ -156,6 +160,65 @@ test("replies: balance and address answers are plain, wrapped ETH is explained",
 test("planner prompt: still understands 'Safe' but tells the model to write plainly", () => {
   assert.match(PLANNER_SYSTEM_PROMPT, /"my Safe"/);
   assert.match(PLANNER_SYSTEM_PROMPT, /never "Safe"/);
+});
+
+// ── The chat's labels (frontend/src/lib/plainLanguage.js) ──
+test("chat: the verdict pill is worded plainly for every verdict, and none says Safe", () => {
+  assert.deepEqual(
+    ["AUTO_EXECUTE", "NEEDS_APPROVAL", "BLOCKED", "INFO"].map(ui.verdictLabel),
+    ["Done automatically", "Needs your OK", "Blocked", "Info"],
+  );
+  for (const label of Object.values(ui.VERDICT_LABELS) as string[]) clean("verdict label", label);
+});
+
+test("chat: a verdict we don't know never reads as 'done'", () => {
+  assert.equal(ui.verdictLabel("UNKNOWN"), "Needs your OK");
+  assert.equal(ui.verdictLabel(undefined), "Needs your OK");
+});
+
+test("chat: every rule the policy can trigger has a plain chip, never the raw slug", () => {
+  const slugs = ["daily-limit", "daily-count-velocity", "unverified-token", "unknown-recipient", "habit-anomaly", "unknown-intent", "malformed", "denylist"];
+  for (const slug of slugs) {
+    const label: string = ui.ruleLabel(slug);
+    assert.notEqual(label, slug);
+    assert.ok(!label.includes("-"), label);
+    clean("rule chip", label);
+  }
+  assert.equal(ui.ruleLabel("daily-limit"), "Over your daily limit");
+  assert.equal(ui.ruleLabel("unknown-recipient"), "New recipient");
+  assert.equal(ui.ruleLabel("something-new"), "Extra check");
+});
+
+test("chat: the suggested first actions are few, small and never mention the Safe", () => {
+  const ex: string[] = ui.EXAMPLES;
+  assert.ok(ex.length >= 4 && ex.length <= 6, `${ex.length} suggestions`);
+  for (const e of ex) {
+    clean("suggestion", e);
+    for (const n of e.match(/\b\d+(\.\d+)?\b/g) ?? []) assert.ok(Number(n) <= 5, `"${e}" is not a small amount`);
+  }
+  assert.ok(ex.includes("What can I do here?") && ex.some((e) => /balance/i.test(e)));
+  clean("welcome", `${ui.WELCOME.title} ${ui.WELCOME.intro}`);
+  clean("receipt", ui.RECEIPT_LABEL);
+});
+
+test("chat: the welcome stays until the person has written something", () => {
+  assert.equal(ui.showWelcome([]), true);
+  // The agent's own messages (e.g. the passkey prompt for an email user) don't hide it.
+  assert.equal(ui.showWelcome([{ role: "agent", passkeyPrompt: true }]), true);
+  assert.equal(ui.showWelcome([{ role: "agent", passkeyPrompt: true }, { role: "user", text: "hi" }]), false);
+});
+
+test("chat and phone pages: no visible text says Safe, Etherscan or 'executed'", () => {
+  const root = path.resolve(__dirname, "../../frontend/src");
+  for (const file of ["app/simple/page.js", "app/phone/approve/[id]/page.js", "app/phone/setup/page.js", "lib/phone.js", "lib/plainLanguage.js"]) {
+    const visible = fs.readFileSync(path.join(root, file), "utf8")
+      .split("\n")
+      .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)) // comments and identifiers (SafeSetup, safe.deposit) are not what people read
+      .join("\n")
+      .replace(/\/\/ .*$/gm, "")
+      .replace(/https?:\/\/\S+/g, "");
+    assert.doesNotMatch(visible, /\bSafe\b|Etherscan|View on|\bExecuting\b|\bExecuted\b|Rejected\./, file);
+  }
 });
 
 (async () => {

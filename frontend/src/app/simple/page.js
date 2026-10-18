@@ -17,6 +17,7 @@ import { PRIVY_APP_ID } from '@/lib/privy';
 import { shortAddress } from '@/lib/onboarding';
 import { PASSKEY_PROMPT, isPasskeyRequired, shouldOfferPasskey, userMaySign, pendingRequest } from '@/lib/emailPasskey';
 import EmailPasskeySetup from '@/components/EmailPasskeySetup';
+import { verdictLabel, ruleLabel, EXAMPLES, WELCOME, showWelcome, RECEIPT_LABEL, TOKEN_HINTS } from '@/lib/plainLanguage';
 
 const ACCENT = '#C084FC';
 
@@ -26,27 +27,6 @@ const VERDICT_COLOR = {
   INFO: '#007AFF',
   BLOCKED: '#FF453A',
 };
-
-const RULE_LABELS = {
-  'daily-limit': 'Daily limit',
-  'daily-count-velocity': 'Daily tx count',
-  'unverified-token': 'Unverified token',
-  'unknown-recipient': 'Unknown recipient',
-  'habit-anomaly': 'Unusual size',
-  'unknown-intent': 'Unrecognized action',
-  malformed: 'Malformed plan',
-  denylist: 'Denylisted token',
-};
-
-const EXAMPLES = [
-  'What can you do?',
-  'What is my balance?',
-  "What's the price of ETH?",
-  'Swap 2 USDC for ETH',
-  'Send 5 USDC to vitalik.eth',
-  'Fund my Safe with 0.01 ETH',
-  'Show my liquidity positions',
-];
 
 // Statuses answered with plain text instead of a plan card.
 const TEXT_STATUSES = new Set(['reply', 'needs_clarification', 'unsupported']);
@@ -138,7 +118,7 @@ function SimpleChat() {
     if (ledger.walletAddress && !session.ready) {
       setMessages((m) => [...m, { role: 'user', text }, {
         role: 'agent',
-        error: session.status === 'signing' ? 'Finish signing in with your wallet first.' : 'Sign in with your wallet first (button at the top).',
+        error: session.status === 'signing' ? 'Finish signing in first.' : 'Sign in first (button at the top).',
       }]);
       setInput('');
       return;
@@ -149,10 +129,10 @@ function SimpleChat() {
     await ask(text, history);
   }, [input, busy, messages, ledger.walletAddress, session.ready, session.status, ask]);
 
-  // Approve/execute a swap, send or Safe deposit from an agent card.
+  // Approve a swap, send or deposit into your account from an agent card.
   const execute = useCallback(async (data, idx) => {
     if (!ledger.walletAddress) {
-      setMessages((m) => [...m, { role: 'agent', error: 'Connect a wallet first.' }]);
+      setMessages((m) => [...m, { role: 'agent', error: 'Sign in first.' }]);
       return;
     }
     const who = { emailWallet, hasPasskey: session.hasPasskey };
@@ -168,7 +148,7 @@ function SimpleChat() {
           ? await executeSwap(ledger, data, who)
           : await executeSend(ledger, data, who);
       if (result.orderId) {
-        setMessages((m) => [...m, { role: 'system', text: `UniswapX order submitted: ${result.orderId.slice(0, 16)}…` }]);
+        setMessages((m) => [...m, { role: 'system', text: 'Your swap order was sent. It can take a minute to go through.' }]);
       } else {
         setMessages((m) => [...m, { role: 'system', txHash: result.txHash, explorerUrl: result.explorerUrl }]);
       }
@@ -182,11 +162,11 @@ function SimpleChat() {
   // Approve + execute with a passkey (biometric) instead of signing directly.
   const approvePasskey = useCallback(async (data, idx) => {
     if (!ledger.walletAddress) {
-      setMessages((m) => [...m, { role: 'agent', error: 'Connect a wallet first.' }]);
+      setMessages((m) => [...m, { role: 'agent', error: 'Sign in first.' }]);
       return;
     }
     if (!data.approval?.id) {
-      setMessages((m) => [...m, { role: 'agent', error: 'This action has no server-held approval. Ask again.' }]);
+      setMessages((m) => [...m, { role: 'agent', error: "I can't find this approval any more. Ask again." }]);
       return;
     }
     setSigningIdx(idx);
@@ -208,7 +188,7 @@ function SimpleChat() {
       setPasskeyReg(true);
       session.refreshAccount();
     } catch (err) {
-      setMessages((m) => [...m, { role: 'agent', error: `Passkey registration failed: ${err.message}` }]);
+      setMessages((m) => [...m, { role: 'agent', error: `Couldn't add the passkey: ${err.message}` }]);
     }
   }, [ledger.walletAddress, needsFirstPasskey, session]);
 
@@ -262,14 +242,14 @@ function SimpleChat() {
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             {!session.ready && (
               <button onClick={session.signIn} disabled={session.status === 'signing'} style={pill(true)}
-                title={session.error || 'Prove you own this wallet (free, no transaction)'}>
+                title={session.error || 'Prove this wallet is yours (free, nothing is sent)'}>
                 {session.status === 'signing' ? 'Check your wallet…' : '✍️ Sign in'}
               </button>
             )}
             <TelegramLink ledger={ledger} session={session} onError={(msg) => setMessages((m) => [...m, { role: 'agent', error: msg }])} />
             {session.ready && (passkeyReg
-              ? <button onClick={() => setShowPasskeys((v) => !v)} style={pill(showPasskeys)} title="See, add or remove this account's passkeys">🔑 Passkeys</button>
-              : <button onClick={registerPk} style={pill(false)} title="Register a device passkey">🔑 Add passkey</button>)}
+              ? <button onClick={() => setShowPasskeys((v) => !v)} style={pill(showPasskeys)} title="See, add or remove your passkeys">🔑 Passkeys</button>
+              : <button onClick={registerPk} style={pill(false)} title="Add a passkey on this device">🔑 Add passkey</button>)}
             <button onClick={ledger.disconnect} style={pill(false)} title="Disconnect">
               <span style={{ width: 6, height: 6, borderRadius: 3, background: '#30D158', display: 'inline-block' }} />
               {ledger.connectionType === 'metamask' ? '🦊 ' : ledger.connectionType === 'privy' ? '🔑 ' : ''}
@@ -297,10 +277,13 @@ function SimpleChat() {
 
       {/* Messages */}
       <main style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 16, padding: '24px 0' }}>
-        {messages.length === 0 && (
-          <div style={{ margin: 'auto', textAlign: 'center', color: '#666' }}>
-            <p style={{ fontSize: 22, color: '#E8E4DE', fontWeight: 300, marginBottom: 20 }}>
-              What do you want to do?
+        {showWelcome(messages) && (
+          <div style={{ margin: messages.length === 0 ? 'auto' : '8px auto 0', textAlign: 'center', color: '#666' }}>
+            <p style={{ fontSize: 22, color: '#E8E4DE', fontWeight: 300, marginBottom: 10 }}>
+              {WELCOME.title}
+            </p>
+            <p style={{ fontSize: 14, color: '#888', lineHeight: 1.5, maxWidth: 460, margin: '0 auto 20px' }}>
+              {WELCOME.intro}
             </p>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center' }}>
               {EXAMPLES.map((ex) => (
@@ -333,7 +316,7 @@ function SimpleChat() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') send(); }}
-            placeholder="Message Orchestra…"
+            placeholder="Tell me what you want to do…"
             style={{
               flex: 1, minWidth: 0, background: 'transparent', border: 'none', outline: 'none',
               color: '#E8E4DE', fontSize: 15, fontFamily: 'var(--font-inter)', cursor: 'text',
@@ -353,7 +336,7 @@ function SimpleChat() {
         </div>
         {!connected && (
           <p style={{ fontSize: 11, color: '#555', textAlign: 'center', margin: '8px 0 0' }}>
-            Connect a wallet for balance queries and to enforce your guardrails.
+            Sign in to see your balance and to have your limits protect you.
           </p>
         )}
       </div>
@@ -387,7 +370,7 @@ function MessageRow({ m, idx, onExecute, onPasskey, passkeyReg, signing, emailWa
         border: '1px solid #30D15844', borderRadius: 12, padding: '10px 14px', background: '#30D15811' }}>
         {m.txHash
           ? <a href={m.explorerUrl} target="_blank" rel="noreferrer" style={{ color: '#30D158', textDecoration: 'none' }}>
-              ✓ Executed — {m.txHash.slice(0, 18)}… ↗
+              ✓ Done — {RECEIPT_LABEL}
             </a>
           : m.text}
       </div>
@@ -428,7 +411,7 @@ function Timing({ timing }) {
   if (!timing?.totalMs) return null;
   return (
     <span style={{ fontSize: 10, color: '#555', paddingLeft: 4 }}>
-      {(timing.totalMs / 1000).toFixed(1)}s{timing.model ? ` · ${timing.model}` : ''}
+      {(timing.totalMs / 1000).toFixed(1)}s
     </span>
   );
 }
@@ -453,7 +436,7 @@ function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing, emailWalle
   const needsSign = !data.autoExecuted && (data.quoteData || data.sendData || data.depositData || data.lpData || data.lpRemoveData);
   const isSwap = !!data.quoteData;
   const isDeposit = !!data.depositData;
-  // Liquidity is added from the Safe, so it can only be approved through a server-held
+  // Liquidity is added from the account, so it can only be approved through a server-held
   // approval (passkey / Telegram) — there is no "sign it in your wallet" path.
   const isLp = !!(data.lpData || data.lpRemoveData);
   const method = data.assessment?.approvalMethod; // 'passkey' | 'ledger' | 'none'
@@ -478,12 +461,12 @@ function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing, emailWalle
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
           {[
             { label: 'ETH', value: data.balances.eth?.toFixed(4) },
-            { label: 'WETH', value: data.balances.weth?.toFixed(4) },
+            { label: 'WETH', hint: TOKEN_HINTS.WETH, value: data.balances.weth?.toFixed(4) },
             { label: 'USDC', value: data.balances.usdc?.toFixed(2) },
           ].map((t) => (
             <div key={t.label} style={{ flex: '1 1 80px', padding: '10px 12px', background: 'rgba(255,255,255,0.03)',
               borderRadius: 10, border: '1px solid rgba(255,255,255,0.06)' }}>
-              <span style={{ fontSize: 11, color: '#666' }}>{t.label}</span>
+              <span style={{ fontSize: 11, color: '#666' }}>{t.label}{t.hint ? ` · ${t.hint}` : ''}</span>
               <p style={{ margin: '2px 0 0', fontSize: 16, color: '#E8E4DE' }}>{t.value ?? '—'}</p>
             </div>
           ))}
@@ -501,12 +484,12 @@ function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing, emailWalle
       <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
         <span style={{ padding: '3px 10px', borderRadius: 100, fontSize: 11, fontWeight: 500,
           background: `${color}22`, color, border: `1px solid ${color}44` }}>
-          {verdict.replace('_', ' ')}
+          {verdictLabel(verdict)}
         </span>
         {triggered.map((slug) => (
           <span key={slug} style={{ fontSize: 10, padding: '2px 8px', borderRadius: 100,
             background: `${color}18`, color, border: `1px solid ${color}33` }}>
-            {RULE_LABELS[slug] || slug}
+            {ruleLabel(slug)}
           </span>
         ))}
       </div>
@@ -515,7 +498,7 @@ function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing, emailWalle
       {data.autoExecuted && data.txHash && (
         <a href={data.explorerUrl} target="_blank" rel="noreferrer"
           style={{ fontSize: 13, color: '#30D158', textDecoration: 'none' }}>
-          ✓ Executed — view on Etherscan ↗
+          ✓ Done — {RECEIPT_LABEL}
         </a>
       )}
       {needsSign && data.approval?.channel === 'telegram' && <TelegramWait approval={data.approval} />}
@@ -531,11 +514,11 @@ function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing, emailWalle
             </span>
           ) : isLp ? (
             <span style={{ fontSize: 13, color: '#999', lineHeight: 1.5 }}>
-              Liquidity runs from your Safe: approve it with a passkey (add one top-right) or link Telegram, then ask again.
+              Liquidity comes from your account: approve it with a passkey (add one top-right) or link Telegram, then ask again.
             </span>
           ) : (
             <button onClick={onExecute} disabled={signing} style={approveBtn(signing)}>
-              {signing ? 'Check your wallet…' : (isDeposit ? 'Sign deposit' : isSwap ? 'Approve & Swap' : 'Approve & Send')}
+              {signing ? 'Check your wallet…' : (isDeposit ? 'Confirm in your wallet' : isSwap ? 'Approve & Swap' : 'Approve & Send')}
             </button>
           )}
           {method === 'passkey' && !passkeyReg && !isLp && (
@@ -545,7 +528,7 @@ function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing, emailWalle
           )}
           {method === 'ledger' && (
             <span style={{ fontSize: 11, color: '#777' }}>
-              Ledger is paused — approve with a passkey or your wallet instead.
+              Ledger is paused. Approve with a passkey or your wallet instead.
             </span>
           )}
         </div>
@@ -570,18 +553,18 @@ function TelegramWait({ approval }) {
   const text = {
     pending: approval.factor === 'phone-passkey'
       ? '📱 Sent to your Telegram. Tap “Review & approve” on your phone and confirm with its passkey.'
-      : '📱 Sent to your Telegram. Check the details there and approve or reject.',
-    executing: '⏳ Approved on your phone. Executing…',
-    rejected: '🚫 Rejected on your phone. Nothing was executed.',
-    expired: '⌛ Expired. Nothing was executed.',
-    failed: `❌ Execution failed: ${state.error || 'unknown error'}`,
+      : '📱 Sent to your Telegram. Check the details there and say yes or no.',
+    executing: '⏳ Approved on your phone. Doing it now…',
+    rejected: '🚫 You said no on your phone. Nothing was done.',
+    expired: '⌛ Expired. Nothing was done.',
+    failed: `❌ It didn't go through: ${state.error || 'something went wrong'}`,
   }[state.status];
 
   if (state.status === 'executed') {
     return (
       <a href={state.explorerUrl} target="_blank" rel="noreferrer"
         style={{ fontSize: 13, color: '#30D158', textDecoration: 'none' }}>
-        ✓ Approved on your phone and executed. View on Etherscan ↗
+        ✓ Approved on your phone and done. {RECEIPT_LABEL}
       </a>
     );
   }
@@ -613,11 +596,11 @@ function TelegramLink({ ledger, session, onError }) {
   if (status.linked) {
     const who = status.username ? `@${status.username}` : 'Telegram';
     if (status.phonePasskey) {
-      return <span style={{ fontSize: 11, color: '#30D158' }} title="Risky transactions are confirmed on your phone with its passkey">📱 {who} · 🔐 phone passkey</span>;
+      return <span style={{ fontSize: 11, color: '#30D158' }} title="Risky actions are confirmed on your phone with its passkey">📱 {who} · 🔐 phone passkey</span>;
     }
     return (
       <>
-        <span style={{ fontSize: 11, color: '#30D158' }} title="Risky transactions are approved in Telegram">📱 {who}</span>
+        <span style={{ fontSize: 11, color: '#30D158' }} title="Risky actions are approved in Telegram">📱 {who}</span>
         {status.phoneAvailable && <PhoneSetupButton session={session} onDone={refresh} onError={onError} />}
       </>
     );
@@ -648,7 +631,7 @@ function TelegramLink({ ledger, session, onError }) {
   };
 
   return (
-    <button onClick={link} disabled={busy} style={pill(false)} title="Approve risky transactions from your phone">
+    <button onClick={link} disabled={busy} style={pill(false)} title="Get risky actions sent to your phone for your OK">
       {busy ? 'Check your wallet…' : '📱 Link Telegram'}
     </button>
   );
@@ -667,7 +650,7 @@ function PasskeyPanel({ onAdd, onChange, onClose, onError }) {
   useEffect(() => { load(); }, [load]);
 
   const remove = async (p) => {
-    if (!window.confirm(`Remove the ${passkeyName(p).toLowerCase()} on ${p.rpID}? It will no longer approve transactions.`)) return;
+    if (!window.confirm(`Remove the ${passkeyName(p).toLowerCase()} on ${p.rpID}? It will no longer be able to approve anything.`)) return;
     setBusy(p.id);
     try {
       setPasskeys((await removePasskey(p.id)).passkeys);
@@ -693,7 +676,7 @@ function PasskeyPanel({ onAdd, onChange, onClose, onError }) {
   return (
     <div style={{ marginTop: 12, padding: '10px 12px', border: '1px solid #1c1c22', borderRadius: 12 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-        <span style={{ fontSize: 12, color: '#999' }}>Passkeys that can approve your transactions</span>
+        <span style={{ fontSize: 12, color: '#999' }}>Passkeys that can approve your actions</span>
         <button onClick={onClose} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: 16 }} title="Close">×</button>
       </div>
       {!passkeys && <p style={{ fontSize: 12, color: '#555', margin: 0 }}>Loading…</p>}
@@ -739,7 +722,7 @@ function PhoneSetupButton({ session, onDone, onError }) {
     try {
       // Setting up a phone passkey needs a wallet session: sign in first if there
       // isn't one, and once more if the server says it has expired meanwhile.
-      if (!(await session.ensure())) throw new Error('Sign in with your wallet to set up the phone passkey.');
+      if (!(await session.ensure())) throw new Error('Sign in to set up the phone passkey.');
       try {
         await setUpPhonePasskey();
       } catch (err) {
@@ -756,7 +739,7 @@ function PhoneSetupButton({ session, onDone, onError }) {
   if (state === 'sent') return <span style={{ fontSize: 11, color: '#999' }}>📲 Open the link in Telegram on your phone…</span>;
   return (
     <button onClick={send} disabled={state === 'sending'} style={pill(false)}
-      title="Confirm risky transactions on your phone with a passkey, after seeing exactly what executes">
+      title="Confirm risky actions on your phone with a passkey, after seeing exactly what will happen">
       {state === 'sending' ? 'Sending…' : '🔐 Set up phone passkey'}
     </button>
   );
@@ -816,11 +799,11 @@ function SafeSetup({ safe, canFund, ledger, onError }) {
       </span>
       <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
         <button onClick={() => fund('eth', '0.01')} disabled={!!busy || !canFund} style={pill(false)}
-          title={canFund ? undefined : 'Add a passkey first'}>
+          title={canFund ? 'Move 0.01 ETH from your wallet into your account' : 'Add a passkey first'}>
           {busy === 'eth' ? '…' : '+ 0.01 ETH'}
         </button>
         <button onClick={() => fund('usdc', '10')} disabled={!!busy || !canFund} style={pill(false)}
-          title={canFund ? undefined : 'Add a passkey first'}>
+          title={canFund ? 'Move 10 USDC from your wallet into your account' : 'Add a passkey first'}>
           {busy === 'usdc' ? '…' : '+ 10 USDC'}
         </button>
       </div>

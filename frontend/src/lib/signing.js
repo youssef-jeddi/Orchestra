@@ -129,7 +129,7 @@ export async function executeSend(ledger, data, who) {
 export async function executeSwap(ledger, data, who) {
   assertMaySign(who, 'swap');
   const q = data.quoteData;
-  if (!q) throw new Error('No quote to sign');
+  if (!q) throw new Error('There is nothing to sign yet. Ask again.');
   // The Permit2 typed data is bound to Sepolia too, so switch before any signature.
   if (usesProvider(ledger)) await ensureSepolia(ledger.getProvider());
 
