@@ -221,6 +221,28 @@ test("chat and phone pages: no visible text says Safe, Etherscan or 'executed'",
   }
 });
 
+test("replies: a zero WETH balance is left out of the portfolio sentence, a real one is explained", () => {
+  const none = describeBalances({ eth: 1, weth: 0, usdc: 500, totalUsd: 3000 });
+  assert.equal(none, "You have 1.0000 ETH and 500.00 USDC, about $3000.00 in total");
+  assert.doesNotMatch(none, /WETH/);
+  assert.match(describeBalances({ eth: 1, weth: 0.5, usdc: 500, totalUsd: 3000 }), /ETH, 0\.5000 WETH \(wrapped ETH\) and 500\.00 USDC/);
+  assert.match(describeBalances({ eth: 1, weth: 0, usdc: 5, totalUsd: 1 }, "WETH"), /0\.0000 WETH/); // asking for it still answers
+});
+
+test("chat: the balance card hides the WETH tile when there is none", () => {
+  assert.deepEqual(ui.balanceTiles({ eth: 1, weth: 0, usdc: 5 }).map((t: any) => t.label), ["ETH", "USDC"]);
+  const tiles = ui.balanceTiles({ eth: 1, weth: 0.25, usdc: 5 });
+  assert.deepEqual(tiles.map((t: any) => t.label), ["ETH", "WETH", "USDC"]);
+  assert.equal(tiles[1].hint, "wrapped ETH");
+});
+
+test("chat: the Add passkey tooltip for wallet users is short and plain", () => {
+  clean("tooltip", ui.ADD_PASSKEY_HINT);
+  assert.match(ui.ADD_PASSKEY_HINT, /Face ID or your fingerprint/);
+  assert.ok(ui.ADD_PASSKEY_HINT.length < 100);
+  assert.doesNotMatch(ui.ADD_PASSKEY_HINT, /multisig|signer|transaction/i);
+});
+
 (async () => {
   console.log("plain language");
   for (const [name, fn] of tests) {

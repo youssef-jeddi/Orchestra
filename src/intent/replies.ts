@@ -19,5 +19,10 @@ export function describeBalances(b: Balances | null, token?: string): string {
   if (token === "ETH") return `You have ${b.eth.toFixed(4)} ETH`;
   if (token === "WETH") return `You have ${b.weth.toFixed(4)} WETH (wrapped ETH)`;
   if (token === "USDC") return `You have ${b.usdc.toFixed(2)} USDC`;
-  return `You have ${b.eth.toFixed(4)} ETH, ${b.weth.toFixed(4)} WETH (wrapped ETH) and ${b.usdc.toFixed(2)} USDC, about $${b.totalUsd.toFixed(2)} in total`;
+  // Wrapped ETH is left out when there is none: "0.0000 WETH" only confuses a newcomer.
+  const parts = [`${b.eth.toFixed(4)} ETH`];
+  if (b.weth > 0) parts.push(`${b.weth.toFixed(4)} WETH (wrapped ETH)`);
+  parts.push(`${b.usdc.toFixed(2)} USDC`);
+  const list = parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}` : parts[0];
+  return `You have ${list}, about $${b.totalUsd.toFixed(2)} in total`;
 }

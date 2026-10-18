@@ -51,5 +51,16 @@ export const showWelcome = (messages) => !messages.some((m) => m.role === 'user'
 /** Link text for a finished action (instead of naming a block explorer). */
 export const RECEIPT_LABEL = 'View receipt ↗';
 
+/** The balance card's tiles: wrapped ETH only shows when the account holds some. */
+export function balanceTiles(balances) {
+  const tiles = [{ label: 'ETH', value: balances?.eth?.toFixed(4) }];
+  if (balances?.weth > 0) tiles.push({ label: 'WETH', hint: TOKEN_HINTS.WETH, value: balances.weth.toFixed(4) });
+  tiles.push({ label: 'USDC', value: balances?.usdc?.toFixed(2) });
+  return tiles;
+}
+
+/** Tooltip on the header "Add passkey" button for people who signed in with a wallet. */
+export const ADD_PASSKEY_HINT = 'Approve bigger actions with Face ID or your fingerprint instead of your wallet';
+
 /** Short, friendly name for a balance card; WETH is explained, not assumed. */
 export const TOKEN_HINTS = { WETH: 'wrapped ETH' };

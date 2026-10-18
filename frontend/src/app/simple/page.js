@@ -17,7 +17,7 @@ import { PRIVY_APP_ID } from '@/lib/privy';
 import { shortAddress } from '@/lib/onboarding';
 import { PASSKEY_PROMPT, isPasskeyRequired, shouldOfferPasskey, userMaySign, pendingRequest } from '@/lib/emailPasskey';
 import EmailPasskeySetup from '@/components/EmailPasskeySetup';
-import { verdictLabel, ruleLabel, EXAMPLES, WELCOME, showWelcome, RECEIPT_LABEL, TOKEN_HINTS } from '@/lib/plainLanguage';
+import { verdictLabel, ruleLabel, EXAMPLES, WELCOME, showWelcome, RECEIPT_LABEL, balanceTiles, ADD_PASSKEY_HINT } from '@/lib/plainLanguage';
 
 const ACCENT = '#C084FC';
 
@@ -249,7 +249,7 @@ function SimpleChat() {
             <TelegramLink ledger={ledger} session={session} onError={(msg) => setMessages((m) => [...m, { role: 'agent', error: msg }])} />
             {session.ready && (passkeyReg
               ? <button onClick={() => setShowPasskeys((v) => !v)} style={pill(showPasskeys)} title="See, add or remove your passkeys">🔑 Passkeys</button>
-              : <button onClick={registerPk} style={pill(false)} title="Add a passkey on this device">🔑 Add passkey</button>)}
+              : <button onClick={registerPk} style={pill(false)} title={emailWallet ? 'Add a passkey on this device' : ADD_PASSKEY_HINT}>🔑 Add passkey</button>)}
             <button onClick={ledger.disconnect} style={pill(false)} title="Disconnect">
               <span style={{ width: 6, height: 6, borderRadius: 3, background: '#30D158', display: 'inline-block' }} />
               {ledger.connectionType === 'metamask' ? '🦊 ' : ledger.connectionType === 'privy' ? '🔑 ' : ''}
@@ -459,11 +459,7 @@ function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing, emailWalle
       {/* Balance card */}
       {data.intentType === 'balance' && data.balances && (
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-          {[
-            { label: 'ETH', value: data.balances.eth?.toFixed(4) },
-            { label: 'WETH', hint: TOKEN_HINTS.WETH, value: data.balances.weth?.toFixed(4) },
-            { label: 'USDC', value: data.balances.usdc?.toFixed(2) },
-          ].map((t) => (
+          {balanceTiles(data.balances).map((t) => (
             <div key={t.label} style={{ flex: '1 1 80px', padding: '10px 12px', background: 'rgba(255,255,255,0.03)',
               borderRadius: 10, border: '1px solid rgba(255,255,255,0.06)' }}>
               <span style={{ fontSize: 11, color: '#666' }}>{t.label}{t.hint ? ` · ${t.hint}` : ''}</span>
@@ -773,10 +769,10 @@ function SafeSetup({ safe, canFund, ledger, onError }) {
 
   if (safe.safeStatus !== 'deployed') {
     return (
-      <p style={{ fontSize: 12, color: '#555', margin: '10px 0 0' }}>
+      <p style={{ fontSize: 14, color: '#B9B5AE', margin: '10px 0 0' }}>
         Setting up your account…
         {safe.safeAddress && (
-          <span title="Your account address. You can send funds to it now." style={{ marginLeft: 8, color: '#777' }}>
+          <span title="Your account address. You can send funds to it now." style={{ marginLeft: 8, fontSize: 13, color: '#8d8a84' }}>
             {shortAddress(safe.safeAddress)}
           </span>
         )}
@@ -791,10 +787,10 @@ function SafeSetup({ safe, canFund, ledger, onError }) {
       marginTop: 12, padding: '10px 12px', border: '1px solid #1c1c22', borderRadius: 12,
     }}>
       <a href={`https://sepolia.etherscan.io/address/${safe.safeAddress}`} target="_blank" rel="noreferrer"
-        style={{ fontSize: 12, color: '#999', textDecoration: 'none' }}>
+        style={{ fontSize: 14, color: '#E8E4DE', textDecoration: 'none' }}>
         Your account {shortAddress(safe.safeAddress)} ↗
       </a>
-      <span style={{ fontSize: 12, color: '#777' }}>
+      <span style={{ fontSize: 13, color: '#B9B5AE' }}>
         {(b.eth || 0).toFixed(4)} ETH · {(b.usdc || 0).toFixed(2)} USDC
       </span>
       <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
