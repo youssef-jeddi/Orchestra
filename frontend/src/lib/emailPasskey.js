@@ -7,7 +7,7 @@
 export const PASSKEY_PROMPT =
   "To keep your money safe, confirm transactions with a passkey (Face ID, fingerprint or your device PIN). First we'll check it's really you.";
 
-export const SIGN_REFUSED = 'Confirm this with your passkey instead.';
+export const SIGN_REFUSED = 'Approve this with a passkey or on Telegram instead.';
 
 /** The server's answer to a value-moving request from an email user who has no passkey yet. */
 export const isPasskeyRequired = (data) => data?.status === 'passkey_required';
@@ -83,13 +83,14 @@ export function passkeyDraft(storage) {
 export const shouldOfferPasskey = ({ emailWallet, hasPasskey, accountReady }) => !!emailWallet && !hasPasskey && !!accountReady;
 
 /**
- * May the user's own wallet sign this? Email users approve with a passkey only: no "Approve & Send"
- * or "Approve & Swap" for them. Their one self-signed action is funding their own account, and only
- * once a passkey exists. Wallet users and passkey sign-in users are unchanged.
+ * May the user's own wallet sign this? Only funding their own account (a deposit): everything the
+ * account holds, a send, a swap or liquidity, is approved by a passkey or on Telegram against the
+ * server's stored copy, for every kind of user. Paying it from the personal wallet would skip that
+ * check. An email user also needs a passkey before they can fund their account.
  */
 export function userMaySign({ emailWallet, hasPasskey } = {}, kind) {
-  if (!emailWallet) return true;
-  return kind === 'deposit' && !!hasPasskey;
+  if (kind !== 'deposit') return false;
+  return !emailWallet || !!hasPasskey;
 }
 
 /** Keeps the request that was held back, so adding the passkey can send it again (a fresh request). */

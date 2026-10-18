@@ -48,8 +48,10 @@ export async function ensureSepolia(eth) {
   }
 }
 
-// Email users approve with a passkey only (the server also refuses to hold such a request without one):
-// nothing here may hand their embedded wallet a transaction, except funding their own account.
+// A held action from the account (send, swap, liquidity) is approved with a passkey or on Telegram
+// against the server's stored copy, never by paying from the personal wallet: nothing here may hand
+// the wallet such a transaction, whatever the card shows. The one thing it signs is funding the
+// user's own account (a deposit; an email user also needs a passkey first).
 // `who` is { emailWallet, hasPasskey } from the session.
 function assertMaySign(who, kind) {
   if (!who || !userMaySign(who, kind)) throw new Error(SIGN_REFUSED); // a caller that forgot `who` is refused, not allowed

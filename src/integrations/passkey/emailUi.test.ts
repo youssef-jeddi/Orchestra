@@ -43,7 +43,7 @@ const test = (name: string, fn: () => void | Promise<void>) => tests.push([name,
     }
     assert.equal(ui.userMaySign({ emailWallet: true, hasPasskey: false }, "deposit"), false, "no passkey, no deposit");
     assert.equal(ui.userMaySign({ emailWallet: true, hasPasskey: true }, "deposit"), true);
-    for (const kind of ["send", "swap", "deposit"]) assert.equal(ui.userMaySign({ emailWallet: false, hasPasskey: false }, kind), true, `wallet users keep ${kind}`);
+    assert.equal(ui.userMaySign({ emailWallet: false, hasPasskey: false }, "deposit"), true, "wallet users keep topping up their account");
   });
 
   test("UI: the signing helpers refuse an email user before touching their wallet (and a caller that forgot who)", async () => {

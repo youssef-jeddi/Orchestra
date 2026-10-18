@@ -37,6 +37,7 @@ export async function bridgeFetch(path, options = {}) {
       sessionInvalidListeners.forEach((fn) => fn());
     }
     const err = new Error(data.error || `HTTP ${res.status}`);
+    err.status = res.status;
     err.code = data.code; // e.g. 'session_required', so callers can sign in and retry
     throw err;
   }
@@ -223,6 +224,11 @@ export async function passkeyApprove(walletAddress, approvalId, response) {
 
 export async function getApproval(approvalId) {
   return bridgeFetch(`/approvals/${approvalId}`);
+}
+
+/** Say no to one of your own pending approvals (final). Resolves with its new state; 404 = expired, 409 = already settled. */
+export async function rejectApproval(approvalId) {
+  return bridgeFetch(`/approvals/${encodeURIComponent(approvalId)}/reject`, { method: 'POST', body: '{}' });
 }
 
 // ── Telegram approvals ──
