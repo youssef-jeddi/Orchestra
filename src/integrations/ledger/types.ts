@@ -49,7 +49,10 @@ export type DeviceStatus =
 export type BridgeMessage =
   | { type: "APPROVAL_REQUIRED"; payload: ApprovalRequest }
   | { type: "APPROVAL_RESULT"; payload: ApprovalResult }
-  | { type: "STATUS_UPDATE"; payload: { tradeId: string; status: string } };
+  | { type: "STATUS_UPDATE"; payload: { tradeId: string; status: string } }
+  /** Server → client only: AUTH accepted, or why a message was refused (`code`, e.g. session_required, not_your_approval). */
+  | { type: "AUTH_OK"; payload: { wallet: string } }
+  | { type: "ERROR"; payload: { code: string; error: string } };
 
 /** Risk engine thresholds (configurable) */
 export interface RiskThresholds {

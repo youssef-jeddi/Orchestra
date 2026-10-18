@@ -26,8 +26,8 @@ export function OrchestraProvider({ children }) {
 
 function OrchestraState({ children }) {
   const ledger = useLedger();
-  const bridge = useBridge();
   const session = useSession(ledger);
+  const bridge = useBridge(ledger.walletAddress, session.ready);
   const safe = useSafe(ledger, session);
 
   return (

@@ -1,47 +1,58 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { BRIDGE_WS } from '@/lib/bridge';
+import { BRIDGE_WS, getSessionToken } from '@/lib/bridge';
 
-export function useBridge() {
+// The live channel for approvals sent to this wallet. Nothing is opened or sent before sign-in:
+// once signed in, the first message is { type: 'AUTH', token } (the session token, never in the
+// URL), and `connected` turns true when the server accepts it. A new wallet or session reconnects.
+const RECONNECT_MS = 3000;
+const SESSION_CLOSE_CODE = 4401; // the server refused our session: don't retry until the next sign-in
+
+export function useBridge(walletAddress, signedIn) {
   const [connected, setConnected] = useState(false);
   const [approvals, setApprovals] = useState([]);
   const wsRef = useRef(null);
 
-  const connectWs = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
-
-    const ws = new WebSocket(BRIDGE_WS);
-    wsRef.current = ws;
-
-    ws.onopen = () => setConnected(true);
-
-    ws.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        if (msg.type === 'APPROVAL_REQUIRED') {
-          setApprovals((prev) => [msg.payload, ...prev]);
-        }
-      } catch { /* ignore bad messages */ }
-    };
-
-    ws.onclose = () => {
-      setConnected(false);
-      setTimeout(connectWs, 3000);
-    };
-
-    ws.onerror = () => { /* will trigger onclose */ };
-  }, []);
-
   useEffect(() => {
-    connectWs();
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.onclose = null; // prevent reconnect on cleanup
-        wsRef.current.close();
-      }
+    if (!signedIn || !walletAddress) return undefined;
+    let stopped = false;
+    let retry;
+
+    const connect = () => {
+      const token = getSessionToken();
+      if (stopped || !token) return;
+      const ws = new WebSocket(BRIDGE_WS);
+      wsRef.current = ws;
+
+      ws.onopen = () => ws.send(JSON.stringify({ type: 'AUTH', token }));
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'AUTH_OK') setConnected(true);
+          if (msg.type === 'APPROVAL_REQUIRED') setApprovals((prev) => [msg.payload, ...prev]);
+        } catch { /* ignore bad messages */ }
+      };
+
+      ws.onclose = (event) => {
+        setConnected(false);
+        if (!stopped && event.code !== SESSION_CLOSE_CODE) retry = setTimeout(connect, RECONNECT_MS);
+      };
+
+      ws.onerror = () => { /* will trigger onclose */ };
     };
-  }, [connectWs]);
+    connect();
+
+    return () => {
+      stopped = true;
+      clearTimeout(retry);
+      if (wsRef.current) wsRef.current.close();
+      wsRef.current = null;
+      setConnected(false);
+      setApprovals([]); // another wallet's approvals must not linger
+    };
+  }, [walletAddress, signedIn]);
 
   const sendResult = useCallback((result) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
