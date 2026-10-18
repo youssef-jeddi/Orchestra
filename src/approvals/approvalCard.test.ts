@@ -159,6 +159,40 @@ test("declined card: the line replaces the buttons; a failed decline keeps them;
   assert.deepEqual([phone.showApprove, phone.showDecline], [true, false]);
 });
 
+// ── The verdict pill and rule chips give way to one calm pill once the card is settled ──
+test("open card: the verdict pill and the rule chips stay", () => {
+  const v = card.cardView({ ...open, intentType: "send" });
+  assert.deepEqual([v.pill, v.showChips], [null, true]);
+  const retry = card.cardView({ ...open, intentType: "send", ended: { kind: "handled", text: "x", retry: true } });
+  assert.deepEqual([retry.pill, retry.showChips], [null, true], "a failed decline leaves the card as it was");
+});
+
+test("declined: one calm 'Not sent' pill (verb follows the action) and no chips", () => {
+  const labels: Record<string, string> = { send: "Not sent", swap: "Not swapped", add_liquidity: "Not added", remove_liquidity: "Not taken out", other: "Not done" };
+  for (const [intentType, label] of Object.entries(labels)) {
+    const v = card.cardView({ ...open, intentType, ended: { kind: "declined", text: card.declinedText(intentType) } });
+    assert.deepEqual([v.pill.label, v.pill.tone, v.showChips], [label, "calm", false], intentType);
+  }
+});
+
+test("expired: 'Expired', no chips — also when the server tells us after a failed approval", () => {
+  const v = card.cardView({ ...open, intentType: "send", ended: { kind: "expired", text: card.expiredText("send") } });
+  assert.deepEqual([v.pill.label, v.showChips], ["Expired", false]);
+  const after = card.outcomeAfterError(new Error("x"), { status: "expired" }, "swap");
+  assert.equal(card.cardView({ ...open, intentType: "swap", outcome: after }).pill.label, "Expired");
+  const declined = card.outcomeAfterError(new Error("x"), { status: "rejected" }, "swap");
+  assert.equal(card.cardView({ ...open, intentType: "swap", outcome: declined }).pill.label, "Not swapped");
+});
+
+test("done after a passkey approval reads 'Done'; a failed run says it didn't go through; neither keeps chips", () => {
+  const done = card.cardView({ ...open, intentType: "send", outcome: card.doneOutcome({ txHash: "0x1", explorerUrl: "https://x" }) });
+  assert.deepEqual([done.pill.label, done.pill.tone, done.showChips], ["Done", "good", false]);
+  const failed = card.cardView({ ...open, intentType: "send", outcome: { status: "failed", text: "It didn't go through: boom" } });
+  assert.deepEqual([failed.pill.label, failed.pill.tone, failed.showChips], ["Didn't go through", "bad", false]);
+  const handled = card.cardView({ ...open, intentType: "send", ended: { kind: "handled", text: card.ALREADY_SETTLED } });
+  assert.deepEqual([handled.pill.label, handled.showChips], ["Already handled", false]);
+});
+
 (async () => {
   console.log("approval card");
   for (const [name, fn] of tests) {

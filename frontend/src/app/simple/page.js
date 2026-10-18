@@ -34,6 +34,8 @@ const VERDICT_COLOR = {
   BLOCKED: '#FF453A',
 };
 
+const PILL_COLOR = { good: '#30D158', calm: '#8d8a84', bad: '#FF453A' };
+
 // Statuses answered with plain text instead of a plan card.
 const TEXT_STATUSES = new Set(['reply', 'needs_clarification', 'unsupported']);
 const HISTORY_TURNS = 8;
@@ -486,16 +488,16 @@ function AgentCard({ data, onExecute, onPasskey, onAddPasskey, passkeyReg, signi
   const [settled, setSettled] = useState(false); // settled elsewhere (e.g. said no on the phone)
   const settle = useCallback(() => setSettled(true), []);
 
-  const view = cardView({ outcome, ended, signing, declining, settledElsewhere: settled });
+  const view = cardView({ outcome, ended, signing, declining, settledElsewhere: settled, intentType: data.intentType });
 
   const decline = async () => {
     setDeclining(true);
     try {
       await rejectApproval(data.approval.id);
-      setEnded({ text: declinedText(data.intentType) });
+      setEnded({ kind: 'declined', text: declinedText(data.intentType) });
     } catch (err) {
-      if (err.status === 404) setEnded({ text: expiredText(data.intentType) });
-      else if (err.status === 409) setEnded({ text: ALREADY_SETTLED });
+      if (err.status === 404) setEnded({ kind: 'expired', text: expiredText(data.intentType) });
+      else if (err.status === 409) setEnded({ kind: 'handled', text: ALREADY_SETTLED });
       else setEnded({ text: err.message, retry: true });
     } finally {
       setDeclining(false);
@@ -538,11 +540,16 @@ function AgentCard({ data, onExecute, onPasskey, onAddPasskey, passkeyReg, signi
 
       {/* Verdict + rule chips */}
       <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-        <span style={{ padding: '3px 10px', borderRadius: 100, fontSize: 11, fontWeight: 500,
-          background: `${color}22`, color, border: `1px solid ${color}44` }}>
-          {verdictLabel(verdict)}
-        </span>
-        {triggered.map((slug) => (
+        {(() => {
+          const pillColor = view.pill ? PILL_COLOR[view.pill.tone] : color;
+          return (
+            <span style={{ padding: '3px 10px', borderRadius: 100, fontSize: 11, fontWeight: 500,
+              background: `${pillColor}22`, color: pillColor, border: `1px solid ${pillColor}44` }}>
+              {view.pill ? view.pill.label : verdictLabel(verdict)}
+            </span>
+          );
+        })()}
+        {view.showChips && triggered.map((slug) => (
           <span key={slug} title={ruleHint(slug)} style={{ fontSize: 10, padding: '2px 8px', borderRadius: 100,
             background: `${color}18`, color, border: `1px solid ${color}33` }}>
             {ruleLabel(slug)}

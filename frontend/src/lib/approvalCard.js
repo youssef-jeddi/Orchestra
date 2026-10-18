@@ -86,24 +86,50 @@ export function outcomeAfterError(err, approval, intentType) {
   switch (approval?.status) {
     case 'executed': return doneOutcome(approval);
     case 'failed': return { status: 'failed', text: failedText(approval.error || err?.message) };
-    case 'rejected': return { status: 'ended', text: declinedText(intentType) };
-    case 'expired': return { status: 'ended', text: expiredText(intentType) };
+    case 'rejected': return { status: 'ended', kind: 'declined', text: declinedText(intentType) };
+    case 'expired': return { status: 'ended', kind: 'expired', text: expiredText(intentType) };
     default: return null;
   }
+}
+
+const NOT_DONE_PILL = {
+  send: 'Not sent',
+  swap: 'Not swapped',
+  add_liquidity: 'Not added',
+  remove_liquidity: 'Not taken out',
+};
+
+/**
+ * The single calm pill a settled card shows instead of the "Needs your OK" verdict and its rule
+ * chips (which no longer apply): Done, Not sent / Not swapped…, Expired, Didn't go through.
+ * Null while the card is still open.
+ */
+export function settledPill({ outcome, ended, intentType }) {
+  if (outcome?.status === 'done') return { label: 'Done', tone: 'good' };
+  if (outcome?.status === 'failed') return { label: "Didn't go through", tone: 'bad' };
+  const end = outcome?.status === 'ended' ? outcome : ended && !ended.retry ? ended : null;
+  if (!end) return null;
+  if (end.kind === 'expired') return { label: 'Expired', tone: 'calm' };
+  if (end.kind === 'declined') return { label: NOT_DONE_PILL[intentType] ?? 'Not done', tone: 'calm' };
+  return { label: 'Already handled', tone: 'calm' };
 }
 
 /**
  * What a held card shows now.
  *   line / receiptUrl   the sentence that replaces the buttons once it is settled
+ *   pill / showChips    the settled pill (replacing the verdict) and whether the rule chips stay
  *   showApprove / showDecline   which buttons are there
  *   approveDisabled / declineDisabled   greyed out while something is in flight
  */
-export function cardView({ outcome, ended, signing, declining, settledElsewhere }) {
-  if (outcome?.status === 'done') return { settled: true, line: DONE_TEXT, receiptUrl: outcome.explorerUrl, showApprove: false, showDecline: false };
-  if (outcome?.status === 'failed' || outcome?.status === 'ended') return { settled: true, line: outcome.text, showApprove: false, showDecline: false };
-  if (ended && !ended.retry) return { settled: true, line: ended.text, showApprove: false, showDecline: false };
+export function cardView({ outcome, ended, signing, declining, settledElsewhere, intentType }) {
+  const pill = settledPill({ outcome, ended, intentType });
+  if (outcome?.status === 'done') return { settled: true, pill, showChips: false, line: DONE_TEXT, receiptUrl: outcome.explorerUrl, showApprove: false, showDecline: false };
+  if (outcome?.status === 'failed' || outcome?.status === 'ended') return { settled: true, pill, showChips: false, line: outcome.text, showApprove: false, showDecline: false };
+  if (ended && !ended.retry) return { settled: true, pill, showChips: false, line: ended.text, showApprove: false, showDecline: false };
   return {
     settled: false,
+    pill: null,
+    showChips: true,
     showApprove: true,
     showDecline: !settledElsewhere,
     approveDisabled: !!signing || !!declining,
