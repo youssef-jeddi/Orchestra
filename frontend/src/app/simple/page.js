@@ -23,6 +23,7 @@ import {
   ruleHint, declineLabel, declinedText, expiredText, ALREADY_SETTLED, approvalControls,
   cardView, doneOutcome, outcomeAfterError,
 } from '@/lib/approvalCard';
+import { shouldRefreshBalances, approvalMovedFunds, refreshSoon } from '@/lib/balances';
 import { verdictLabel, ruleLabel, EXAMPLES, WELCOME, showWelcome, RECEIPT_LABEL, balanceTiles, ADD_PASSKEY_HINT } from '@/lib/plainLanguage';
 
 const ACCENT = '#C084FC';
@@ -75,6 +76,8 @@ function SimpleChat() {
     endRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, busy]);
 
+  const refreshBalances = safe.refreshBalances;
+  const movedFunds = useCallback(() => refreshSoon(refreshBalances), [refreshBalances]);
   const [signingIdx, setSigningIdx] = useState(null);
   const [prices, setPrices] = useState(null);
   const [passkeyReg, setPasskeyReg] = useState(false);
@@ -115,12 +118,13 @@ function SimpleChat() {
       const data = await sendIntent(text, ledger.walletAddress, { history });
       if (isPasskeyRequired(data)) held.current.hold(text, history);
       setMessages((m) => [...m, { role: 'agent', data }]);
+      if (shouldRefreshBalances(data)) refreshSoon(refreshBalances);
     } catch (err) {
       setMessages((m) => [...m, { role: 'agent', error: err.message }]);
     } finally {
       setBusy(false);
     }
-  }, [ledger.walletAddress]);
+  }, [ledger.walletAddress, refreshBalances]);
 
   const send = useCallback(async (raw) => {
     const text = (raw ?? input).trim();
@@ -181,6 +185,7 @@ function SimpleChat() {
     try {
       const result = await approveWithPasskey(ledger.walletAddress, data.approval.id);
       settleCard(idx, doneOutcome(result));
+      refreshSoon(refreshBalances);
     } catch (err) {
       // If the server already settled it (it ran and failed, or lapsed), the card says so and loses
       // its buttons; if it is still waiting (prompt cancelled, check failed) it stays open.
@@ -191,7 +196,7 @@ function SimpleChat() {
     } finally {
       setSigningIdx(null);
     }
-  }, [ledger.walletAddress, settleCard]);
+  }, [ledger.walletAddress, settleCard, refreshBalances]);
 
   const registerPk = useCallback(async () => {
     if (!ledger.walletAddress) return;
@@ -344,7 +349,7 @@ function SimpleChat() {
 
         {messages.map((m, i) => (
           <MessageRow key={i} m={m} idx={i} onExecute={execute} onPasskey={approvePasskey}
-            onAddPasskeyHere={registerPk}
+            onAddPasskeyHere={registerPk} onMoved={movedFunds}
             passkeyReg={passkeyReg} signing={signingIdx === i}
             onAddPasskey={() => setSetupOpen(true)} canAddPasskey={needsFirstPasskey} />
         ))}
@@ -390,7 +395,7 @@ function SimpleChat() {
   );
 }
 
-function MessageRow({ m, idx, onExecute, onPasskey, onAddPasskeyHere, passkeyReg, signing, onAddPasskey, canAddPasskey }) {
+function MessageRow({ m, idx, onExecute, onPasskey, onAddPasskeyHere, onMoved, passkeyReg, signing, onAddPasskey, canAddPasskey }) {
   if (m.passkeyPrompt || isPasskeyRequired(m.data)) {
     return <PasskeyPrompt text={m.passkeyPrompt ? PASSKEY_PROMPT : agentText(m.data)} onAdd={onAddPasskey} canAdd={canAddPasskey} />;
   }
@@ -431,6 +436,7 @@ function MessageRow({ m, idx, onExecute, onPasskey, onAddPasskeyHere, passkeyReg
       onExecute={() => onExecute(m.data, idx)}
       onPasskey={() => onPasskey(m.data, idx)}
       onAddPasskey={onAddPasskeyHere}
+      onMoved={onMoved}
       outcome={m.outcome}
       passkeyReg={passkeyReg}
       signing={signing}
@@ -476,7 +482,7 @@ function PasskeyPrompt({ text, onAdd, canAdd }) {
   );
 }
 
-function AgentCard({ data, onExecute, onPasskey, onAddPasskey, passkeyReg, signing, outcome }) {
+function AgentCard({ data, onExecute, onPasskey, onAddPasskey, onMoved, passkeyReg, signing, outcome }) {
   const verdict = data.assessment?.verdict || 'UNKNOWN';
   const color = VERDICT_COLOR[verdict] || '#666';
   const triggered = data.assessment?.triggered || [];
@@ -574,7 +580,7 @@ function AgentCard({ data, onExecute, onPasskey, onAddPasskey, passkeyReg, signi
       )}
       {controls && !view.settled && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 2 }}>
-          {controls.mode === 'telegram' && <TelegramWait approval={data.approval} onSettled={settle} />}
+          {controls.mode === 'telegram' && <TelegramWait approval={data.approval} onSettled={settle} onMoved={onMoved} />}
           {controls.mode === 'passkey' && (
             <button onClick={onPasskey} disabled={view.approveDisabled} style={approveBtn(signing)}>
               {signing ? 'Confirm on your device…' : '🔑 Approve with passkey'}
@@ -606,11 +612,16 @@ function AgentCard({ data, onExecute, onPasskey, onAddPasskey, passkeyReg, signi
 }
 
 // An approval sent to the user's phone: poll the server until it's settled there.
-function TelegramWait({ approval, onSettled }) {
+function TelegramWait({ approval, onSettled, onMoved }) {
   const [state, setState] = useState(approval);
 
   const live = ['pending', 'executing'].includes(state.status);
   useEffect(() => { if (!live) onSettled?.(); }, [live, onSettled]);
+  const moved = approvalMovedFunds({ ...approval, ...state });
+  const told = useRef(false); // once per card, however often the parent re-renders
+  useEffect(() => {
+    if (moved && !told.current) { told.current = true; onMoved?.(); }
+  }, [moved, onMoved]);
 
   useEffect(() => {
     if (!['pending', 'executing'].includes(state.status)) return;

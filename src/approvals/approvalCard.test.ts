@@ -13,6 +13,9 @@ import { executeSend, executeSwap, depositToSafe } from "../../frontend/src/lib/
 // @ts-expect-error plain JS helper shared with the frontend, no type declarations
 import { RULE_LABELS } from "../../frontend/src/lib/plainLanguage.js";
 
+// @ts-expect-error plain JS helper shared with the frontend, no type declarations
+import * as bal from "../../frontend/src/lib/balances.js";
+
 const JARGON = /\b(safe|multisig|nonce|calldata|erc-?20|eip-?\d+|gas|hash|slug|rule)\b/i;
 const addr = () => ethers.Wallet.createRandom().address;
 
@@ -191,6 +194,35 @@ test("done after a passkey approval reads 'Done'; a failed run says it didn't go
   assert.deepEqual([failed.pill.label, failed.pill.tone, failed.showChips], ["Didn't go through", "bad", false]);
   const handled = card.cardView({ ...open, intentType: "send", ended: { kind: "handled", text: card.ALREADY_SETTLED } });
   assert.deepEqual([handled.pill.label, handled.showChips], ["Already handled", false]);
+});
+
+// ── The header balance is re-read after money moves ──
+test("balance refresh: an auto-executed send, swap or liquidity change refreshes; chat, held and failed answers don't", () => {
+  for (const intentType of ["send", "swap", "add_liquidity", "remove_liquidity"]) {
+    assert.equal(bal.shouldRefreshBalances({ autoExecuted: true, txHash: "0x1", intentType }), true, intentType);
+  }
+  assert.equal(bal.shouldRefreshBalances({ autoExecuted: false, intentType: "send" }), false, "held for approval");
+  assert.equal(bal.shouldRefreshBalances({ autoExecuted: true, intentType: "send" }), false, "no transaction");
+  assert.equal(bal.shouldRefreshBalances({ autoExecuted: true, txHash: "0x1", intentType: "balance" }), false);
+  assert.equal(bal.shouldRefreshBalances({ status: "reply" }), false);
+  assert.equal(bal.shouldRefreshBalances(undefined), false);
+});
+
+test("balance refresh: an approval that was carried out (passkey, Telegram, phone) refreshes; one that wasn't doesn't", () => {
+  assert.equal(bal.approvalMovedFunds({ status: "executed", intentType: "send" }), true);
+  assert.equal(bal.approvalMovedFunds({ status: "executed", intentType: "swap" }), true);
+  for (const status of ["pending", "executing", "rejected", "expired", "failed"]) assert.equal(bal.approvalMovedFunds({ status, intentType: "send" }), false, status);
+});
+
+test("balance refresh: read now and once more shortly after", () => {
+  const calls: string[] = [];
+  const timers: [() => void, number][] = [];
+  bal.refreshSoon(() => calls.push("read"), (fn: () => void, ms: number) => { timers.push([fn, ms]); return 1; });
+  assert.deepEqual(calls, ["read"]);
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0][1], bal.REFRESH_AGAIN_MS);
+  timers[0][0]();
+  assert.deepEqual(calls, ["read", "read"]);
 });
 
 (async () => {
