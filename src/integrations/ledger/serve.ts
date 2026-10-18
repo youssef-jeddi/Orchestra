@@ -394,6 +394,8 @@ app.post("/intent", async (req, res) => {
     });
     const timing = () => ({ totalMs: Date.now() - started, plannerMs: planner.latencyMs, model: planner.model });
     console.log(`[intent] planner ${planner.latencyMs}ms (${planner.model}, ${planner.attempts} call(s)) → ${outcome.kind}`);
+    // The cause is logged once by the planner; this marks the request so it isn't mistaken for a normal clarification.
+    if (planner.failed) console.error(`[intent] planner failed → answered with the fallback message (${planner.model || "no model"})`);
 
     // ── Conversational outcomes: answered straight from the planner ──
     if (outcome.kind === "reply") {

@@ -3,7 +3,7 @@
 // or a schema violation gets exactly one repair retry with the concrete errors;
 // if that fails too, the user is asked to rephrase. Nothing unvalidated escapes.
 
-import { complete, LlmError, type ChatMessage, type LlmProvider } from "../integrations/llm";
+import { complete, defaultModel, defaultProvider, LlmError, type ChatMessage, type LlmProvider } from "../integrations/llm";
 import { PlannerOutput, formatIssues, type PlannerOutputT } from "./schema";
 import { PLANNER_SYSTEM_PROMPT } from "./prompt";
 
@@ -11,6 +11,9 @@ export interface PlanOptions {
   provider?: LlmProvider;
   model?: string;
   timeoutMs?: number;
+  /** Test seams: the model call and where the failure line goes. */
+  completeFn?: typeof complete;
+  log?: (line: string) => void;
 }
 
 export interface PlanResult {
@@ -26,6 +29,17 @@ export interface PlanResult {
   waitedMs: number;
   model: string;
   raw: string[];
+}
+
+/** How an LLM call failed, in words that can't echo the prompt or the provider's response body. */
+export function llmErrorType(err: LlmError): string {
+  if (err.invalidJson) return "json_rejected";
+  if (err.status === null) return "timeout_or_network";
+  if (err.status === 429) return "rate_limited";
+  if (err.status === 529) return "overloaded";
+  if (err.status >= 500) return "server_error";
+  if (err.status === 401 || err.status === 403) return "auth_rejected";
+  return "request_rejected";
 }
 
 const MAX_HISTORY_TURNS = 8;
@@ -61,12 +75,15 @@ export async function planIntent(
   let modelMs = 0;
   let waitedMs = 0;
   let jsonMode = true;
-  let unreachable = false;
+  // Set while the latest model call failed at the transport/API level (not a bad answer).
+  let apiError: LlmError | null = null;
+  const run = opts.completeFn ?? complete;
+  const provider = opts.provider ?? defaultProvider();
 
   for (let attempt = 1; attempt <= 2; attempt++) {
     let text: string;
     try {
-      const res = await complete({
+      const res = await run({
         system: PLANNER_SYSTEM_PROMPT,
         messages,
         provider: opts.provider,
@@ -80,15 +97,16 @@ export async function planIntent(
       modelMs += res.latencyMs;
       waitedMs += res.waitedMs;
       text = res.text;
-      unreachable = false;
+      apiError = null;
     } catch (err) {
       if (!(err instanceof LlmError)) throw err;
+      apiError = err;
       if (err.transient) {
         // Timeout / overload: retry the same request once.
-        unreachable = true;
         continue;
       }
-      if (!err.invalidJson) throw err;
+      // Auth or a malformed request won't improve on retry; the user gets the friendly fallback.
+      if (!err.invalidJson) break;
       // The provider's JSON mode rejected the output; retry without it and parse ourselves.
       jsonMode = false;
       text = "";
@@ -108,10 +126,18 @@ export async function planIntent(
     );
   }
 
+  // One line per exhausted request. Only status, type and names: never the prompt, the
+  // user's message, headers or the provider's response body, which can echo them.
+  const failure = apiError as LlmError | null;
+  (opts.log ?? console.error)(
+    `[planner] LLM failed: provider=${provider} model=${model || opts.model || defaultModel(provider)} step=planner ` +
+      (failure ? `status=${failure.status ?? "none"} type=${llmErrorType(failure)}` : `type=invalid_output attempts=${raw.length}`)
+  );
+
   return {
     output: {
       type: "clarify",
-      question: unreachable
+      question: failure
         ? "I'm having trouble reaching the language model right now. Please try again in a moment."
         : "Sorry, I didn't quite get that. Could you rephrase it?",
     },
