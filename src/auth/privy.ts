@@ -15,16 +15,19 @@
 // for a wallet with no passkey yet: a passkey added to the Privy account later
 // doesn't get in this way (adding one needs an existing passkey, see passkey/).
 //
-// A user who signed in with an email is flagged (noteEmailSignIn): they have no passkey to
-// import, so their first one needs a fresh email code, which Privy records as the email
-// account's `latest_verified_at` in the identity token (verifyEmailForPasskey).
+// A user who signed in with an email, phone or social account (Google, Apple, …) is flagged
+// (noteEmailSignIn): they have no passkey to import, so their first one needs a fresh
+// verification, which Privy records as the account's `latest_verified_at` in the identity token
+// (verifyEmailForPasskey): an emailed code, or signing in again through the same provider.
+// An embedded wallet that only ever signs in by wallet signature is recognised through Privy's
+// API instead (emailGate.isEmailWallet).
 
 import { ethers } from "ethers";
 import { createRemoteJWKSet, type CryptoKey, type JWTVerifyGetKey } from "jose";
 import { PrivyClient, verifyIdentityToken, type User } from "@privy-io/node";
 import { issueToken, AuthError } from "./index";
 import { addExternalCredentials } from "../integrations/passkey";
-import { isEmailSignIn, isEmailWallet, markEmailWallet, grantEmailVerification } from "../integrations/passkey/emailGate";
+import { isEmbeddedSignIn, isEmailWallet, markEmailWallet, grantEmailVerification } from "../integrations/passkey/emailGate";
 
 const PRIVY_API_URL = "https://api.privy.io";
 
@@ -113,18 +116,18 @@ export async function importPrivyPasskeys(user: User, wallet: string, rpID: stri
     a.type === "passkey" && a.credential_id && a.public_key
       ? [{ id: a.credential_id, publicKey: a.public_key, rpID, source: "privy" as const }]
       : []);
-  // An email wallet's first passkey needs a fresh email code, even one from Privy: a token from a
+  // An embedded wallet's first passkey needs a fresh verification, even one from Privy: a token from a
   // sign-in just made carries one, a stale token grants nothing. addExternalCredentials spends it.
   if (passkeys.length && (await isEmailWallet(wallet))) await grantEmailVerification(wallet, user);
   return addExternalCredentials(wallet, passkeys);
 }
 
 /**
- * Flag the wallet when this sign-in is an email one; the flag is never cleared. Returns whether
+ * Flag the wallet when this sign-in is an email, phone or social one; the flag is never cleared. Returns whether
  * the wallet is an email wallet (now or from an earlier sign-in).
  */
 export async function noteEmailSignIn(user: User, wallet: string): Promise<boolean> {
-  if (isEmailSignIn(user, wallet)) await markEmailWallet(wallet, user.id);
+  if (isEmbeddedSignIn(user, wallet)) await markEmailWallet(wallet, user.id);
   return isEmailWallet(wallet);
 }
 
@@ -136,7 +139,7 @@ export async function verifyEmailForPasskey(identityToken: unknown, wallet: stri
   const user = await verifyPrivyUser(identityToken, wallet);
   const result = await grantEmailVerification(wallet, user);
   if (result.granted) return { expiresAt: result.expiresAt };
-  if (result.reason === "not_email_wallet") throw new AuthError(400, "This account signed in without an email, so there's no code to check.");
+  if (result.reason === "not_email_wallet") throw new AuthError(400, "This account signed in with a wallet, so there's nothing to check.");
   if (result.reason === "other_user") throw new AuthError(403, "This email doesn't belong to this account.");
   if (result.reason === "already_used") throw new AuthError(409, "That code was already used. Ask for a new one.");
   throw new AuthError(403, "That code is too old. Ask for a new one and enter it right away.");

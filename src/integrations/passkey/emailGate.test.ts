@@ -67,7 +67,7 @@ const test = (name: string, fn: () => void | Promise<void>) => tests.push([name,
     assert.equal(gate.isFreshVerification(NOW + 10 * 60_000, NOW), false);
     assert.equal(gate.isFreshVerification(null, NOW), false);
     assert.equal(gate.emailVerifiedAtMs({ linked_accounts: [{ type: "email", latest_verified_at: null }] } as any), null);
-    assert.equal(gate.emailVerifiedAtMs({ linked_accounts: [{ type: "phone", latest_verified_at: 5 }] } as any), null, "only the email counts");
+    assert.equal(gate.emailVerifiedAtMs({ linked_accounts: [{ type: "wallet", latest_verified_at: 1_700_000_000 }] } as any), null, "a wallet link is not a login check");
     assert.equal(gate.emailVerifiedAtMs({ linked_accounts: [{ type: "email", latest_verified_at: 1_700_000_000 }] } as any), 1_700_000_000_000);
   });
 
@@ -266,6 +266,101 @@ const test = (name: string, fn: () => void | Promise<void>) => tests.push([name,
     assert.deepEqual(await importPrivyPasskeys(fresh, email, RP.rpID), { held: 1, added: 1 });
     assert.equal(await pk.hasAnyPasskey(email), true);
     assert.deepEqual(await gate.grantEmailVerification(email, fresh), { granted: false, reason: "already_used" });
+  });
+
+
+  // ── Social sign-ins follow the same rules ──
+
+  const socialUser = (id: string, wallet: string, type: string, agoMs: number, extra: any[] = []) => ({
+    id,
+    linked_accounts: [
+      { type, subject: "s1", email: "a@b.c", latest_verified_at: sec(Date.now() - agoMs) },
+      { type: "wallet", address: wallet, chain_type: "ethereum", wallet_client_type: "privy", latest_verified_at: 1 },
+      ...extra,
+    ],
+  }) as any;
+
+  test("isEmbeddedSignIn: Google, Apple, X, Discord, GitHub and phone users on their Privy wallet match; a passkey or MetaMask user does not", () => {
+    const w = addr();
+    for (const type of ["google_oauth", "apple_oauth", "twitter_oauth", "discord_oauth", "github_oauth", "phone"]) {
+      assert.equal(gate.isEmbeddedSignIn(socialUser("u", w, type, 0), w), true, type);
+    }
+    assert.equal(gate.isEmbeddedSignIn(socialUser("u", w, "google_oauth", 0, [{ type: "passkey", credential_id: "x" }]), w), false);
+    const external = { id: "u", linked_accounts: [{ type: "google_oauth", latest_verified_at: 1 }, { type: "wallet", address: w, chain_type: "ethereum", wallet_client_type: "metamask" }] } as any;
+    assert.equal(gate.isEmbeddedSignIn(external, w), false);
+  });
+
+  test("a social sign-in is flagged and refused without a passkey; MetaMask is not affected", async () => {
+    await storage.clear();
+    const { noteEmailSignIn } = await import("../../auth/privy");
+    const google = addr();
+    const metamask = addr();
+    assert.equal(await noteEmailSignIn(socialUser("did:privy:g1", google, "google_oauth", 0), google), true);
+    assert.equal(await code(pk.requirePasskeyToMoveFunds(google)), "passkey_required");
+    const mm = { id: "did:privy:m1", linked_accounts: [{ type: "wallet", address: metamask, chain_type: "ethereum", wallet_client_type: "metamask" }] } as any;
+    assert.equal(await noteEmailSignIn(mm, metamask), false);
+    assert.equal(await code(pk.requirePasskeyToMoveFunds(metamask)), "no error");
+  });
+
+  test("ATTACK: a stale social re-verification is refused for the first passkey; a fresh one is accepted once", async () => {
+    await storage.clear();
+    gate._resetEmailGate();
+    const w = addr();
+    await gate.markEmailWallet(w, "did:privy:g2");
+    assert.deepEqual(await gate.grantEmailVerification(w, socialUser("did:privy:g2", w, "google_oauth", 30 * 60_000)), { granted: false, reason: "stale" });
+    assert.equal(await code(register(w)), "email_verification_required");
+    assert.equal((await gate.grantEmailVerification(w, socialUser("did:privy:g2", w, "google_oauth", 2_000))).granted, true);
+    await register(w);
+    assert.equal(await pk.hasAnyPasskey(w), true);
+    assert.equal((await gate.grantEmailVerification(w, socialUser("did:privy:g2", w, "google_oauth", 2_000))).granted, false, "spent");
+  });
+
+  test("ATTACK: a social login for another Privy user can't verify this wallet", async () => {
+    const w = addr();
+    await gate.markEmailWallet(w, "did:privy:g3");
+    assert.deepEqual(await gate.grantEmailVerification(w, socialUser("did:privy:other", w, "google_oauth", 0)), { granted: false, reason: "other_user" });
+  });
+
+  // ── An embedded wallet that only signs in by wallet signature ──
+
+  test("ATTACK: a Privy embedded wallet that signs in by EIP-712 only is recognised through Privy and gated", async () => {
+    await storage.clear();
+    const embedded = ethers.Wallet.createRandom();
+    const calls: string[] = [];
+    gate._setWalletLookup(async (a) => { calls.push(a); return socialUser("did:privy:e1", embedded.address, "google_oauth", 0); });
+    const { nonce, typedData } = auth.loginRequest(embedded.address);
+    const { EIP712Domain: _, ...types } = typedData.types as any;
+    auth.login(embedded.address, nonce, await embedded.signTypedData(typedData.domain, types, typedData.message));
+    assert.equal(await code(pk.requirePasskeyToMoveFunds(embedded.address)), "passkey_required");
+    assert.equal(await code(getAdapter("send")!.execute!({ walletAddress: embedded.address, safeAddress: addr(), params: {}, planSteps: [], totalEstimatedValueUsd: 1 } as any, { payload: { sendData: { unsignedTx: { to: addr(), data: "0x", value: "1" } } } } as any)), "passkey_required");
+    // recognised once, then flagged for good (and bound to that Privy user)
+    gate._setWalletLookup(null);
+    assert.equal(await gate.isEmailWallet(embedded.address), true);
+    assert.deepEqual(await gate.grantEmailVerification(embedded.address, socialUser("did:privy:x", embedded.address, "google_oauth", 0)), { granted: false, reason: "other_user" });
+    assert.equal(calls.length, 1);
+  });
+
+  test("an external wallet (MetaMask) is not gated by the lookup, and the answer is remembered", async () => {
+    await storage.clear();
+    const mm = addr();
+    let n = 0;
+    gate._setWalletLookup(async () => { n++; return { id: "did:privy:m2", linked_accounts: [{ type: "wallet", address: mm, chain_type: "ethereum", wallet_client_type: "metamask" }] } as any; });
+    assert.equal(await code(pk.requirePasskeyToMoveFunds(mm)), "no error");
+    assert.equal(await code(pk.requirePasskeyToMoveFunds(mm)), "no error");
+    assert.equal(n, 1, "not asked again");
+    const unknown = addr();
+    gate._setWalletLookup(async () => null);
+    assert.equal(await code(pk.requirePasskeyToMoveFunds(unknown)), "no error", "Privy doesn't know the address");
+  });
+
+  test("fail closed: if Privy can't be asked, funds don't move for an unflagged wallet", async () => {
+    await storage.clear();
+    gate._setWalletLookup(async () => { throw new Error("Privy is down"); });
+    const w = addr();
+    await assert.rejects(pk.requirePasskeyToMoveFunds(w), /Privy is down/);
+    gate._setWalletLookup(async () => null);
+    assert.equal(await code(pk.requirePasskeyToMoveFunds(w)), "no error", "an error is not remembered as 'external'");
+    gate._setWalletLookup(null);
   });
 
   console.log("email gate");
