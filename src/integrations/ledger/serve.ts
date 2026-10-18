@@ -33,6 +33,7 @@ import {
   type ActivityRecord,
 } from "../../policy";
 import { getPolicyProfile, getRecentActivity, recordActivity, readUserProfile, writeUserProfile } from "../../policy/store";
+import { readLimits, requestConfirmation, applyChange, LimitsError } from "../../policy/limits";
 import { loginRequest, login, issueToken, requireSession, sessionWallet, AuthError } from "../../auth";
 import { verifyPrivyUser, importPrivyPasskeys, noteEmailSignIn, verifyEmailForPasskey } from "../../auth/privy";
 import { getAdapter, type Balances } from "../../executor/adapters";
@@ -1069,12 +1070,12 @@ app.get("/auth/session", requireSession, async (_req, res) => {
 });
 
 // ─── Policy config ───
-// Read/merge the signed-in wallet's deterministic policy (user:profile:<wallet>.policy).
-// Fields: verifiedTokens, knownAddresses, dailyLimitUsd, maxAutoTxPerDay, typicalMaxUsd.
+// The signed-in wallet's limits (daily limit, automatic-payment count, usual amount) and the
+// addresses it has sent to. Lowering or removing applies at once; raising needs a passkey (or a
+// wallet signature when there is no passkey) — see src/policy/limits.ts.
 app.get("/policy", requireSession, async (_req, res) => {
   try {
-    const p = await readUserProfile(res.locals.wallet);
-    res.json({ policy: p.policy || {} });
+    res.json(await readLimits(res.locals.wallet));
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
@@ -1095,33 +1096,26 @@ app.get("/habit", async (req, res) => {
   }
 });
 
+// Step 1 of raising a limit: the challenge to answer (passkey options or typed data), or { required: false }.
+app.post("/policy/confirm-options", requireSession, async (req, res) => {
+  try {
+    res.json(await requestConfirmation(res.locals.wallet, req.body, desktopRp(req)));
+  } catch (e: any) { sendLimitsError(res, e); }
+});
+
 app.post("/policy", requireSession, async (req, res) => {
   try {
     const wallet = res.locals.wallet as string;
-    const patch = req.body?.policy;
-    if (!patch || typeof patch !== "object") {
-      res.status(400).json({ error: "body must be { policy: { ... } }" });
-      return;
-    }
-    const existing = await readUserProfile(wallet);
-    // Merge; a null value clears that field (lets you disable a rule).
-    const mergedPolicy: Record<string, unknown> = { ...(existing.policy || {}) };
-    for (const [k, v] of Object.entries(patch)) {
-      if (v === null) delete mergedPolicy[k];
-      else mergedPolicy[k] = v;
-    }
-    const updated = {
-      ...existing,
-      policy: mergedPolicy,
-      updatedAt: new Date().toISOString(),
-    };
-    await writeUserProfile(wallet, updated); // also drops the cached policy
-    console.log(`[policy] Updated for ${wallet}: ${JSON.stringify(updated.policy)}`);
-    res.json({ status: "ok", policy: updated.policy });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
+    const result = await applyChange(wallet, req.body, desktopRp(req), notifyPasskeyChange);
+    console.log(`[policy] Updated for ${wallet}${result.loosened ? " (raised, confirmed)" : ""}: ${JSON.stringify(result.policy)}`);
+    res.json({ status: "ok", ...result });
+  } catch (e: any) { sendLimitsError(res, e); }
 });
+
+function sendLimitsError(res: express.Response, e: any): void {
+  if (e instanceof LimitsError) { res.status(e.status).json({ error: e.message, ...(e.code ? { code: e.code } : {}), ...e.extra }); return; }
+  sendError(res, e);
+}
 
 // ─── Safe onboarding ───
 // Called automatically at sign-in. Starts (or joins) the wallet's one deployment and returns at
