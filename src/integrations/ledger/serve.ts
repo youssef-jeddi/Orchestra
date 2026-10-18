@@ -1,5 +1,5 @@
 // ─── SafeSwarm × Ledger — Dev Server ───
-// Express + WS bridge. Serves the test UI and exposes POST /mock-trade.
+// Express + WS bridge. Serves the test UI and exposes POST /mock-trade (local dev only).
 
 import "dotenv/config";
 
@@ -17,7 +17,6 @@ import { fetchQuoteWithRouting } from "../uniswap/routing";
 import { executeSwap } from "../uniswap/execution";
 import { WETH_SEPOLIA, USDC_SEPOLIA, CHAIN_ID } from "../uniswap/types";
 import { write, read, append } from "../zero-g/storage";
-import { setComputeProvider, getComputeProvider } from "../zero-g/compute";
 import { detectExistingSafe } from "../safe/detect";
 import { onboarding, storedSpendingLimit, isAccountReady } from "../safe/onboard";
 import { OnboardingError, ACCOUNT_NOT_READY_REASON } from "../safe/onboarding";
@@ -36,7 +35,7 @@ import {
 } from "../../policy";
 import { getPolicyProfile, getRecentActivity, recordActivity, readUserProfile, writeUserProfile } from "../../policy/store";
 import { readLimits, requestConfirmation, applyChange, LimitsError } from "../../policy/limits";
-import { loginRequest, login, issueToken, requireSession, sessionWallet, AuthError } from "../../auth";
+import { loginRequest, login, issueToken, requireSession, sessionWallet, verifyToken, AuthError } from "../../auth";
 import { verifyPrivyUser, importPrivyPasskeys, noteEmailSignIn, verifyEmailForPasskey } from "../../auth/privy";
 import { getAdapter, type Balances } from "../../executor/adapters";
 import { interpretIntent, assessAction } from "../../intent/pipeline";
@@ -105,16 +104,16 @@ app.use(express.json());
 app.use(originGuard);
 
 const server = http.createServer(app);
-const bridge = new BridgeServer(server, { verifyOrigin: originPermitted });
+const bridge = new BridgeServer(server, { verifyOrigin: originPermitted, verifySession: verifyToken });
 
 // ─── POST /mock-trade ───
 // Inject a test approval request (from curl, Postman, or the UI button). Local dev only:
-// absent (404) unless ENABLE_MOCK_TRADE=1 and not in production mode.
-app.post("/mock-trade", async (req, res) => {
-  if (!mockTradeEnabled()) {
-    res.status(404).json({ error: "Not found" });
-    return;
-  }
+// absent (404) unless ENABLE_MOCK_TRADE=1 and not in production mode; then it needs a session,
+// and the fake approval goes only to the sockets signed in as that wallet.
+app.post("/mock-trade", (_req, res, next) => {
+  if (!mockTradeEnabled()) { res.status(404).json({ error: "Not found" }); return; }
+  next();
+}, requireSession, async (req, res) => {
   // Build a realistic unsigned transaction to the Uniswap Universal Router
   const tx = ethers.Transaction.from({
     to: "0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD",
@@ -141,7 +140,7 @@ app.post("/mock-trade", async (req, res) => {
 
   // Fire-and-forget the approval (the result comes back via WS)
   bridge
-    .requestApproval(request)
+    .requestApproval(request, res.locals.wallet)
     .then((result) => {
       console.log(
         `[serve] trade ${result.tradeId}: ${result.approved ? "✓ approved" : "✗ rejected"}`
@@ -734,22 +733,6 @@ function describePasskey(p: { label: string; rpID: string; source?: string }): s
   return `${what} on ${p.rpID}`;
 }
 
-// ─── Compute provider toggle ───
-app.post("/set-compute-provider", (req, res) => {
-  const { provider } = req.body;
-  if (provider !== "groq" && provider !== "0g") {
-    res.status(400).json({ error: "provider must be 'groq' or '0g'" });
-    return;
-  }
-  setComputeProvider(provider);
-  console.log(`[serve] Compute provider set to: ${provider}`);
-  res.json({ success: true, provider });
-});
-
-app.get("/compute-provider", (_req, res) => {
-  res.json({ provider: getComputeProvider() });
-});
-
 // ─── Passkey (WebAuthn) — medium-tier approval ───
 app.get("/passkey/status", requireSession, async (req, res) => {
   try {
@@ -888,10 +871,11 @@ app.post("/approvals/:id/reject", requireSession, async (req, res) => {
 // ─── Telegram linking ───
 // 1. link-request → EIP-712 typed data with a one-time code  2. the wallet signs it
 // 3. link → signature verified, t.me deep link returned  4. /start <code> in Telegram binds the chat.
-app.get("/telegram/status", async (req, res) => {
-  const wallet = String(req.query.wallet || "");
+// Both steps are for the signed-in wallet only; /telegram/link stays gated by the wallet's signature.
+app.get("/telegram/status", requireSession, async (req, res) => {
+  if (!requireOwnWallet(res, req.query.wallet)) return;
+  const wallet = res.locals.wallet as string;
   if (!telegramEnabled()) { res.json({ enabled: false, linked: false }); return; }
-  if (!ethers.isAddress(wallet)) { res.status(400).json({ error: "wallet query param required" }); return; }
   const link = await getLink(wallet);
   res.json({
     enabled: true, linked: !!link, username: link?.username,
@@ -1015,10 +999,11 @@ app.post("/phone/approvals/:id/reject", async (req, res) => {
   } catch (e: any) { sendError(res, e); }
 });
 
-app.post("/telegram/link-request", (req, res) => {
+app.post("/telegram/link-request", requireSession, (req, res) => {
   try {
+    if (!requireOwnWallet(res, req.body?.walletAddress)) return;
     if (!telegramEnabled()) { res.status(400).json({ error: "Telegram approvals aren't configured on this server." }); return; }
-    res.json(linkRequest(String(req.body?.walletAddress || "")));
+    res.json(linkRequest(res.locals.wallet));
   } catch (e: any) { res.status(400).json({ error: e.message }); }
 });
 
