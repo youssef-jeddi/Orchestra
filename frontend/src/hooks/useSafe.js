@@ -3,7 +3,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import * as api from '@/lib/bridge';
 import { depositToSafe } from '@/lib/signing';
-import { ONBOARDING_POLL_MS, safeStatusFor, shouldPoll, pollAction, onboardingErrorMessage } from '@/lib/onboarding';
+import { ONBOARDING_POLL_MS, safeStatusFor, shouldPoll, pollAction, onboardingErrorMessage, firstCheck } from '@/lib/onboarding';
 
 // The user's account (a Safe) is created automatically once they are signed in: the server
 // deploys it with the agent paying gas, and we only show the address and wait for it.
@@ -13,6 +13,7 @@ export function useSafe(ledger, session) {
   const [balances, setBalances] = useState({ eth: 0, usdc: 0, weth: 0 });
   const [safeStatus, setSafeStatus] = useState('unknown'); // unknown|checking|deploying|deployed|error
   const [setupError, setSetupError] = useState(null);
+  const [finishing, setFinishing] = useState(false); // the account exists; the server is completing the rest
   const [attempt, setAttempt] = useState(0); // bumped by retry()
   const sessionReady = !!session?.ready;
 
@@ -31,6 +32,7 @@ export function useSafe(ledger, session) {
       setSafeAddress(null);
       setSafeStatus('unknown');
       setSetupError(null);
+      setFinishing(false);
       return;
     }
 
@@ -41,12 +43,13 @@ export function useSafe(ledger, session) {
     const apply = (data) => {
       setSafeAddress(data.safeAddress);
       setSafeStatus(safeStatusFor(data.status));
+      setFinishing(!!data.resumed);
       if (data.spendingLimitUSD) setSpendingLimit(data.spendingLimitUSD);
       if (data.status === 'ready') {
         refreshBalances(data.safeAddress);
         ledger.log(`Account ready: ${data.safeAddress}`);
       }
-      if (data.status === 'failed') setSetupError(onboardingErrorMessage());
+      if (data.status === 'failed') setSetupError(onboardingErrorMessage({ code: data.errorCode, message: data.error }));
     };
 
     const poll = async () => {
@@ -67,13 +70,18 @@ export function useSafe(ledger, session) {
     const run = async () => {
       setSafeStatus('checking');
       try {
-        const found = await api.checkSafe(ledger.walletAddress);
-        if (cancelled) return;
-        if (found.hasSafe) {
-          apply({ status: 'ready', safeAddress: found.safeAddress, spendingLimitUSD: found.spendingLimitUSD });
+        // Signed in: the server's setup status is the only word on "ready" (a deployed account can
+        // still be missing steps). The address lookup is only for showing it before sign-in.
+        if (firstCheck(sessionReady) === 'lookup') {
+          const found = await api.checkSafe(ledger.walletAddress);
+          if (cancelled) return;
+          if (found.hasSafe) {
+            apply({ status: 'ready', safeAddress: found.safeAddress, spendingLimitUSD: found.spendingLimitUSD });
+          } else {
+            setSafeStatus('unknown'); // waits for sign-in
+          }
           return;
         }
-        if (!sessionReady) { setSafeStatus('unknown'); return; } // waits for sign-in
         const data = await api.startOnboarding();
         if (cancelled) return;
         apply(data);
@@ -103,7 +111,7 @@ export function useSafe(ledger, session) {
   }, [ledger, safeAddress, refreshBalances, session?.emailWallet, session?.hasPasskey]);
 
   return {
-    safeAddress, spendingLimit, balances, safeStatus, setupError,
+    safeAddress, spendingLimit, balances, safeStatus, setupError, finishing,
     retry, deposit, refreshBalances,
     setSpendingLimit,
   };

@@ -13,7 +13,7 @@ import {
 } from '@/lib/bridge';
 import { registerPasskey, approveWithPasskey, setUpPhonePasskey, removePasskey } from '@/lib/passkey';
 import { PRIVY_APP_ID } from '@/lib/privy';
-import { shortAddress } from '@/lib/onboarding';
+import { shortAddress, setupProgressText } from '@/lib/onboarding';
 import { SIGN_REFUSED, PASSKEY_PROMPT, isPasskeyRequired, shouldOfferPasskey, userMaySign, pendingRequest, verifyStepFor, passkeyDraft, SOCIAL_NONE, SOCIAL_WRONG_ACCOUNT } from '@/lib/emailPasskey';
 import EmailPasskeySetup from '@/components/EmailPasskeySetup';
 import SocialPasskeySetup from '@/components/SocialPasskeySetup';
@@ -845,7 +845,7 @@ function SafeSetup({ safe, canFund, ledger, onError }) {
         marginTop: 12, padding: '10px 12px', border: '1px solid #2a2a30', borderRadius: 12, background: '#141418',
       }}>
         <p style={{ margin: 0, fontSize: 13, color: '#999', lineHeight: 1.4 }}>
-          {safe.setupError || "We couldn't set up your account. Please try again."}
+          {safe.setupError || "We couldn't finish setting up your account. Please try again."}
         </p>
         <button onClick={safe.retry} style={pill(true)}>Try again</button>
       </div>
@@ -855,7 +855,7 @@ function SafeSetup({ safe, canFund, ledger, onError }) {
   if (safe.safeStatus !== 'deployed') {
     return (
       <p style={{ fontSize: 14, color: '#B9B5AE', margin: '10px 0 0' }}>
-        Setting up your account…
+        {setupProgressText(safe.finishing)}
         {safe.safeAddress && (
           <span title="Your account address. You can send funds to it now." style={{ marginLeft: 8, fontSize: 13, color: '#8d8a84' }}>
             {shortAddress(safe.safeAddress)}
