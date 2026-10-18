@@ -26,7 +26,7 @@ export function useSafe(ledger, session) {
     } catch { /* ignore */ }
   }, [safeAddress]);
 
-  // Look up the account when a wallet connects; once signed in, create it if it doesn't exist yet.
+  // Once signed in, find the account (and create it if it doesn't exist yet).
   useEffect(() => {
     if (!ledger.walletAddress) {
       setSafeAddress(null);
@@ -71,15 +71,9 @@ export function useSafe(ledger, session) {
       setSafeStatus('checking');
       try {
         // Signed in: the server's setup status is the only word on "ready" (a deployed account can
-        // still be missing steps). The address lookup is only for showing it before sign-in.
-        if (firstCheck(sessionReady) === 'lookup') {
-          const found = await api.checkSafe(ledger.walletAddress);
-          if (cancelled) return;
-          if (found.hasSafe) {
-            apply({ status: 'ready', safeAddress: found.safeAddress, spendingLimitUSD: found.spendingLimitUSD });
-          } else {
-            setSafeStatus('unknown'); // waits for sign-in
-          }
+        // still be missing steps). Before sign-in nothing is looked up: the account appears after.
+        if (firstCheck(sessionReady) === 'wait') {
+          setSafeStatus('unknown');
           return;
         }
         const data = await api.startOnboarding();

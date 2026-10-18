@@ -276,11 +276,11 @@ test("account readiness: only a finished setup lets the agent act; errors and un
   assert.equal(await accountReady(q(async () => { throw new Error("rpc down"); }), USER), false);
 });
 
-test("UI: finishing and failed states are plain; the signed-in check goes to the setup status, not the address lookup", () => {
+test("UI: finishing and failed states are plain; the signed-in check goes to the setup status; before sign-in nothing is looked up", () => {
   assert.equal(setupProgressText(false), "Setting up your account…");
   assert.equal(setupProgressText(true), "Finishing setting up your account…");
   assert.equal(firstCheck(true), "setup");
-  assert.equal(firstCheck(false), "lookup");
+  assert.equal(firstCheck(false), "wait");
   assert.equal(safeStatusFor("failed"), "error");
   const pending = new SetupPendingError();
   const texts = [

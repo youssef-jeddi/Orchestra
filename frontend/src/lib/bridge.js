@@ -101,10 +101,6 @@ export async function getNonce(address) {
   return bridgeFetch(`/nonce/${address}`);
 }
 
-export async function checkSafe(address) {
-  return bridgeFetch(`/check-safe?address=${address}`);
-}
-
 /** Starts (or joins) the signed-in wallet's account setup; the server decides every value. */
 export async function startOnboarding() {
   return bridgeFetch('/onboard', { method: 'POST', body: JSON.stringify({}) });
