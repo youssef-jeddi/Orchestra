@@ -54,10 +54,10 @@ export function checkSwapQuote(input: QuoteCheckInput): QuoteCheck | null {
     shortfall,
     ok: false,
     reason:
-      `Not swapping: the best Uniswap route gives ~${formatTokenAmount(amountOut, symbolOut)} ${symbolOut} ` +
+      `Not swapping: the best offer is ~${formatTokenAmount(amountOut, symbolOut)} ${symbolOut} ` +
       `for ${formatTokenAmount(amountIn, symbolIn)} ${symbolIn}, ${pct}% less than the ` +
-      `~${formatTokenAmount(marketOut, symbolOut)} ${symbolOut} it's worth at market price. ` +
-      `The pool's price is far off the market.`,
+      `~${formatTokenAmount(marketOut, symbolOut)} ${symbolOut} it's worth at the market price. ` +
+      `The trading pool's price is far off the market.`,
   };
 }
 

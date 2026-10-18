@@ -45,7 +45,7 @@ test("poolPrice: the Sepolia 0.3% pool (tick 172795) prices WETH ≈ 31,330 USDC
 test("lpPriceProblem: refuses the mispriced Sepolia pool, accepts a fair one, can be turned off", () => {
   setPrices({ ETH: 2689, WETH: 2689, USDC: 1 });
   const msg = lpPriceProblem(sqrtAt(172795), usdc(0n), weth(0n), 0.05);
-  assert.match(msg!, /pool prices 1 WETH at 31,33\d USDC, but the market price is 2,689 USDC/);
+  assert.match(msg!, /trading pool prices 1 WETH at 31,33\d USDC, but the market price is 2,689 USDC/);
   const fairTick = Math.round(Math.log(1e12 / 2689) / Math.log(1.0001)); // WETH ≈ 2,689 USDC
   assert.equal(lpPriceProblem(sqrtAt(fairTick), usdc(0n), weth(0n), 0.05), null);
   assert.equal(resolveMaxLpDeviation("off"), Infinity);

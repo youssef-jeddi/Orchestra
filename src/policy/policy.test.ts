@@ -159,7 +159,7 @@ test("decide: missing summary → BLOCKED", () => {
 test("decide: value-bearing intent with no steps → BLOCKED", () => {
   const d = decide({ intentType: "swap", valueUsd: 10, dailyLimitUsd: 100, plan: { summary: "swap", steps: [] } });
   assert.equal(d.verdict, "BLOCKED");
-  assert.match(d.reason, /no executable steps/);
+  assert.match(d.reason, /couldn't make sense of this request/);
 });
 test("decide: unknown intent → fail closed NEEDS_APPROVAL", () => {
   const d = decide({ intentType: "unknown", valueUsd: 0, dailyLimitUsd: 100, plan: { summary: "???", steps: [] } });

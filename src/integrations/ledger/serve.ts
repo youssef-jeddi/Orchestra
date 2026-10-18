@@ -39,6 +39,7 @@ import { getAdapter, type Balances } from "../../executor/adapters";
 import { interpretIntent, assessAction } from "../../intent/pipeline";
 import { sanitizeHistory } from "../../intent/planner";
 import { fetchBalances, resolveEnsName } from "../../intent/context";
+import { describeAddresses, describeBalances } from "../../intent/replies";
 import { makeSepoliaProvider, withTimeout } from "../../utils/rpc";
 import {
   createApproval,
@@ -397,7 +398,7 @@ app.post("/intent", async (req, res) => {
 
     const safeAddress = await safeP;
     const balanceAddress = safeAddress || wallet || null;
-    const infoAssessment = { verdict: "INFO", riskScore: 0, reasons: ["Read-only query — no funds move."], requiresLedger: false, triggered: [], approvalMethod: "none" };
+    const infoAssessment = { verdict: "INFO", riskScore: 0, reasons: ["Just a lookup — no money moves."], requiresLedger: false, triggered: [], approvalMethod: "none" };
 
     // ── Read-only: balance / price / positions / address ──
     if (outcome.kind === "read") {
@@ -568,7 +569,7 @@ app.post("/intent", async (req, res) => {
           console.log(`[approval] ${approval.id} sent to Telegram chat ${link.chatId} (${approval.factor})`);
         } catch (err: any) {
           // Fail closed: never fall back to a weaker factor because the phone was unreachable.
-          settle(approval, { error: `Telegram delivery failed: ${err.message}` });
+          settle(approval, { error: `I couldn't send the approval to Telegram: ${err.message}` });
           const reason = "I couldn't deliver the approval to your Telegram, so nothing will execute. Try again in a moment.";
           res.json({ status: "unsupported", intentType, reason, reasoning: reason, plan, timing: timing() });
           return;
@@ -617,13 +618,13 @@ function approvalExecution(intentType: string, payload: Record<string, unknown> 
 async function executeApproval(a: PendingApproval): Promise<{ txHash: string; explorerUrl: string }> {
   try {
     const adapter = getAdapter(a.intentType);
-    if (!adapter?.execute) throw new Error(`${a.intentType} can't be executed through the Safe`);
+    if (!adapter?.execute) throw new Error(`This ${a.intentType.replace(/_/g, " ")} can't be run from your account`);
     const ctx = {
       walletAddress: a.wallet, safeAddress: a.safeAddress, balanceAddress: a.safeAddress, provider,
       params: {}, planSummary: a.summary, planSteps: [], totalEstimatedValueUsd: a.valueUsd, balances: null,
     };
     const exec = await adapter.execute(ctx, { payload: a.execution });
-    if (!exec) throw new Error("execution produced no result");
+    if (!exec) throw new Error("It ran but gave no result, so I can't confirm it went through");
     const result = { txHash: exec.txHash, explorerUrl: exec.explorerUrl };
     settle(a, { result });
     console.log(`[approval] ${a.id} executed: ${exec.txHash}`);
@@ -648,7 +649,7 @@ async function refreshTelegramMessage(a: PendingApproval): Promise<void> {
 // background and the message is edited with the outcome.
 const onTelegramDecision: DecisionHandler = async ({ wallet, approvalId, approve }) => {
   const a = getApproval(approvalId);
-  if (!a || a.channel !== "telegram") return "Unknown approval.";
+  if (!a || a.channel !== "telegram") return "I can't find that approval. It may have expired.";
   if (a.wallet !== wallet) return "This approval belongs to another wallet.";
   if (a.status !== "pending") {
     await refreshTelegramMessage(a);
@@ -658,7 +659,7 @@ const onTelegramDecision: DecisionHandler = async ({ wallet, approvalId, approve
     reject(a.id, wallet);
     console.log(`[telegram] ${a.id} rejected`);
     await refreshTelegramMessage(a);
-    return "Rejected. Nothing was executed.";
+    return "You said no. Nothing was done.";
   }
   // Phone-passkey approvals can't be approved with a chat button (there is none,
   // but a crafted callback must not skip the passkey either).
@@ -666,14 +667,14 @@ const onTelegramDecision: DecisionHandler = async ({ wallet, approvalId, approve
   try {
     await requirePasskeyToMoveFunds(wallet);
   } catch (e: any) {
-    if (e instanceof PasskeyError) return "Add a passkey in Orchestra first. Nothing was executed.";
+    if (e instanceof PasskeyError) return "Add a passkey in Orchestra first. Nothing was done.";
     throw e;
   }
   claim(a.id, wallet);
   console.log(`[telegram] ${a.id} approved — executing via Safe`);
-  await refreshTelegramMessage(a); // "⏳ executing…"
+  await refreshTelegramMessage(a); // "⏳ doing it…"
   executeApproval(a).catch(() => {}).finally(() => refreshTelegramMessage(a));
-  return "Approved. Executing…";
+  return "Approved. Doing it now…";
 };
 
 /** A wallet in the body must match the session (catches a stale session after switching accounts). */
@@ -725,23 +726,6 @@ function notifyNewPasskey(wallet: string, where: string): void {
 function describePasskey(p: { label: string; rpID: string; source?: string }): string {
   const what = p.source === "privy" ? "sign-in passkey" : p.label === "phone" ? "phone passkey" : "browser passkey";
   return `${what} on ${p.rpID}`;
-}
-
-// Addresses come from the session and the Safe lookup, never from the model.
-function describeAddresses(wallet: string, safe: string | null): string {
-  const lines = [`Your wallet: ${wallet}`];
-  lines.push(safe
-    ? `Your Safe (the account Orchestra trades from): ${safe}\nTo add funds to your account, send them to the Safe address.`
-    : "You don't have a Safe yet. Create one to start trading.");
-  return lines.join("\n");
-}
-
-function describeBalances(b: Balances | null, token?: string): string {
-  if (!b) return "I couldn't read your balance right now (the RPC endpoint didn't answer).";
-  if (token === "ETH") return `You have ${b.eth.toFixed(4)} ETH`;
-  if (token === "WETH") return `You have ${b.weth.toFixed(4)} WETH`;
-  if (token === "USDC") return `You have ${b.usdc.toFixed(2)} USDC`;
-  return `Portfolio: ${b.eth.toFixed(4)} ETH, ${b.weth.toFixed(4)} WETH, ${b.usdc.toFixed(2)} USDC (~$${b.totalUsd.toFixed(2)})`;
 }
 
 // ─── Compute provider toggle ───
@@ -872,7 +856,7 @@ app.post("/passkey/approve", requireSession, async (req, res) => {
     if (!challenge) { res.status(400).json({ error: "Request passkey options for this approval first." }); return; }
 
     const ok = await verifyAuthentication(walletAddress, response, challenge, desktopRp(req));
-    if (!ok) { res.status(401).json({ error: "Passkey verification failed" }); return; }
+    if (!ok) { res.status(401).json({ error: "That passkey check didn't work. Please try again." }); return; }
 
     claim(a.id, walletAddress);
     console.log(`[passkey] ${a.id} approved by ${walletAddress} — executing via Safe`);
@@ -884,7 +868,7 @@ app.post("/passkey/approve", requireSession, async (req, res) => {
 // ─── Approval status (the frontend polls this while an approval is out on another channel) ───
 app.get("/approvals/:id", (req, res) => {
   const a = getApproval(req.params.id);
-  if (!a) { res.status(404).json({ error: "Unknown approval" }); return; }
+  if (!a) { res.status(404).json({ error: "I can't find that approval. It may have expired." }); return; }
   res.json(approvalView(a));
 });
 
@@ -994,11 +978,11 @@ app.post("/phone/approvals/:id/approve", async (req, res) => {
     a.challenge = undefined; // single-use, pass or fail
     if (!challenge) { res.status(400).json({ error: "Start the passkey check for this approval first." }); return; }
     const ok = await verifyAuthentication(a.wallet, req.body?.response, challenge, rp);
-    if (!ok) { res.status(401).json({ error: "Passkey verification failed" }); return; }
+    if (!ok) { res.status(401).json({ error: "That passkey check didn't work. Please try again." }); return; }
 
     claim(a.id, a.wallet);
     console.log(`[passkey] ${a.id} approved with the phone passkey — executing via Safe`);
-    await refreshTelegramMessage(a); // "⏳ executing…"
+    await refreshTelegramMessage(a); // "⏳ doing it…"
     try {
       const result = await executeApproval(a);
       res.json({ status: "ok", ...result });
@@ -1226,7 +1210,7 @@ app.post("/prepare-limit-update", requireSession, async (req, res) => {
 
     const stored = await read(`safe:${ledgerAddress.toLowerCase()}`);
     if (!stored) {
-      res.status(400).json({ error: "No Safe found. Complete onboarding first." });
+      res.status(400).json({ error: "Your account isn't set up yet. Sign in again to set it up." });
       return;
     }
     const safeAddress = (stored as any).safeAddress;
@@ -1257,7 +1241,7 @@ app.post("/finalize-limit-update", requireSession, async (req, res) => {
 
     const stored = await read(`safe:${ledgerAddress.toLowerCase()}`);
     if (!stored) {
-      res.status(400).json({ error: "No Safe found." });
+      res.status(400).json({ error: "Your account isn't set up yet." });
       return;
     }
 

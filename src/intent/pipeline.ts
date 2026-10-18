@@ -64,7 +64,7 @@ export async function interpretIntent(
     const list = actions.map((s, i) => `${i + 1}. ${s.summary}`).join("\n");
     return {
       planner,
-      outcome: { kind: "clarify", question: `I can only do one transaction per message for now. Which one should I do first?\n${list}` },
+      outcome: { kind: "clarify", question: `I can only do one thing per message for now. Which one should I do first?\n${list}` },
     };
   }
 
@@ -93,13 +93,13 @@ export interface AssessInput {
 
 /** Deterministic verdict for an action. The LLM has no input here beyond the resolved plan. */
 export function assessAction(action: ActionPlan, input: AssessInput = {}): PolicyDecision & { typicalMaxUsd?: number } {
-  // A deposit is the user's own wallet funding their own Safe, signed in that
+  // A deposit is the user's own wallet funding their own account, signed in that
   // wallet. The agent never moves it, so the agent limits don't apply.
   if (action.intentType === "deposit") {
     return {
       verdict: "NEEDS_APPROVAL",
       riskScore: 0,
-      reason: "Your own funds moving into your own Safe. You sign it in your wallet; it doesn't count toward your daily limit.",
+      reason: "Your own money moving from your wallet into your own account. You confirm it in your wallet, and it doesn't count toward your daily limit.",
       requiresLedger: false,
       triggered: [],
       approvalMethod: "wallet",

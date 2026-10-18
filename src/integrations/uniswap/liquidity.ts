@@ -97,8 +97,8 @@ export function lpPriceProblem(sqrtPriceX96: bigint, t0: LpSide, t1: LpSide, max
   const deviation = Math.max(pool / market, market / pool) - 1;
   if (deviation <= maxDeviation + 1e-9) return null;
   const fmt = (n: number) => n.toLocaleString("en-US", { maximumSignificantDigits: 5 });
-  return `Not adding liquidity: the pool prices 1 ${t1.symbol} at ${fmt(pool)} ${t0.symbol}, but the market price is ${fmt(market)} ${t0.symbol}. ` +
-    `Depositing at a price that far off would hand value to the first arbitrageur.`;
+  return `Not adding liquidity: the trading pool prices 1 ${t1.symbol} at ${fmt(pool)} ${t0.symbol}, but the market price is ${fmt(market)} ${t0.symbol}. ` +
+    `Adding at a price that far off would hand part of your money to traders for free.`;
 }
 
 /**

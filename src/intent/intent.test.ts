@@ -172,7 +172,7 @@ test("resolve: deposit draws on the wallet balance, not the Safe's", async () =>
   assert.equal(s.plan.action, "deposit");
   assert.deepEqual(s.plan.params, { token: USDC_SEPOLIA, amount: "500", symbol: "USDC" });
   assert.equal(s.valueUsd, 500);
-  assert.equal(s.summary, "Move 500 USDC from your wallet into your Safe");
+  assert.equal(s.summary, "Move 500 USDC from your wallet into your account");
 });
 
 test("resolve: deposit of ETH keeps gas in the wallet", async () => {
@@ -180,7 +180,7 @@ test("resolve: deposit of ETH keeps gas in the wallet", async () => {
   assert.equal(Number((all as any).steps[0].plan.params.amount), 1 - ETH_GAS_RESERVE);
   const exact = await resolveSteps([step({ action: "deposit", token: "ETH", amount: "1" })], depositCtx());
   assert.equal(exact.kind, "unsupported");
-  assert.match((exact as any).reason, /plus ~0\.002 ETH for gas/);
+  assert.match((exact as any).reason, /plus ~0\.002 ETH for network fees/);
 });
 
 test("resolve: deposit needs a connected wallet", async () => {
@@ -234,7 +234,7 @@ test("resolve: positions lists each with its current value (WETH shown as ETH)",
   assert.equal(s.action, "positions");
   assert.match(s.summary, /You have 1 liquidity position:\n#7 USDC\/ETH 0\.3% \(full range\): ≈25 USDC \+ ≈0\.01 ETH, plus fees earned/);
   const none = await resolveSteps([step({ action: "positions" })], lpCtx([]));
-  assert.equal((none as any).steps[0].summary, "You don't have any liquidity positions in your Safe.");
+  assert.equal((none as any).steps[0].summary, "You don't have any liquidity positions in your account.");
   assert.equal((await resolveSteps([step({ action: "positions" })], lpCtx(null))).kind, "clarify");
 });
 
@@ -244,7 +244,7 @@ test("resolve: remove liquidity picks the only matching position; share defaults
   const s = (r as any).steps[0];
   assert.equal(s.plan.action, "remove_liquidity");
   assert.deepEqual({ id: s.plan.params.tokenId, pct: s.plan.params.percent }, { id: "7", pct: 100 });
-  assert.match(s.summary, /^Remove all of liquidity position #7 \(USDC\/ETH 0\.3%\): ≈25 USDC \+ ≈0\.01 ETH back to your Safe, plus fees earned$/);
+  assert.match(s.summary, /^Take out all of liquidity position #7 \(USDC\/ETH 0\.3%\): ≈25 USDC \+ ≈0\.01 ETH back to your account, plus the fees earned$/);
   assert.ok(Math.abs(s.valueUsd - 50) < 1, String(s.valueUsd));
   const half = await resolveSteps([step({ action: "remove_liquidity", amount: "50%" })], lpCtx([posAt("7", L25)]));
   assert.equal((half as any).steps[0].plan.params.percent, 50);

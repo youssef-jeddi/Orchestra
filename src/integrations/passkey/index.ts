@@ -378,9 +378,9 @@ export async function verifyOwner(wallet: string, assertion: any, rp: RelyingPar
   try {
     ok = await verifyAuthentication(wallet, assertion, held.challenge, rp);
   } catch (e: any) {
-    throw new PasskeyError(401, `Passkey verification failed: ${e.message}`);
+    throw new PasskeyError(401, `That passkey check didn't work (${e.message}). Please try again.`);
   }
-  if (!ok) throw new PasskeyError(401, "Passkey verification failed");
+  if (!ok) throw new PasskeyError(401, "That passkey check didn't work. Please try again.");
 }
 
 /** Verify an assertion. Returns true only if the passkey signature checks out. */
