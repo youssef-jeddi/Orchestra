@@ -18,7 +18,7 @@ export function limitTxProblem({ tx, receipt, wallet, safeAddress, expectedData 
   if (!tx || !receipt) return "the transaction isn't mined yet (or doesn't exist). Try again once it's confirmed.";
   if (receipt.status !== 1) return "the transaction reverted.";
   if (tx.from.toLowerCase() !== wallet.toLowerCase()) return "it wasn't sent by your wallet.";
-  if (!tx.to || tx.to.toLowerCase() !== safeAddress.toLowerCase()) return "it wasn't sent to your Safe.";
+  if (!tx.to || tx.to.toLowerCase() !== safeAddress.toLowerCase()) return "it wasn't sent to your account.";
   if (tx.data.toLowerCase() !== expectedData.toLowerCase()) return "it doesn't set the requested limit.";
   return null;
 }

@@ -107,7 +107,9 @@ export async function executeBatchViaSafe(
   const hash = result.hash || "";
   const receipt = await result.transactionResponse?.wait?.();
   if (receipt && Number(receipt.status) === 0) {
-    throw new Error(`Safe transaction reverted (GS013 — the inner call failed): https://sepolia.etherscan.io/tx/${hash}`);
+    // Shown to the user (chat error, approval card, Telegram): plain words; the technical detail stays in the log.
+    console.error(`[safe] transaction reverted on-chain (GS013, the inner call failed): ${hash}`);
+    throw new Error(`This didn't go through, so your funds were not moved. You can see what happened here: https://sepolia.etherscan.io/tx/${hash}`);
   }
   return hash;
 }

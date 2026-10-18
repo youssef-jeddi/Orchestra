@@ -1,6 +1,6 @@
 # Orchestra
 
-An AI financial agent that manages your onchain portfolio through natural language. Talk to it like an assistant — *"swap 10 USDC for ETH"*, *"send 0.5 ETH to vitalik.eth"*, *"fund my Safe with 0.01 ETH"*, *"add liquidity with 25 USDC and 0.01 ETH"*, *"what's my balance?"* — and it handles the rest. Small, routine transactions execute instantly from your Safe; anything risky waits for your approval, which you can confirm on your phone after seeing exactly what will execute.
+An AI financial agent that manages your onchain portfolio through natural language. Talk to it like an assistant — *"swap 10 USDC for ETH"*, *"send 0.5 ETH to vitalik.eth"*, *"fund my account with 0.01 ETH"*, *"add liquidity with 25 USDC and 0.01 ETH"*, *"what's my balance?"* — and it handles the rest. Small, routine transactions execute instantly from your account; anything risky waits for your approval, which you can confirm on your phone after seeing exactly what will execute.
 
 The LLM only **interprets** what you asked. Whether funds move is decided by deterministic, tested code — the model can't approve anything.
 
@@ -27,12 +27,12 @@ Built for **ETHGlobal Cannes 2026**. Runs on the Sepolia testnet.
 │  │ checked) │   │ balances │   │ BLOCKED      │   │                 │  │
 │  └──────────┘   └──────────┘   └──────────────┘   └───────┬─────────┘  │
 │                                                           │            │
-│           AUTO_EXECUTE ─▶ agent wallet executes via the Safe            │
+│           AUTO_EXECUTE ─▶ agent wallet executes via your account           │
 │           NEEDS_APPROVAL ─▶ server-held approval (payload + hash) ─▶    │
 │                 passkey · Telegram · phone passkey · your own wallet   │
 └────────────────────────────────────────────────────────────────────────┘
       │ Groq / Claude     │ Local storage       │ Uniswap Trading API │ Sepolia
-      │ (planner)         │ (profiles, passkeys,│ (v3 + v4 routes)    │ (Safe, RPC)
+      │ (planner)         │ (profiles, passkeys,│ (v3 + v4 routes)    │ (account, RPC)
                           │  links, activity)
 ```
 
@@ -43,7 +43,7 @@ Every chat message goes through `POST /intent` (`src/intent/`):
 1. **Planner** (`planner.ts`, `prompt.ts`, `schema.ts`) — one LLM call turns the message and recent conversation into JSON: `actions` (swap, send, deposit, add_liquidity, remove_liquidity, balance, price, positions), `clarify`, `reply` or `unsupported`. The output is validated against a strict Zod schema; an invalid reply gets one repair retry with the concrete errors, then the user is asked to rephrase. Unvalidated model output never reaches the rest of the pipeline.
 2. **Resolver** (`resolve.ts`) — turns the plan into exact values: token symbols → registry addresses, ENS → address, `"all"` / `"50%"` / `"$20"` → exact amounts. It **rejects amounts above your balance** before anything is built (no failed transaction, no wasted gas), keeps a little ETH for gas where your wallet pays it, and writes the summary from the resolved values — so what you approve is what executes. Anything ambiguous becomes a clarifying question, not a guess.
 3. **Policy** (`src/policy/`) — `decide()` computes the verdict from scratch, with no LLM input. See [Risk policy](#risk-policy).
-4. **Adapter** (`src/executor/adapters.ts`) — builds the transaction. Swaps fetch a Uniswap quote (v3 and v4 routes, native-ETH pools included) and are **refused if the quote returns more than 5% below market value** at the reference price feed (thin or mispriced pools — common on testnets). Liquidity mints a **full-range Uniswap v3 position** from the Safe, and is refused when the pool's price is more than 5% from market (depositing at a wrong price hands value to arbitrageurs). Removing liquidity finds the Safe's positions (asking which one when several match), withdraws a share or all of it together with the fees earned, and returns WETH as ETH; it isn't price-guarded, since refusing would only trap the funds. Auto-approved swaps, sends and liquidity execute through the Safe with the agent wallet; deposits are only ever signed by your own wallet.
+4. **Adapter** (`src/executor/adapters.ts`) — builds the transaction. Swaps fetch a Uniswap quote (v3 and v4 routes, native-ETH pools included) and are **refused if the quote returns more than 5% below market value** at the reference price feed (thin or mispriced pools — common on testnets). Liquidity mints a **full-range Uniswap v3 position** from your account, and is refused when the pool's price is more than 5% from market (depositing at a wrong price hands value to arbitrageurs). Removing liquidity finds your account's positions (asking which one when several match), withdraws a share or all of it together with the fees earned, and returns WETH as ETH; it isn't price-guarded, since refusing would only trap the funds. Auto-approved swaps, sends and liquidity execute through your account with the agent wallet; deposits are only ever signed by your own wallet.
 
 Read-only requests (balance, price, liquidity positions) and conversational replies return straight after the planner and resolver.
 
@@ -65,7 +65,7 @@ The verdict is deterministic, explainable and fail-closed (`src/policy/index.ts`
 | More than 10× your typical transaction (median of recent activity, once there are 5+) | `NEEDS_APPROVAL` |
 | Otherwise | `AUTO_EXECUTE` |
 
-Rules can only escalate, never weaken. A recipient counts as known only after a send to it has gone through (the server records it in its own field of the profile, not in the policy you can edit); your own wallet and your own account are always known, and a daily limit of $0 means every payment asks. Each wallet has its own policy (`user:profile:<wallet>`), editable from the policy panel. Deposits from your wallet into your own Safe are exempt from the agent limits: you sign them yourself.
+Rules can only escalate, never weaken. A recipient counts as known only after a send to it has gone through (the server records it in its own field of the profile, not in the policy you can edit); your own wallet and your own account are always known, and a daily limit of $0 means every payment asks. Each wallet has its own policy (`user:profile:<wallet>`), editable from the policy panel. Deposits from your wallet into your own account are exempt from the agent limits: you sign them yourself.
 
 ---
 
@@ -89,7 +89,7 @@ Once a wallet links Telegram, its risky transactions can only be approved there 
 
 ## Security model
 
-- **Wallet sessions** (`src/auth/`): after connecting, your wallet signs an EIP-712 login once (MetaMask or Ledger, no gas). The server returns an 8-hour HMAC-signed token sent as `Authorization: Bearer`. Every endpoint that acts for a wallet — `/intent`, passkey registration, policy, Safe onboarding, limit updates — takes the wallet **from the session**, never from the request body. The signing secret is generated on first start and kept in `.orchestra/session-secret` (git-ignored); set `SESSION_SECRET` only to share sessions across instances.
+- **Wallet sessions** (`src/auth/`): after connecting, your wallet signs an EIP-712 login once (MetaMask or Ledger, no gas). The server returns an 8-hour HMAC-signed token sent as `Authorization: Bearer`. Every endpoint that acts for a wallet — `/intent`, passkey registration, policy, account setup, limit updates — takes the wallet **from the session**, never from the request body. The signing secret is generated on first start and kept in `.orchestra/session-secret` (git-ignored); set `SESSION_SECRET` only to share sessions across instances.
 - **Account and market routes need a session too**: `/quote`, `/swap`, `/broadcast`, `/nonce`, `/check-safe` and `/safe-balances` refuse a visitor without one (401), and an address in the request must be the session's wallet or that wallet's own account (403 otherwise). `/check-safe` reports the same setup state as `/onboard/status`; an unfinished account is never "ready". `/health` stays public.
 - **Allowed websites** (`ALLOWED_ORIGINS`, `src/integrations/ledger/origins.ts`): the bridge answers browsers only from the production site (`https://getorchestra.xyz` and its subdomains), `localhost` / `127.0.0.1` on any port, this project's Vercel previews and the origin of `PUBLIC_APP_URL`. A request or WebSocket upgrade from any other site gets 403; requests with no `Origin` (curl, servers) are not affected, sessions still gate the routes. `/mock-trade` (a fake approval for local demos) is off unless `ENABLE_MOCK_TRADE=1`, never on when `NODE_ENV=production`, and needs a session.
 - **The WebSocket** (`/ws`) takes the session as its first message, `{"type":"AUTH","token":"<session token>"}` (never in the URL); a socket that doesn't sign in within 5 seconds, or sends a forged or expired token, is closed (code 4401) and receives nothing. Each approval is sent only to sockets signed in as its owner, and only they can answer it.
@@ -102,13 +102,13 @@ Once a wallet links Telegram, its risky transactions can only be approved there 
 ## Tracks
 
 ### 0G — Decentralized storage and compute (optional)
-- **Storage** keeps per-wallet profiles and policies, activity (for the daily limit and habit baseline), passkeys, Telegram links, Safe records, plans and assessments behind one `read()` / `write()` / `readMany()` / `append()` API. By default it's a local file (`.orchestra/storage.json`, git-ignored) that survives restarts with no setup; **0G Storage** is an opt-in backend (`STORAGE_BACKEND=0g` plus the `ZERO_G_*` keys) and is never selected implicitly.
+- **Storage** keeps per-wallet profiles and policies, activity (for the daily limit and habit baseline), passkeys, Telegram links, account records, plans and assessments behind one `read()` / `write()` / `readMany()` / `append()` API. By default it's a local file (`.orchestra/storage.json`, git-ignored) that survives restarts with no setup; **0G Storage** is an opt-in backend (`STORAGE_BACKEND=0g` plus the `ZERO_G_*` keys) and is never selected implicitly.
 - **0G Compute** powers the agent runtime (`src/agents/runtime.ts`): the Watcher and the legacy planner agent the eval compares against, switchable between Groq and 0G Compute from the UI. The chat planner uses Groq or Claude (`src/integrations/llm`).
 
 ### Uniswap — Swap execution
 - Uniswap Trading API with Permit2; v3 and v4 routes (native-ETH pools included)
 - Quote sanity check against the reference price feed before anything is signed or executed
-- Full-range v3 liquidity positions from the Safe (*"add liquidity with 25 USDC and 0.01 ETH"*): exact-amount approvals reset after the mint, native ETH wrapped and refunded, position NFT held by the Safe
+- Full-range v3 liquidity positions from your account (*"add liquidity with 25 USDC and 0.01 ETH"*): exact-amount approvals reset after the mint, native ETH wrapped and refunded, position NFT held by your account
 - Positions and removal (*"show my liquidity positions"*, *"withdraw half my USDC/ETH position"*, *"remove liquidity from #1234"*): decrease + collect fees in one call, WETH unwrapped to ETH, the NFT burned when emptied
 - Sepolia USDC / WETH / ETH
 
@@ -117,10 +117,10 @@ Once a wallet links Telegram, its risky transactions can only be approved there 
 - ERC-7730 clear-signing descriptors for Permit2 and the Universal Router (`src/integrations/ledger/`, not yet wired into the signing flow)
 - EIP-712 signing for sign-in and Telegram linking; required for spending-limit updates
 
-### Safe — Smart account custody
-- A Safe per user (your wallet as owner, the agent wallet as a delegate that executes auto-approved actions)
+### Your account — Smart account custody
+- One Orchestra account per user (a Safe smart account under the hood; your wallet is the owner, the agent wallet a delegate that executes auto-approved actions)
 - On-chain spending limits via the AllowanceModule; `OrchestraPolicy.sol` registry of per-user policies
-- Fund it from the chat (*"fund my Safe with 20 USDC"*); the agent can never move funds out of your own wallet
+- Fund it from the chat (*"fund my account with 20 USDC"*); the agent can never move funds out of your own wallet
 
 ---
 
@@ -128,7 +128,7 @@ Once a wallet links Telegram, its risky transactions can only be approved there 
 
 Next.js 16 + React 19 (`frontend/`):
 
-- **`/simple`** — the working chat: sign-in, balance and price answers, plan cards with the policy verdict and triggered rules, approve buttons, Safe setup and funding, passkey, Telegram and phone-passkey setup.
+- **`/simple`** — the working chat: sign-in, balance and price answers, plan cards with the policy verdict and triggered rules, approve buttons, account setup and funding, passkey, Telegram and phone-passkey setup.
 - **`/`** — the presentation app (3D scenes, Ledger connection, policy panel, limit updates).
 - **`/phone/setup`** and **`/phone/approve/[id]`** — the phone pages opened from Telegram. They call the backend through the `/bridge` proxy (`next.config.mjs`), so only the frontend needs a public address.
 
@@ -138,7 +138,7 @@ Next.js 16 + React 19 (`frontend/`):
 
 ### Prerequisites
 - Node.js 18+
-- Sepolia ETH for the agent wallet (it pays Safe deployment and execution gas)
+- Sepolia ETH for the agent wallet (it pays account creation and execution gas)
 - Optional: a Ledger (Nano S/X) with Bluetooth, a Telegram account, `cloudflared` for phone testing
 
 ### Environment
@@ -184,7 +184,7 @@ npm run dev              # frontend on http://localhost:3000 — open /simple
 
 ### Privy sign-in (optional)
 
-Newcomers sign up with a passkey (or email) and get a wallet without installing anything; people who already use crypto connect MetaMask, Phantom, Coinbase, Rabby or Trust (WalletConnect). Either way the wallet owns their Safe, and the bridge session comes from Privy's identity token (`POST /auth/privy`), so there's no second signature. Ledger still connects directly.
+Newcomers sign up with a passkey (or email) and get a wallet without installing anything; people who already use crypto connect MetaMask, Phantom, Coinbase, Rabby or Trust (WalletConnect). Either way the wallet owns their account, and the bridge session comes from Privy's identity token (`POST /auth/privy`), so there's no second signature. Ledger still connects directly.
 
 1. Create an app at [dashboard.privy.io](https://dashboard.privy.io) and put its ID in `PRIVY_APP_ID` (the frontend reads it from the root `.env` too).
 2. In the dashboard: enable the **Passkey**, **Email** and **Wallet** login methods, turn on **identity tokens**, and add `http://localhost:3000` (and your public URL) to the allowed origins.
@@ -263,9 +263,9 @@ frontend/src/
 ├── app/simple/              # the chat
 ├── app/phone/               # phone setup + approval pages
 ├── app/page.js              # presentation app
-├── components/              # notebook, policy panel, Safe panel, 3D scenes
+├── components/              # notebook, policy panel, account panel, 3D scenes
 ├── hooks/                   # useLedger, useSafe, useSession, useBridge
-├── context/                 # OrchestraContext (wallet, Safe, session)
+├── context/                 # OrchestraContext (wallet, account, session)
 └── lib/                     # bridge client, signing, passkey, phone helpers
 ```
 
@@ -277,11 +277,11 @@ frontend/src/
 
 1. The frontend sends `POST /intent` with your session token.
 2. The **planner** returns `{"type":"actions","steps":[{"action":"send","token":"USDC","amount":"150","to":"vitalik.eth"}]}`.
-3. The **resolver** maps USDC to its Sepolia address, resolves vitalik.eth, checks your Safe holds 150 USDC, and values the plan at $150.
+3. The **resolver** maps USDC to its Sepolia address, resolves vitalik.eth, checks your account holds 150 USDC, and values the plan at $150.
 4. The **policy** sees $150 > $100 daily limit → `NEEDS_APPROVAL`.
 5. The adapter builds the transfer; the server stores it as a pending approval and sends Telegram a description decoded from that payload, with a **Review & approve** link.
-6. On your phone, the review page shows *Send 150 USDC to 0xd8dA…6045 from your Safe*; you approve with your fingerprint. The passkey's challenge is bound to the payload hash.
-7. The agent wallet executes exactly that transfer through the Safe; the page, the Telegram message and the chat show the Etherscan link.
+6. On your phone, the review page shows *Send 150 USDC to 0xd8dA…6045 from your account*; you approve with your fingerprint. The passkey's challenge is bound to the payload hash.
+7. The agent wallet executes exactly that transfer through your account; the page, the Telegram message and the chat show the Etherscan link.
 
 With *"send 20 USDC to vitalik.eth"* instead, the amount is within the limit, but the first send to a new address always asks: step 4 returns `NEEDS_APPROVAL` ("You haven't sent to this address before"). Once that send has gone through, vitalik.eth's address is remembered and a later *"send 20 USDC to vitalik.eth"* executes immediately.
 

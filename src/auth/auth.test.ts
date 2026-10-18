@@ -140,7 +140,7 @@ const test = (name: string, fn: () => void | Promise<void>) => tests.push([name,
     assert.match(limitTxProblem({ ...good, tx: null })!, /isn't mined/);
     assert.match(limitTxProblem({ ...good, receipt: { status: 0 } })!, /reverted/);
     assert.match(limitTxProblem({ ...good, tx: { ...good.tx, from: attacker.address } })!, /your wallet/);
-    assert.match(limitTxProblem({ ...good, tx: { ...good.tx, to: attacker.address } })!, /your Safe/);
+    assert.match(limitTxProblem({ ...good, tx: { ...good.tx, to: attacker.address } })!, /your account/);
     assert.match(limitTxProblem({ ...good, expectedData: "0xabce" })!, /requested limit/);
   });
 

@@ -132,7 +132,7 @@ function SwapAction({ data, onSign, signing }) {
     return (
       <div style={{ marginTop: 8, padding: '10px 14px', background: 'rgba(48,209,88,0.08)', borderRadius: 10, border: '1px solid rgba(48,209,88,0.2)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#30D158', fontSize: 13, fontWeight: 500 }}>
-          <Zap size={14} /> Auto-executed via Safe
+          <Zap size={14} /> Auto-executed from your account
         </div>
         <a href={data.explorerUrl} target="_blank" rel="noopener" style={{ fontSize: 12, color: '#C084FC', display: 'flex', alignItems: 'center', gap: 4, marginTop: 6 }}>
           <ExternalLink size={11} /> {data.txHash.slice(0, 16)}...
