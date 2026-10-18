@@ -19,7 +19,9 @@ export function useOrchestra() {
 }
 
 export function OrchestraProvider({ children }) {
-  const app = <OrchestraState>{children}</OrchestraState>;
+  // Privy puts its children in a list next to its own overlays; an unkeyed element there
+  // triggers React's "unique key" warning that names this component as the owner.
+  const app = <OrchestraState key="orchestra">{children}</OrchestraState>;
   if (!PRIVY_APP_ID) return app;
   return <PrivyProvider appId={PRIVY_APP_ID} config={privyConfig}>{app}</PrivyProvider>;
 }
