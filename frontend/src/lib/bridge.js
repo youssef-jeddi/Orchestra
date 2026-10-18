@@ -15,6 +15,11 @@ export function setSessionToken(token) {
   sessionToken = token || null;
 }
 
+/** The current session token, for the WebSocket's first message (never put it in the URL). */
+export function getSessionToken() {
+  return sessionToken;
+}
+
 /** Subscribe to "the server rejected our session". Returns an unsubscribe function. */
 export function onSessionInvalid(fn) {
   sessionInvalidListeners.add(fn);
@@ -136,17 +141,6 @@ export async function triggerMockTrade() {
       riskLevel: 'requires_approval',
     }),
   });
-}
-
-export async function setComputeProvider(provider) {
-  return bridgeFetch('/set-compute-provider', {
-    method: 'POST',
-    body: JSON.stringify({ provider }),
-  });
-}
-
-export async function getComputeProvider() {
-  return bridgeFetch('/compute-provider');
 }
 
 // ── Policy config + learned habit profile ──

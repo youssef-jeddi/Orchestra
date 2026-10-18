@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import { X, Send, Feather, Bot, ShieldCheck, Zap, ExternalLink, Settings, ChevronDown } from 'lucide-react';
 import { useOrchestra } from '@/context/OrchestraContext';
-import { sendIntent, broadcast, submitSwap, getNonce, setComputeProvider, getComputeProvider, prepareLimitUpdate, finalizeLimitUpdate } from '@/lib/bridge';
+import { sendIntent, broadcast, submitSwap, getNonce, prepareLimitUpdate, finalizeLimitUpdate } from '@/lib/bridge';
 
 const DEFAULT_MESSAGES = [
   {
@@ -192,17 +192,11 @@ export default function FuturisticNotebook({ onClose, initialMessage = '' }) {
   const [isTyping, setIsTyping] = useState(false);
   const [signingId, setSigningId] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
-  const [model, setModel] = useState('groq');
   const [spendingLimit, setSpendingLimit] = useState(100);
   const [limitInput, setLimitInput] = useState('100');
   const [limitUpdating, setLimitUpdating] = useState(false);
   const messagesEndRef = useRef(null);
   const queryHandled = useRef(false);
-
-  // Fetch current model on mount
-  useEffect(() => {
-    getComputeProvider().then((d) => setModel(d.provider)).catch(() => {});
-  }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -345,11 +339,6 @@ export default function FuturisticNotebook({ onClose, initialMessage = '' }) {
     }
   };
 
-  const handleModelChange = async (newModel) => {
-    setModel(newModel);
-    try { await setComputeProvider(newModel); } catch (e) { console.error('Failed to set model:', e); }
-  };
-
   const handleLimitSave = async () => {
     const val = parseInt(limitInput, 10);
     if (!val || val <= 0 || val === spendingLimit || !ledger.walletAddress) return;
@@ -459,31 +448,6 @@ export default function FuturisticNotebook({ onClose, initialMessage = '' }) {
             transition={{ duration: 0.2 }}
             style={{ padding: '0 24px 16px', display: 'flex', gap: 24, alignItems: 'center', flexWrap: 'wrap' }}
           >
-            {/* Model selector */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <span style={{ fontSize: 11, color: '#666', fontFamily: 'var(--font-inter)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Model</span>
-              <div style={{ display: 'flex', gap: 0, borderRadius: 8, overflow: 'hidden', border: '1px solid #1a1a1a' }}>
-                {[
-                  { id: 'groq', label: 'Grok' },
-                  { id: '0g', label: '0G Compute' },
-                ].map((opt) => (
-                  <button
-                    key={opt.id}
-                    onClick={() => handleModelChange(opt.id)}
-                    style={{
-                      padding: '6px 14px', fontSize: 12, fontFamily: 'var(--font-inter)', fontWeight: 400,
-                      background: model === opt.id ? '#1a1a1a' : 'transparent',
-                      color: model === opt.id ? '#E8E4DE' : '#555',
-                      border: 'none', cursor: 'none',
-                      transition: 'all 0.15s ease',
-                    }}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
             {/* Spending limit */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <span style={{ fontSize: 11, color: '#666', fontFamily: 'var(--font-inter)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Auto-execute limit</span>

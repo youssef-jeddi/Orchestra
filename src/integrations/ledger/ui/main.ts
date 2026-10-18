@@ -24,9 +24,6 @@ const intentBtn       = document.getElementById("intent-btn")! as HTMLButtonElem
 const intentStatusEl  = document.getElementById("intent-status")!;
 const agentPanel      = document.getElementById("agent-panel")!;
 const agentResultEl   = document.getElementById("agent-result")!;
-const providerGroqBtn = document.getElementById("provider-groq")! as HTMLButtonElement;
-const provider0gBtn   = document.getElementById("provider-0g")! as HTMLButtonElement;
-const providerStatusEl = document.getElementById("provider-status")!;
 const onboardingScreen = document.getElementById("onboarding-screen")!;
 const deploySafeBtn   = document.getElementById("deploy-safe-btn")! as HTMLButtonElement;
 const onboardStatusEl = document.getElementById("onboard-status")!;
@@ -503,18 +500,29 @@ depositBtn.addEventListener("click", async () => {
 });
 
 // ─── WebSocket bridge ───
+// The bridge only talks to signed-in sockets: the first message is { type: "AUTH", token } with a
+// session token. This console has no sign-in of its own, so it only connects when it has a token
+// (set `sessionToken` from the browser console, e.g. one issued by the app) and sends nothing before.
+let sessionToken: string | null = null;
+
 function connectBridge(): void {
+  if (!sessionToken) {
+    bridgeLabel.textContent = "bridge: sign in needed";
+    return;
+  }
   ws = new WebSocket(BRIDGE_URL);
 
-  ws.onopen = () => {
-    bridgeDot.classList.add("connected");
-    bridgeLabel.textContent = "bridge: connected";
-    log("Bridge connected");
-  };
+  ws.onopen = () => ws!.send(JSON.stringify({ type: "AUTH", token: sessionToken }));
 
   ws.onmessage = (event) => {
     try {
-      const msg: BridgeMessage = JSON.parse(event.data);
+      const msg = JSON.parse(event.data) as BridgeMessage;
+      if (msg.type === "AUTH_OK") {
+        bridgeDot.classList.add("connected");
+        bridgeLabel.textContent = "bridge: connected";
+        log("Bridge connected");
+      }
+      if (msg.type === "ERROR") log(`Bridge: ${msg.payload.error}`);
       if (msg.type === "APPROVAL_REQUIRED") {
         log(`Approval request: ${msg.payload.summary}`);
         renderApprovalCard(msg.payload);
@@ -524,9 +532,10 @@ function connectBridge(): void {
     }
   };
 
-  ws.onclose = () => {
+  ws.onclose = (event) => {
     bridgeDot.classList.remove("connected");
     bridgeLabel.textContent = "bridge: disconnected";
+    if (event.code === 4401) { log("Bridge refused the session — sign in again."); return; }
     log("Bridge disconnected — reconnecting in 3s…");
     setTimeout(connectBridge, 3000);
   };
@@ -637,7 +646,7 @@ mockTradeBtn.addEventListener("click", async () => {
   try {
     const res = await fetch(`${BRIDGE_HTTP}/mock-trade`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}) },
       body: JSON.stringify({
         summary: "Swap 0.5 ETH → ~1,247 USDC via Uniswap V3",
         riskLevel: "requires_approval",
@@ -1049,61 +1058,6 @@ async function handleSignAndSwap(quoteData: any, amountEth: string): Promise<voi
     signSwapBtn.disabled = false;
   }
 }
-
-// ─── Compute provider toggle ───
-function setProviderUI(provider: string): void {
-  if (provider === "0g") {
-    providerGroqBtn.className = "btn btn-secondary";
-    providerGroqBtn.style.flex = "1";
-    providerGroqBtn.style.fontSize = "11px";
-    providerGroqBtn.style.padding = "7px 4px";
-    provider0gBtn.className = "btn btn-primary";
-    provider0gBtn.style.flex = "1";
-    provider0gBtn.style.fontSize = "11px";
-    provider0gBtn.style.padding = "7px 4px";
-    provider0gBtn.style.background = "var(--green)";
-    providerStatusEl.textContent = "Active: 0G Compute — TeeML verified";
-    providerStatusEl.style.color = "var(--green)";
-  } else {
-    providerGroqBtn.className = "btn btn-primary";
-    providerGroqBtn.style.flex = "1";
-    providerGroqBtn.style.fontSize = "11px";
-    providerGroqBtn.style.padding = "7px 4px";
-    provider0gBtn.className = "btn btn-secondary";
-    provider0gBtn.style.flex = "1";
-    provider0gBtn.style.fontSize = "11px";
-    provider0gBtn.style.padding = "7px 4px";
-    provider0gBtn.style.background = "";
-    providerStatusEl.textContent = "Active: Groq";
-    providerStatusEl.style.color = "var(--text-dim)";
-  }
-}
-
-async function switchProvider(provider: string): Promise<void> {
-  try {
-    const res = await fetch(`${BRIDGE_HTTP}/set-compute-provider`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ provider }),
-    });
-    const data = await res.json() as Record<string, unknown>;
-    if (data.success) {
-      setProviderUI(provider);
-      log(`Compute provider switched to: ${provider}`);
-    }
-  } catch (err: any) {
-    log(`Failed to switch provider: ${err.message}`);
-  }
-}
-
-providerGroqBtn.addEventListener("click", () => switchProvider("groq"));
-provider0gBtn.addEventListener("click", () => switchProvider("0g"));
-
-// Fetch initial provider on load
-fetch(`${BRIDGE_HTTP}/compute-provider`)
-  .then(r => r.json())
-  .then((data: any) => setProviderUI(data.provider))
-  .catch(() => {});
 
 // ─── Init ───
 log("SafeSwarm × Ledger — Test Console initialized");
