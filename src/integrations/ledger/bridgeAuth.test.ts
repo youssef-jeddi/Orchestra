@@ -12,7 +12,8 @@ import net from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
 import { WebSocket } from "ws";
 import { isOriginAllowed, originPermitted, parseAllowedOrigins, mockTradeEnabled, DEFAULT_ALLOWED_ORIGINS } from "./origins";
-import { isOwnAddress } from "./access";
+import { ethers } from "ethers";
+import { isOwnAddress, approvalBelongsTo, broadcastSenderProblem } from "./access";
 import { issueToken, _setSecret } from "../../auth";
 
 let passed = 0;
@@ -190,6 +191,9 @@ const GATED: [string, string, unknown?][] = [
   ["GET", `/nonce/${ALICE}`],
   ["GET", "/check-safe"],
   ["GET", "/safe-balances"],
+  ["GET", "/habit"],
+  ["GET", "/passkey/status"],
+  ["GET", "/approvals/00000000-0000-4000-8000-000000000000"],
 ];
 
 test("attack: no session → 401 on every route that used to be open", async () => {
@@ -289,6 +293,65 @@ test("/mock-trade works on a local dev bridge that opts in; ALLOWED_ORIGINS and 
     assert.equal((await call("GET", "/health", { origin: "https://getorchestra.xyz" })).status, 403, "defaults are replaced");
     assert.equal(await wsConnect("https://getorchestra.xyz"), 403);
   } finally { port = keep; dev.child.kill(); }
+});
+
+// ── Habit, passkey status, approvals and broadcast belong to the signed-in user ──
+
+const ALICE_KEY = ethers.Wallet.createRandom();
+const BOB_KEY = ethers.Wallet.createRandom();
+const tokenFor = (w: ethers.BaseWallet) => issueToken(w.address).token;
+const txFor = { to: BOB, value: 1n, chainId: 11155111, nonce: 0, gasLimit: 21000n, maxFeePerGas: 2_000_000_000n, maxPriorityFeePerGas: 1_000_000_000n, type: 2 };
+const signedBy = (w: ethers.BaseWallet) => w.signTransaction(txFor);
+
+test("broadcast: only a signed transaction from the session's own wallet passes the sender check", async () => {
+  const alice = await signedBy(ALICE_KEY);
+  assert.equal(broadcastSenderProblem(alice, ALICE_KEY.address), null);
+  assert.equal(broadcastSenderProblem(alice, ALICE_KEY.address.toLowerCase()), null);
+  assert.equal(broadcastSenderProblem(alice, BOB_KEY.address)?.status, 403, "Bob relaying Alice's transaction");
+  assert.equal(broadcastSenderProblem(alice, BOB_KEY.address)?.code, "not_your_address");
+  assert.equal(broadcastSenderProblem(await signedBy(BOB_KEY), ALICE_KEY.address)?.status, 403, "an unrelated signer");
+  for (const bad of ["0x00", "0xdeadbeef", "not hex", "", 42, null, undefined, {}]) {
+    assert.equal(broadcastSenderProblem(bad, ALICE_KEY.address)?.status, 400, String(bad));
+  }
+  const unsigned = ethers.Transaction.from(txFor).unsignedSerialized;
+  assert.equal(broadcastSenderProblem(unsigned, ALICE_KEY.address)?.status, 400, "unsigned");
+});
+
+test("an approval is visible only to the wallet it was made for", () => {
+  assert.equal(approvalBelongsTo({ wallet: ALICE.toLowerCase() }, ALICE), true);
+  assert.equal(approvalBelongsTo({ wallet: ALICE.toLowerCase() }, BOB), false);
+});
+
+test("attack: /broadcast refuses another user's signed transaction (403) and garbage (400), before any network call", async () => {
+  const aliceTx = await signedBy(ALICE_KEY);
+  const relay = await call("POST", "/broadcast", { token: tokenFor(BOB_KEY), body: { signedTx: aliceTx } });
+  assert.equal(relay.status, 403);
+  assert.equal(relay.body.code, "not_your_address");
+  const unrelated = await call("POST", "/broadcast", { token: tokenFor(ALICE_KEY), body: { signedTx: await signedBy(BOB_KEY) } });
+  assert.equal(unrelated.status, 403);
+  for (const signedTx of ["0x00", "garbage", ethers.Transaction.from(txFor).unsignedSerialized]) {
+    assert.equal((await call("POST", "/broadcast", { token: tokenFor(ALICE_KEY), body: { signedTx } })).status, 400, signedTx.slice(0, 12));
+  }
+});
+
+test("attack: /habit and /passkey/status refuse another wallet's address (403) and answer for the session's own", async () => {
+  for (const path of ["/habit", "/passkey/status"]) {
+    const other = await call("GET", `${path}?wallet=${ALICE}`, { token: bob() });
+    assert.equal(other.status, 403, path);
+    assert.equal(other.body.code, "not_your_address");
+    for (const q of [`?wallet=${BOB}`, `?wallet=${BOB.toLowerCase()}`, ""]) {
+      const own = await call("GET", `${path}${q}`, { token: bob() });
+      assert.equal(own.status, 200, `${path}${q}`);
+    }
+  }
+  const habit = await call("GET", `/habit?wallet=${BOB}`, { token: bob() });
+  assert.equal(habit.body.wallet.toLowerCase(), BOB.toLowerCase(), "the answer is about the session's wallet");
+  assert.equal((await call("GET", "/passkey/status", { token: bob() })).body.registered, false);
+});
+
+test("/approvals/:id answers 404 for an unknown id when signed in", async () => {
+  const r = await call("GET", "/approvals/00000000-0000-4000-8000-000000000000", { token: alice() });
+  assert.equal(r.status, 404);
 });
 
 (async () => {
