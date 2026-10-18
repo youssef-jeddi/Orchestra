@@ -13,7 +13,8 @@ import { enableAllowanceModule, addAgentDelegate, setAgentAllowances, isAgentDel
 import { ALLOWANCE_MODULE_ADDRESS } from "../../types/safe";
 import { OnboardingError, OnboardingLimiter, OnboardingQueue, accountReady } from "./onboarding";
 import { type InflightRecord, type InflightStore, chainProbes, makeTracker } from "./inflight";
-import { type SetupFacts, type SetupStep, type SetupInspection, allStepsDone, deriveSteps, finishSetup, isSetupComplete, remainingSteps } from "./setupSteps";
+import { type SetupInspection, type SetupStep } from "./setupSteps";
+import { type AccountReads, type SetupRecord, finishWith, inspectWith } from "./inspect";
 
 export const DEFAULT_SPENDING_LIMIT_USD = 100;
 
@@ -25,57 +26,40 @@ async function agentAddress(): Promise<string> {
   }
 }
 
-// Our own progress record for an account's setup: written before the first transaction, so a
-// crash or timeout after the deploy still leaves a trace that the setup is unfinished. Chain
-// state decides each step; this only holds what the chain can't show (registered, finished).
-interface SetupRecord { safeAddress: string; startedAt: string; registeredAt?: string; completedAt?: string }
 const setupKey = (user: string) => `onboard:${user.toLowerCase()}`;
 const inflightKey = (user: string) => `inflight:${user.toLowerCase()}`;
 const POLICY_READ_ABI = ["function getPolicy(address user) view returns (tuple(address safeAddress, address agentWallet, uint256 spendingLimitUSD, bool initialized))"];
 
-/** Reads where the wallet's account stands: its address, and each setup step from the chain. */
-async function inspectAccount(wallet: string): Promise<SetupInspection> {
+/** The real reads for one wallet's account: our storage and Sepolia. Rules live in inspect.ts. */
+async function accountReads(wallet: string): Promise<AccountReads> {
   const user = ethers.getAddress(wallet);
   const agent = await agentAddress();
   const safeAddress = await predictSafeAddress(user, agent);
-  const record = (await read(setupKey(user))) as SetupRecord | null;
-  if (record?.completedAt && record.safeAddress === safeAddress) return { safeAddress, steps: allStepsDone() };
-
   const provider = makeSepoliaProvider();
-  // A failed read throws: not knowing is never taken as "not deployed" (that would deploy twice).
-  const hasCode = (await provider.getCode(safeAddress)) !== "0x";
   const policyAddress = process.env.ORCHESTRA_POLICY_ADDRESS;
-  let facts: SetupFacts = {
-    hasCode, moduleEnabled: false, agentIsDelegate: false, allowancesMissing: 3,
-    policyConfigured: !!policyAddress, registered: false, recorded: false,
+  const rpc = process.env.SEPOLIA_RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com";
+  return {
+    safeAddress,
+    policyConfigured: !!policyAddress,
+    setupRecord: async () => (await read(setupKey(user))) as SetupRecord | null,
+    saveSetupRecord: (rec) => write(setupKey(user), rec),
+    storedAccount: async () => (await read(`safe:${user.toLowerCase()}`)) as { safeAddress?: string } | null,
+    profile: async () => (await readUserProfile(user)) as { safeAddress?: string },
+    hasCode: async () => (await provider.getCode(safeAddress)) !== "0x",
+    moduleEnabled: async () => (await Safe.init({ provider: rpc, safeAddress })).isModuleEnabled(ALLOWANCE_MODULE_ADDRESS),
+    agentIsDelegate: () => isAgentDelegate(safeAddress, agent),
+    allowancesMissing: async () => (await tokensWithoutAllowance(safeAddress, agent)).length,
+    registeredOnChain: async () => {
+      const policy = new ethers.Contract(policyAddress!, POLICY_READ_ABI, provider);
+      return String((await policy.getPolicy(agent)).safeAddress).toLowerCase() === safeAddress.toLowerCase();
+    },
+    now: () => new Date().toISOString(),
   };
-  if (hasCode) {
-    const stored = (await read(`safe:${user.toLowerCase()}`)) as { safeAddress?: string } | null;
-    // An account from before step tracking (stored, no progress record) was set up by the old
-    // flow: its registration isn't re-sent (the policy contract holds one entry per agent, so
-    // re-registering would overwrite another account's).
-    const legacy = !record && !!stored?.safeAddress;
-    let registeredOnChain = false;
-    if (policyAddress && !record?.registeredAt && !legacy) {
-      const policy = new ethers.Contract(policyAddress, POLICY_READ_ABI, provider);
-      registeredOnChain = String((await policy.getPolicy(agent)).safeAddress).toLowerCase() === safeAddress.toLowerCase();
-    }
-    const safe = await Safe.init({ provider: process.env.SEPOLIA_RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com", safeAddress });
-    facts = {
-      ...facts,
-      moduleEnabled: await safe.isModuleEnabled(ALLOWANCE_MODULE_ADDRESS),
-      agentIsDelegate: await isAgentDelegate(safeAddress, agent),
-      allowancesMissing: (await tokensWithoutAllowance(safeAddress, agent)).length,
-      registered: !!record?.registeredAt || registeredOnChain || legacy,
-      recorded: legacy,
-    };
-  }
-  const steps = deriveSteps(facts);
-  if (isSetupComplete(steps) && !record?.completedAt) {
-    // Everything checks out on chain (an account from before step tracking): remember it, so
-    // later sign-ins skip these reads.
-    await write(setupKey(user), { ...record, safeAddress, startedAt: record?.startedAt ?? new Date().toISOString(), completedAt: new Date().toISOString() } satisfies SetupRecord);
-  }
+}
+
+/** Reads where the wallet's account stands: its address, and each setup step from the chain. */
+async function inspectAccount(wallet: string): Promise<SetupInspection> {
+  const { safeAddress, steps } = await inspectWith(await accountReads(wallet));
   return { safeAddress, steps };
 }
 
@@ -86,7 +70,8 @@ async function finishAccount(wallet: string, isCancelled: () => boolean): Promis
   const agentKey = process.env.AGENT_PRIVATE_KEY!;
   const provider = makeSepoliaProvider();
   const limit = DEFAULT_SPENDING_LIMIT_USD;
-  const { safeAddress } = await inspectAccount(user);
+  const reads = await accountReads(user);
+  const { safeAddress } = reads;
 
   // Every transaction below is recorded before and after it is sent, so a run that stops while one
   // is unconfirmed makes the next run wait for it instead of sending it again.
@@ -98,10 +83,7 @@ async function finishAccount(wallet: string, isCancelled: () => boolean): Promis
   const probes = chainProbes(provider, agent);
   const track = (step: SetupStep) => makeTracker(step, { store, probes, isCancelled });
 
-  const record = ((await read(setupKey(user))) as SetupRecord | null) ?? { safeAddress, startedAt: new Date().toISOString() };
-  await write(setupKey(user), record); // before any transaction: an interrupted setup stays visible
-
-  const ran = await finishSetup(() => inspectAccount(user), {
+  const ran = await finishWith(reads, {
     deploy: async () => { await deploySafe(user, agent, provider, track("deploy")); },
     module: () => enableAllowanceModule(safeAddress, agentKey, track("module")),
     delegate: () => addAgentDelegate(safeAddress, agent, agentKey, track("delegate")),
@@ -118,11 +100,14 @@ async function finishAccount(wallet: string, isCancelled: () => boolean): Promis
       await tx.wait();
       await tracker.settled();
       console.log(`[onboard] Policy registered: ${tx.hash}`);
-      await write(setupKey(user), { ...record, registeredAt: new Date().toISOString() } satisfies SetupRecord);
+      const rec = await reads.setupRecord(); // always there: finishWith writes it before any transaction
+      await write(setupKey(user), { ...rec!, registeredAt: new Date().toISOString() } satisfies SetupRecord);
     },
     record: async () => {
+      // Keep what an account from before step tracking already has (its limit, its deploy date).
+      const stored = ((await reads.storedAccount()) ?? {}) as { spendingLimitUSD?: number; deployedAt?: string };
       await write(`safe:${user.toLowerCase()}`, {
-        safeAddress, agentWallet: agent, spendingLimitUSD: limit, deployedAt: new Date().toISOString(),
+        safeAddress, agentWallet: agent, spendingLimitUSD: stored.spendingLimitUSD ?? limit, deployedAt: stored.deployedAt ?? new Date().toISOString(),
       });
       // Merge: keep any existing guardrail policy instead of wiping it.
       const profile = await readUserProfile(user);
@@ -137,17 +122,10 @@ async function finishAccount(wallet: string, isCancelled: () => boolean): Promis
         updatedAt: new Date().toISOString(),
       });
     },
-  }, isCancelled);
-
-  // Done only if the chain agrees: the next inspect decides, not this function's say-so.
-  if (ran.length) {
-    const after = await inspectAccount(user);
-    if (!isSetupComplete(after.steps)) throw new Error(`setup incomplete: ${remainingSteps(after.steps).join(", ")}`);
-    const latest = ((await read(setupKey(user))) as SetupRecord | null) ?? record;
+  }, isCancelled, async () => {
     await deleteKey(inflightKey(user)); // everything is done: nothing can still be in flight
-    if (!latest.completedAt) await write(setupKey(user), { ...latest, completedAt: new Date().toISOString() } satisfies SetupRecord);
-    console.log(`[onboard] Account ready: ${safeAddress} (ran: ${ran.join(", ")})`);
-  }
+  });
+  if (ran.length) console.log(`[onboard] Account ready: ${safeAddress} (ran: ${ran.join(", ")})`);
 }
 
 export const onboarding = new OnboardingQueue({
