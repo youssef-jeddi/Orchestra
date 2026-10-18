@@ -13,13 +13,15 @@ export const DEFAULT_DAILY = 100;
 export const LIMITS_TEXT = {
   title: 'Your limits',
   intro: "Small payments I can make on my own. Anything above these limits waits for your OK.",
-  daily: 'Send up to $ a day without asking me',
+  daily: 'Most I can send a day without asking you ($)',
   dailyHint: 'Type 0 and I will always ask you first.',
-  count: 'Ask me after this many automatic payments a day',
-  countHint: 'Leave empty for no limit on how many.',
+  count: 'Automatic payments a day before I ask you',
+  countHint: 'Leave empty for no limit.',
   addresses: "Addresses you've sent to",
   noAddresses: "None yet. I'll ask you the first time you send to a new address.",
   removeHint: "Remove an address and I'll ask you again before the next send to it.",
+  keep: 'Keep',
+  remove: 'Remove',
   save: 'Save',
   saved: 'Saved.',
   cancelled: 'Nothing was changed.',
@@ -28,6 +30,17 @@ export const LIMITS_TEXT = {
 
 /** The sheet's button in the header. */
 export const LIMITS_BUTTON_HINT = 'See and change how much I can do without asking you';
+
+/** The question shown in place of a saved address's Remove button. `short` is the shortened address. */
+export const removeConfirmText = (short) => `Remove ${short}? The next time you send to it, I'll ask you first.`;
+
+/**
+ * The form after a save attempt: the new saved values if it went through, otherwise back to what is
+ * saved — a cancelled or refused raise must not leave the unsaved number sitting in the box.
+ */
+export function formAfterSave(result, savedPolicy) {
+  return formFrom(result?.saved ? result.limits?.policy : savedPolicy);
+}
 
 /** One plain line on what the agent has learned about usual amounts (from /habit), no jargon. */
 export function habitLine(habit) {

@@ -23,6 +23,27 @@ test("wording is plain: no jargon, 0 means always ask, no count limit when empty
   assert.equal(l.LIMITS_TEXT.cancelled, "Nothing was changed.");
 });
 
+test("each field is one clear label with its hint under it — the label is never split around the box", () => {
+  assert.equal(l.LIMITS_TEXT.daily, "Most I can send a day without asking you ($)");
+  assert.equal(l.LIMITS_TEXT.count, "Automatic payments a day before I ask you");
+  assert.equal(l.LIMITS_TEXT.countHint, "Leave empty for no limit.");
+  for (const label of [l.LIMITS_TEXT.daily, l.LIMITS_TEXT.count]) assert.ok(!/\.\.\.|_{2,}|\[|\]/.test(label), label);
+});
+
+test("removing a saved address asks first, inline, in plain words, with Remove / Keep", () => {
+  assert.equal(l.removeConfirmText("0x5879…5723"), "Remove 0x5879…5723? The next time you send to it, I'll ask you first.");
+  assert.ok(!JARGON.test(l.removeConfirmText("0x5879…5723")));
+  assert.deepEqual([l.LIMITS_TEXT.remove, l.LIMITS_TEXT.keep], ["Remove", "Keep"]);
+});
+
+test("a cancelled or refused raise puts the saved numbers back in the form; a saved one shows the new numbers", () => {
+  const saved = { dailyLimitUsd: 20, maxAutoTxPerDay: 3 };
+  assert.deepEqual(l.formAfterSave({ saved: false, cancelled: true }, saved), { daily: "20", count: "3" });
+  assert.deepEqual(l.formAfterSave(null, saved), { daily: "20", count: "3" }, "an error resets too");
+  assert.deepEqual(l.formAfterSave(null, {}), { daily: "100", count: "" });
+  assert.deepEqual(l.formAfterSave({ saved: true, limits: { policy: { dailyLimitUsd: 50 } } }, saved), { daily: "50", count: "" });
+});
+
 test("habit line: one plain sentence, never the raw number of samples or a rule name", () => {
   assert.match(l.habitLine(null), /still learning/);
   assert.match(l.habitLine({ typicalMaxUsd: null }), /still learning/);
