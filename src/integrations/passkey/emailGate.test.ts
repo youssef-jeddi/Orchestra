@@ -1,0 +1,281 @@
+// ─── Passkey — email sign-in rules: no passkey no funds, fresh email code for the first passkey ───
+// Run with `npm run test:email-gate`. No network: in-memory storage, software passkeys, and the
+// adapters are called only up to the gate (a refused call never reaches the chain).
+
+import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import { ethers } from "ethers";
+import { softPasskey, TEST_RP as RP } from "./softPasskey";
+
+process.env.STORAGE_BACKEND = "memory";
+delete process.env.PASSKEY_RP_ID;
+delete process.env.PASSKEY_ORIGIN;
+
+const addr = () => ethers.Wallet.createRandom().address;
+const NOW = 1_800_000_000_000; // a fixed "now" (ms) for the pure checks
+const sec = (ms: number) => Math.floor(ms / 1000);
+
+let passed = 0;
+const tests: [string, () => void | Promise<void>][] = [];
+const test = (name: string, fn: () => void | Promise<void>) => tests.push([name, fn]);
+
+(async () => {
+  const gate = await import("./emailGate");
+  const pk = await import("./index");
+  const storage = await import("../zero-g/storage");
+  const auth = await import("../../auth");
+  const { importPrivyPasskeys, _setUserFetcher } = await import("../../auth/privy");
+  const { getAdapter } = await import("../../executor/adapters");
+  auth._setSecret("test-secret-test-secret-test-secret!");
+
+  // A Privy user as an identity token yields it: an email last verified `agoMs` ago, plus the embedded wallet.
+  const emailUser = (id: string, wallet: string, agoMs: number, extra: any[] = []) => ({
+    id,
+    linked_accounts: [
+      { type: "email", address: "a@b.c", latest_verified_at: sec(Date.now() - agoMs) },
+      { type: "wallet", address: wallet, chain_type: "ethereum", wallet_client_type: "privy", latest_verified_at: 1 },
+      ...extra,
+    ],
+  }) as any;
+
+  /** Register `key` as the wallet's passkey through the desktop path (options, then verify). */
+  const register = async (wallet: string, key = softPasskey()) => {
+    const options = await pk.registrationOptions(wallet, RP);
+    return pk.verifyRegistration(wallet, key.register(options.challenge), { rp: RP });
+  };
+  const code = async (p: Promise<unknown>) => { try { await p; } catch (e: any) { return e.code ?? e.message; } return "no error"; };
+
+  // ── Pure decisions ──
+
+  test("isEmailSignIn: only an email user on the Privy-created wallet, without a Privy passkey", () => {
+    const w = addr();
+    assert.equal(gate.isEmailSignIn(emailUser("u", w, 0), w), true);
+    assert.equal(gate.isEmailSignIn(emailUser("u", w, 0), w.toLowerCase()), true);
+    assert.equal(gate.isEmailSignIn(emailUser("u", w, 0, [{ type: "passkey", credential_id: "x" }]), w), false, "a passkey user has the factor already");
+    assert.equal(gate.isEmailSignIn(emailUser("u", w, 0), addr()), false, "not their wallet");
+    const noEmail = { id: "u", linked_accounts: [{ type: "wallet", address: w, chain_type: "ethereum", wallet_client_type: "privy" }] } as any;
+    assert.equal(gate.isEmailSignIn(noEmail, w), false);
+    const external = { id: "u", linked_accounts: [{ type: "email", address: "a@b.c" }, { type: "wallet", address: w, chain_type: "ethereum", wallet_client_type: "metamask" }] } as any;
+    assert.equal(gate.isEmailSignIn(external, w), false, "a MetaMask wallet is never an email wallet");
+  });
+
+  test("verification age: fresh inside the window, stale after it, never in the future, missing is stale", () => {
+    const win = gate.EMAIL_VERIFICATION_WINDOW_MS;
+    assert.equal(gate.isFreshVerification(NOW - 1_000, NOW), true);
+    assert.equal(gate.isFreshVerification(NOW - win, NOW), true);
+    assert.equal(gate.isFreshVerification(NOW - win - 1_000, NOW), false);
+    assert.equal(gate.isFreshVerification(NOW + 10 * 60_000, NOW), false);
+    assert.equal(gate.isFreshVerification(null, NOW), false);
+    assert.equal(gate.emailVerifiedAtMs({ linked_accounts: [{ type: "email", latest_verified_at: null }] } as any), null);
+    assert.equal(gate.emailVerifiedAtMs({ linked_accounts: [{ type: "phone", latest_verified_at: 5 }] } as any), null, "only the email counts");
+    assert.equal(gate.emailVerifiedAtMs({ linked_accounts: [{ type: "email", latest_verified_at: 1_700_000_000 }] } as any), 1_700_000_000_000);
+  });
+
+  test("passkeyGate: an email wallet without a passkey is refused; everyone else passes", () => {
+    assert.equal(gate.passkeyGate({ emailWallet: true, passkeyCount: 0 }).ok, false);
+    assert.equal(gate.passkeyGate({ emailWallet: true, passkeyCount: 1 }).ok, true);
+    assert.equal(gate.passkeyGate({ emailWallet: false, passkeyCount: 0 }).ok, true);
+    const refused = gate.passkeyGate({ emailWallet: true, passkeyCount: 0 });
+    assert.ok(!refused.ok && refused.code === "passkey_required" && !/Safe/.test(refused.message));
+  });
+
+  // ── No passkey, no funds ──
+
+  test("an email wallet without a passkey can't move funds; a wallet user can", async () => {
+    await storage.clear();
+    const email = addr();
+    const metamask = addr();
+    await gate.markEmailWallet(email, "did:privy:u1");
+    assert.equal(await code(pk.requirePasskeyToMoveFunds(email)), "passkey_required");
+    assert.equal(await code(pk.requirePasskeyToMoveFunds(metamask)), "no error");
+  });
+
+  test("every execution is refused for it, even a small auto-executed send (the registry's execute)", async () => {
+    const email = addr();
+    await gate.markEmailWallet(email, "did:privy:u2");
+    const ctx = { walletAddress: email, safeAddress: addr(), balanceAddress: null, provider: {} as any, params: {}, planSummary: "", planSteps: [], totalEstimatedValueUsd: 1, balances: null };
+    const built = { payload: { sendData: { unsignedTx: { to: addr(), data: "0x", value: "1" } }, quoteData: {}, lpData: {}, lpRemoveData: {} } };
+    for (const kind of ["send", "swap", "add_liquidity", "remove_liquidity"]) {
+      const adapter = getAdapter(kind)!;
+      assert.ok(adapter.execute, `${kind} executes`);
+      await assert.rejects(adapter.execute!(ctx as any, built as any), (e: any) => e.code === "passkey_required", kind);
+    }
+    await assert.rejects(getAdapter("send")!.execute!({ ...ctx, walletAddress: undefined } as any, built as any), /No wallet/, "no wallet, no execution");
+  });
+
+  test("an approval's execution is refused too: same call executeApproval makes, with the approval's wallet", async () => {
+    const email = addr();
+    await gate.markEmailWallet(email, "did:privy:u3");
+    const ctx = { walletAddress: email, safeAddress: addr(), balanceAddress: null, provider: {} as any, params: {}, planSummary: "", planSteps: [], totalEstimatedValueUsd: 50, balances: null };
+    await assert.rejects(getAdapter("send")!.execute!(ctx as any, { payload: { sendData: { unsignedTx: { to: addr(), data: "0x", value: "1" } } } }), (e: any) => e.code === "passkey_required");
+  });
+
+  test("signing in again with a signed EIP-712 login doesn't clear the flag", async () => {
+    const wallet = ethers.Wallet.createRandom();
+    await gate.markEmailWallet(wallet.address, "did:privy:u4");
+    const { nonce, typedData } = auth.loginRequest(wallet.address);
+    const { EIP712Domain: _, ...types } = typedData.types as any;
+    const signature = await wallet.signTypedData(typedData.domain, types, typedData.message);
+    const session = auth.login(wallet.address, nonce, signature);
+    assert.equal(auth.verifyToken(session.token), wallet.address.toLowerCase());
+    assert.equal(await gate.isEmailWallet(wallet.address), true);
+    await gate.markEmailWallet(wallet.address, "did:privy:someone-else"); // nor can marking again change whose it is
+    assert.equal(await code(pk.requirePasskeyToMoveFunds(wallet.address)), "passkey_required");
+    const g = await gate.grantEmailVerification(wallet.address, emailUser("did:privy:someone-else", wallet.address, 0));
+    assert.deepEqual(g, { granted: false, reason: "other_user" });
+  });
+
+  test("once it holds a passkey, an email wallet moves funds like anyone", async () => {
+    await storage.clear();
+    gate._resetEmailGate();
+    const email = addr();
+    await gate.markEmailWallet(email, "did:privy:u5");
+    assert.equal((await gate.grantEmailVerification(email, emailUser("did:privy:u5", email, 1_000))).granted, true);
+    await register(email);
+    assert.equal(await code(pk.requirePasskeyToMoveFunds(email)), "no error");
+  });
+
+  // ── First passkey needs a fresh email code ──
+
+  test("ATTACK: a first passkey without a verification is refused (options and registration)", async () => {
+    await storage.clear();
+    gate._resetEmailGate();
+    const email = addr();
+    await gate.markEmailWallet(email, "did:privy:a1");
+    assert.equal(await code(pk.registrationOptions(email, RP)), "email_verification_required");
+    assert.equal(await code(pk.registrationOptions(email, RP, true)), "email_verification_required", "phone setup too");
+    assert.equal(await pk.hasAnyPasskey(email), false);
+  });
+
+  test("ATTACK: skipping the options step — a verification that is gone by registration time is refused", async () => {
+    gate._resetEmailGate();
+    const email = addr();
+    await gate.markEmailWallet(email, "did:privy:a2");
+    await gate.grantEmailVerification(email, emailUser("did:privy:a2", email, 1_000));
+    const key = softPasskey();
+    const options = await pk.registrationOptions(email, RP); // passes: a verification is held
+    gate._resetEmailGate(); // …which then expires / is spent elsewhere
+    assert.equal(await code(pk.verifyRegistration(email, key.register(options.challenge), { rp: RP })), "email_verification_required");
+    assert.equal(await pk.hasAnyPasskey(email), false);
+  });
+
+  test("ATTACK: a stale verification (older than the window) is refused", async () => {
+    gate._resetEmailGate();
+    const email = addr();
+    await gate.markEmailWallet(email, "did:privy:a3");
+    const stale = gate.EMAIL_VERIFICATION_WINDOW_MS + 60_000;
+    assert.deepEqual(await gate.grantEmailVerification(email, emailUser("did:privy:a3", email, stale)), { granted: false, reason: "stale" });
+    assert.equal(await code(pk.registrationOptions(email, RP)), "email_verification_required");
+  });
+
+  test("ATTACK: a verification that was fresh but has expired by the time it's spent is refused", async () => {
+    gate._resetEmailGate();
+    const email = addr();
+    await gate.markEmailWallet(email, "did:privy:a4");
+    const t = Date.now();
+    assert.equal((await gate.grantEmailVerification(email, emailUser("did:privy:a4", email, 0), t)).granted, true);
+    assert.equal(gate.hasEmailVerification(email, t + 60_000), true);
+    assert.equal(gate.hasEmailVerification(email, t + gate.EMAIL_VERIFICATION_WINDOW_MS + 120_000), false);
+    assert.equal(await gate.consumeEmailVerification(email, t + gate.EMAIL_VERIFICATION_WINDOW_MS + 120_000), false);
+  });
+
+  test("ATTACK: a verification from the future (clock trick) is refused", async () => {
+    gate._resetEmailGate();
+    const email = addr();
+    await gate.markEmailWallet(email, "did:privy:a5");
+    assert.deepEqual(await gate.grantEmailVerification(email, emailUser("did:privy:a5", email, -3_600_000)), { granted: false, reason: "stale" });
+  });
+
+  test("ATTACK: one verification can't be used for a second registration", async () => {
+    await storage.clear();
+    gate._resetEmailGate();
+    const email = addr();
+    await gate.markEmailWallet(email, "did:privy:a6");
+    const user = emailUser("did:privy:a6", email, 1_000);
+    assert.equal((await gate.grantEmailVerification(email, user)).granted, true);
+    await register(email);
+    assert.equal(await gate.consumeEmailVerification(email), false, "already spent");
+    // Passkeys lost, same identity token sent again: the spent verification is remembered.
+    await storage.write(`passkey:${email.toLowerCase()}`, { creds: [] });
+    assert.deepEqual(await gate.grantEmailVerification(email, user), { granted: false, reason: "already_used" });
+    assert.equal(await code(register(email)), "email_verification_required");
+    // A genuinely newer code works again.
+    assert.equal((await gate.grantEmailVerification(email, { ...user, linked_accounts: [{ type: "email", latest_verified_at: sec(Date.now()) + 2 }, ...user.linked_accounts.slice(1)] })).granted, true);
+  });
+
+  test("ATTACK: wallet A's verification can't register a passkey for wallet B", async () => {
+    await storage.clear();
+    gate._resetEmailGate();
+    const a = addr();
+    const b = addr();
+    await gate.markEmailWallet(a, "did:privy:userA");
+    await gate.markEmailWallet(b, "did:privy:userB");
+    assert.equal((await gate.grantEmailVerification(a, emailUser("did:privy:userA", a, 1_000))).granted, true);
+    assert.deepEqual(await gate.grantEmailVerification(b, emailUser("did:privy:userA", b, 1_000)), { granted: false, reason: "other_user" });
+    assert.equal(await code(pk.registrationOptions(b, RP)), "email_verification_required");
+    assert.equal(await gate.consumeEmailVerification(b), false);
+    assert.equal(gate.hasEmailVerification(a), true, "A's verification is untouched");
+  });
+
+  test("a wallet that isn't an email wallet gets no verification (and needs none)", async () => {
+    const metamask = addr();
+    assert.deepEqual(await gate.grantEmailVerification(metamask, emailUser("did:privy:z", metamask, 0)), { granted: false, reason: "not_email_wallet" });
+    assert.equal(await register(metamask), true);
+  });
+
+  test("a fresh verification registers the first passkey; a further one still needs the owner check", async () => {
+    await storage.clear();
+    gate._resetEmailGate();
+    const email = addr();
+    await gate.markEmailWallet(email, "did:privy:ok1");
+    await gate.grantEmailVerification(email, emailUser("did:privy:ok1", email, 1_000));
+    assert.equal(await register(email), true);
+    assert.equal(await pk.hasAnyPasskey(email), true);
+    // ORC-67 stays: a second passkey without an assertion from the first is refused…
+    assert.equal(await code(register(email)), "passkey_required");
+    // …and the last passkey can't be removed.
+    const [only] = await pk.listPasskeys(email);
+    assert.equal(await code(pk.removePasskey(email, only.id)), "last_passkey");
+  });
+
+  // ── The Privy sign-in passkey import ──
+
+  test("ATTACK: importing a Privy passkey for an email wallet without a fresh verification imports nothing", async () => {
+    await storage.clear();
+    gate._resetEmailGate();
+    const email = addr();
+    await gate.markEmailWallet(email, "did:privy:imp1");
+    const privyKey = softPasskey();
+    _setUserFetcher(async (id) => ({ id, linked_accounts: [{ type: "passkey", credential_id: privyKey.id, public_key: privyKey.publicKey }] }) as any);
+    const stale = emailUser("did:privy:imp1", email, 3_600_000, [{ type: "passkey", credential_id: privyKey.id }]);
+    assert.deepEqual(await importPrivyPasskeys(stale, email, RP.rpID), { held: 0, added: 0 });
+    assert.equal(await pk.hasAnyPasskey(email), false);
+    // The same call straight at the lowest layer, with no verification held at all.
+    assert.deepEqual(await pk.addExternalCredentials(email, [{ id: privyKey.id, publicKey: privyKey.publicKey, rpID: RP.rpID, source: "privy" }]), { held: 0, added: 0 });
+    assert.equal(await pk.hasAnyPasskey(email), false);
+  });
+
+  test("a Privy passkey is imported for an email wallet when the token carries a fresh email code — once", async () => {
+    await storage.clear();
+    gate._resetEmailGate();
+    const email = addr();
+    await gate.markEmailWallet(email, "did:privy:imp2");
+    const privyKey = softPasskey();
+    _setUserFetcher(async (id) => ({ id, linked_accounts: [{ type: "passkey", credential_id: privyKey.id, public_key: privyKey.publicKey }] }) as any);
+    const fresh = emailUser("did:privy:imp2", email, 5_000, [{ type: "passkey", credential_id: privyKey.id }]);
+    assert.deepEqual(await importPrivyPasskeys(fresh, email, RP.rpID), { held: 1, added: 1 });
+    assert.equal(await pk.hasAnyPasskey(email), true);
+    assert.deepEqual(await gate.grantEmailVerification(email, fresh), { granted: false, reason: "already_used" });
+  });
+
+  console.log("email gate");
+  for (const [name, fn] of tests) {
+    await fn();
+    passed++;
+    console.log(`  ✓ ${name}`);
+  }
+  console.log(`\n${passed} passed`);
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

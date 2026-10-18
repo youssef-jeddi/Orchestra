@@ -20,6 +20,7 @@ import {
   type LpSide, type PoolState,
 } from "../integrations/uniswap/liquidity";
 import { tokenByAddress } from "../intent/tokens";
+import { requirePasskeyToMoveFunds } from "../integrations/passkey";
 import { TOKEN_DECIMALS, toTokenWei, symbolFromAddress, estimateUsd, checkSwapQuote, formatTokenAmount, type QuoteCheck } from "../policy";
 
 /** Uniswap's native-ETH sentinel. A WETH address would pull ERC-20 the Safe may not hold. */
@@ -468,14 +469,28 @@ const swapAdapter: IntentAdapter = {
 };
 
 // ─── Registry ───
-const REGISTRY: Record<string, IntentAdapter> = {
-  [balanceAdapter.kind]: balanceAdapter,
-  [sendAdapter.kind]: sendAdapter,
-  [depositAdapter.kind]: depositAdapter,
-  [addLiquidityAdapter.kind]: addLiquidityAdapter,
-  [removeLiquidityAdapter.kind]: removeLiquidityAdapter,
-  [swapAdapter.kind]: swapAdapter,
-};
+/**
+ * Every execution, auto-executed or approved (passkey, Telegram, phone), runs through the
+ * registry's `execute`, so this is where the email-wallet rule lives: no passkey, no funds move.
+ * A call without a wallet is refused too, since the rule can't be checked.
+ */
+function withPasskeyGate(adapter: IntentAdapter): IntentAdapter {
+  const run = adapter.execute?.bind(adapter);
+  if (!run) return adapter;
+  return {
+    ...adapter,
+    async execute(ctx, built) {
+      if (!ctx.walletAddress) throw new Error("No wallet to execute for.");
+      await requirePasskeyToMoveFunds(ctx.walletAddress);
+      return run(ctx, built);
+    },
+  };
+}
+
+const REGISTRY: Record<string, IntentAdapter> = Object.fromEntries(
+  [balanceAdapter, sendAdapter, depositAdapter, addLiquidityAdapter, removeLiquidityAdapter, swapAdapter]
+    .map((a) => [a.kind, withPasskeyGate(a)]),
+);
 
 /** Look up the adapter for an intent kind, or undefined if none is registered. */
 export function getAdapter(kind: string): IntentAdapter | undefined {

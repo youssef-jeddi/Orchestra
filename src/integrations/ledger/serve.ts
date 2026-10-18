@@ -34,7 +34,7 @@ import {
 } from "../../policy";
 import { getPolicyProfile, getRecentActivity, recordActivity, readUserProfile, writeUserProfile } from "../../policy/store";
 import { loginRequest, login, issueToken, requireSession, sessionWallet, AuthError } from "../../auth";
-import { verifyPrivyUser, importPrivyPasskeys } from "../../auth/privy";
+import { verifyPrivyUser, importPrivyPasskeys, noteEmailSignIn, verifyEmailForPasskey } from "../../auth/privy";
 import { getAdapter, type Balances } from "../../executor/adapters";
 import { interpretIntent, assessAction } from "../../intent/pipeline";
 import { sanitizeHistory } from "../../intent/planner";
@@ -75,6 +75,7 @@ import {
   hasPasskey,
   hasAnyPasskey,
   hasPhonePasskey,
+  requirePasskeyToMoveFunds,
   ownerCheckOptions,
   verifyOwner,
   listPasskeys,
@@ -86,6 +87,7 @@ import {
   type RelyingParty,
 } from "../passkey";
 import { createSetupToken, getSetup, consumeSetup } from "../passkey/phoneSetup";
+import { isEmailWallet, hasEmailVerification } from "../passkey/emailGate";
 
 const provider = makeSepoliaProvider();
 const PORT = Number(process.env.PORT) || Number(process.env.LEDGER_BRIDGE_PORT) || 3001;
@@ -426,6 +428,22 @@ app.post("/intent", async (req, res) => {
     // ── Value-bearing action: deterministic verdict ──
     const action = outcome.action;
     const intentType = action.intentType;
+
+    // A wallet that signed in with an email can't move funds, even small auto-executed amounts,
+    // until it holds a passkey: say so now, in the chat, before anything is built or held.
+    // (The registry's execute enforces the same rule for every path that gets past this.)
+    if (wallet) {
+      try {
+        await requirePasskeyToMoveFunds(wallet);
+      } catch (e: any) {
+        if (!(e instanceof PasskeyError)) throw e;
+        console.log(`[intent] ${intentType} held back: ${wallet} has no passkey yet`);
+        res.json({ status: "passkey_required", code: e.code, intentType, reason: e.message, reasoning: e.message, timing: timing() });
+        return;
+      }
+    }
+    const emailWallet = !!wallet && (await isEmailWallet(wallet));
+
     const [profile, activity] = await Promise.all([profileP, activityP]);
     const decision = assessAction(action, { profile, history: activity });
     const { verdict, riskScore } = decision;
@@ -558,6 +576,16 @@ app.post("/intent", async (req, res) => {
       }
     }
 
+    // An email wallet approves with a passkey only. Without a server-held approval (no account
+    // yet, nothing to execute) the response would carry a transaction for the user's own wallet
+    // to sign, which this user must never be offered. A deposit is the one thing they sign
+    // themselves: their own wallet to their own account.
+    if (emailWallet && intentType !== "deposit" && !approval) {
+      const reason = "Your account isn't ready yet, so I can't do that right now. Try again in a moment.";
+      res.json({ status: "unsupported", intentType, reason, reasoning: reason, plan, timing: timing() });
+      return;
+    }
+
     res.json({
       status: "ok",
       intentType,
@@ -635,6 +663,12 @@ const onTelegramDecision: DecisionHandler = async ({ wallet, approvalId, approve
   // Phone-passkey approvals can't be approved with a chat button (there is none,
   // but a crafted callback must not skip the passkey either).
   if (a.factor === "phone-passkey") return "Open “Review & approve” and confirm with your phone's passkey.";
+  try {
+    await requirePasskeyToMoveFunds(wallet);
+  } catch (e: any) {
+    if (e instanceof PasskeyError) return "Add a passkey in Orchestra first. Nothing was executed.";
+    throw e;
+  }
   claim(a.id, wallet);
   console.log(`[telegram] ${a.id} approved — executing via Safe`);
   await refreshTelegramMessage(a); // "⏳ executing…"
@@ -749,6 +783,21 @@ app.post("/passkey/confirm-options", requireSession, async (req, res) => {
     if (!(await hasAnyPasskey(walletAddress))) { res.json({ required: false }); return; }
     res.json({ required: true, options: await ownerCheckOptions(walletAddress, desktopRp(req)) });
   } catch (e: any) { sendError(res, e); }
+});
+
+// An email wallet's first passkey needs a fresh email code. The client has the user pass one
+// (Privy emails it and checks it), then sends the new identity token here; the server keeps
+// that as the wallet's single-use verification, which registration spends.
+app.post("/passkey/email-verify", requireSession, async (req, res) => {
+  try {
+    const walletAddress = res.locals.wallet as string;
+    const { expiresAt } = await verifyEmailForPasskey(req.body?.identityToken, walletAddress);
+    console.log(`[passkey] email code checked for ${walletAddress}`);
+    res.json({ status: "ok", verified: true, expiresAt });
+  } catch (e: any) {
+    if (e instanceof AuthError) { res.status(e.status).json({ error: e.message, code: "email_verification_failed" }); return; }
+    sendError(res, e);
+  }
 });
 
 app.post("/passkey/register-options", requireSession, async (req, res) => {
@@ -1015,8 +1064,9 @@ app.post("/auth/privy", async (req, res) => {
   try {
     const { walletAddress, identityToken } = req.body || {};
     const user = await verifyPrivyUser(identityToken, walletAddress);
+    const emailWallet = await noteEmailSignIn(user, walletAddress); // before the passkey import: it checks the flag
     const session = issueToken(walletAddress);
-    console.log(`[auth] session issued for ${session.wallet} (Privy)`);
+    console.log(`[auth] session issued for ${session.wallet} (Privy${emailWallet ? ", email" : ""})`);
     const rp = rpForOrigin(req.headers.origin);
     if (rp) {
       try {
@@ -1027,12 +1077,17 @@ app.post("/auth/privy", async (req, res) => {
         console.warn(`[passkey] couldn't load the Privy passkey for ${session.wallet}: ${e.message}`);
       }
     }
-    res.json(session);
+    res.json({ ...session, emailWallet });
   } catch (e: any) { res.status(e instanceof AuthError ? e.status : 400).json({ error: e.message }); }
 });
 
-app.get("/auth/session", requireSession, (_req, res) => {
-  res.json({ wallet: res.locals.wallet });
+// Where the session's wallet stands for passkeys: the chat asks an email wallet without one to add it.
+app.get("/auth/session", requireSession, async (_req, res) => {
+  try {
+    const wallet = res.locals.wallet as string;
+    const [emailWallet, passkey] = await Promise.all([isEmailWallet(wallet), hasAnyPasskey(wallet)]);
+    res.json({ wallet, emailWallet, hasPasskey: passkey, emailVerified: emailWallet && hasEmailVerification(wallet) });
+  } catch (e: any) { sendError(res, e); }
 });
 
 // ─── Policy config ───

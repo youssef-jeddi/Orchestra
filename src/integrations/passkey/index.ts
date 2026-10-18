@@ -14,6 +14,10 @@
 // after that needs a check with an existing passkey first (ownerCheckOptions /
 // verifyOwner), or a session alone could add its own passkey and approve anything.
 //
+// Wallets that signed in with an email (emailGate.ts) go further: nothing moves funds until
+// they hold a passkey, and their first one also needs a fresh email code, checked here in
+// registration so the desktop, phone and Privy paths can't skip it.
+//
 // WebAuthn crypto is handled by @simplewebauthn/server — never hand-rolled.
 
 import {
@@ -25,6 +29,7 @@ import {
 import { decodeCredentialPublicKey } from "@simplewebauthn/server/helpers";
 import crypto from "crypto";
 import { read, write } from "../zero-g/storage";
+import { isEmailWallet, passkeyGate, hasEmailVerification, consumeEmailVerification } from "./emailGate";
 
 export interface RelyingParty {
   rpID: string;
@@ -157,7 +162,10 @@ export async function hasPhonePasskey(wallet: string): Promise<boolean> {
  * first, see verifyOwner).
  */
 export async function registrationOptions(wallet: string, rp: RelyingParty = browserRp(), holdChallenge = false, ownerChecked = false) {
-  const existing = (await getCreds(wallet)).filter((c) => c.rpID === rp.rpID);
+  const all = await getCreds(wallet);
+  // Say so before the device prompt, not after it: the verification is spent when the passkey is saved.
+  if (all.length === 0 && (await isEmailWallet(wallet)) && !hasEmailVerification(wallet)) throw emailVerificationNeeded();
+  const existing = all.filter((c) => c.rpID === rp.rpID);
   const opts = await generateRegistrationOptions({
     rpName: RP_NAME,
     rpID: rp.rpID,
@@ -200,6 +208,8 @@ export async function verifyRegistration(
   const cred = verification.registrationInfo.credential;
   const existing = await getCreds(wallet);
   if (existing.length && !held.ownerChecked) throw ownerCheckNeeded();
+  // An email wallet's first passkey needs a fresh email code, spent here, once.
+  if (!existing.length && (await isEmailWallet(wallet)) && !(await consumeEmailVerification(wallet))) throw emailVerificationNeeded();
   const creds = existing.filter((c) => c.id !== cred.id);
   creds.push({
     id: cred.id,
@@ -228,7 +238,8 @@ export interface ExternalCredential {
  * id; anything else is skipped, so a bad record fails closed.
  *
  * Only a wallet with no passkey yet takes new ones: the session is all that
- * stands behind them, like any first passkey. Ones it already holds are kept
+ * stands behind them, like any first passkey, plus a fresh email code for an
+ * email wallet (without it nothing is imported). Ones it already holds are kept
  * (with their counter). Returns how many of `list` the wallet holds and how many
  * were newly added.
  */
@@ -237,6 +248,7 @@ export async function addExternalCredentials(wallet: string, list: ExternalCrede
   const firstPasskeys = creds.length === 0;
   let held = 0;
   let added = 0;
+  let gateChecked = false;
   for (const cred of list) {
     let id: string;
     let publicKey: Uint8Array<ArrayBuffer>;
@@ -250,6 +262,10 @@ export async function addExternalCredentials(wallet: string, list: ExternalCrede
     }
     if (creds.some((c) => c.id === id && c.rpID === cred.rpID)) { held++; continue; } // keep its counter
     if (!firstPasskeys) continue;
+    if (!gateChecked) {
+      gateChecked = true;
+      if ((await isEmailWallet(wallet)) && !(await consumeEmailVerification(wallet))) return { held, added: 0 };
+    }
     creds.push({
       id,
       publicKey: Buffer.from(publicKey).toString("base64"),
@@ -311,6 +327,22 @@ export async function removePasskey(wallet: string, id: string): Promise<Passkey
   await saveCreds(wallet, creds.filter((c) => c !== cred));
   const { rpID, label, source, createdAt } = cred;
   return { id, rpID, label, source, createdAt };
+}
+
+// ── Funds gate ──
+
+/**
+ * Throws `passkey_required` when `wallet` signed in with an email and holds no passkey yet.
+ * Every path that moves funds goes through this (see getAdapter): without it, a session
+ * alone could move money from an account that has nothing else protecting it.
+ */
+export async function requirePasskeyToMoveFunds(wallet: string): Promise<void> {
+  const gate = passkeyGate({ emailWallet: await isEmailWallet(wallet), passkeyCount: (await getCreds(wallet)).length });
+  if (!gate.ok) throw new PasskeyError(403, gate.message, gate.code);
+}
+
+function emailVerificationNeeded(): PasskeyError {
+  return new PasskeyError(403, "We'll email you a code first to make sure it's you. Enter it, then add your passkey.", "email_verification_required");
 }
 
 // ── Owner check: an existing passkey before adding another ──

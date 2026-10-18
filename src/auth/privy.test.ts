@@ -21,7 +21,7 @@ const test = (name: string, fn: () => void | Promise<void>) => tests.push([name,
 
 (async () => {
   const auth = await import("./index");
-  const { privyLogin, verifyPrivyUser, importPrivyPasskeys, _setVerificationKey, _setUserFetcher } = await import("./privy");
+  const { privyLogin, verifyPrivyUser, importPrivyPasskeys, noteEmailSignIn, verifyEmailForPasskey, _setVerificationKey, _setUserFetcher } = await import("./privy");
   const passkey = await import("../integrations/passkey");
   const storage = await import("../integrations/zero-g/storage");
   auth._setSecret("test-secret-test-secret-test-secret!");
@@ -175,6 +175,48 @@ const test = (name: string, fn: () => void | Promise<void>) => tests.push([name,
     delete process.env.PRIVY_APP_SECRET;
     assert.deepEqual(await importPrivyPasskeys(await passkeyUser(), embedded, RP.rpID), { held: 0, added: 0 });
     assert.equal(await passkey.hasPasskey(embedded), false);
+  });
+
+  // ── Email sign-in: flagged at sign-in, first passkey needs a fresh code in the token ──
+  const emailWallet = ethers.Wallet.createRandom().address;
+  const emailToken = (agoSec: number, extra: unknown[] = []) => idToken({ accounts: [
+    { type: "email", address: "a@b.c", lv: Math.floor(Date.now() / 1000) - agoSec },
+    { type: "wallet", address: emailWallet, chain_type: "ethereum", wallet_client_type: "privy", id: "w9", lv: 1 },
+    ...extra,
+  ] });
+  const gate = await import("../integrations/passkey/emailGate");
+  const kind = async (fn: () => Promise<unknown>) => { try { await fn(); } catch (e: any) { return e.status; } return 0; };
+
+  test("an email sign-in is flagged, a passkey or wallet sign-in is not, and the flag sticks", async () => {
+    await storage.clear();
+    assert.equal(await noteEmailSignIn(await verifyPrivyUser(await idToken(), embedded), embedded), false); // passkey user
+    assert.equal(await noteEmailSignIn(await verifyPrivyUser(await idToken(), external), external), false); // MetaMask via Privy
+    assert.equal(await noteEmailSignIn(await verifyPrivyUser(await emailToken(5), emailWallet), emailWallet), true);
+    // A later sign-in whose token no longer looks like an email one doesn't lift it.
+    const later = { id: "did:privy:user1", linked_accounts: [] } as any;
+    assert.equal(await noteEmailSignIn(later, emailWallet), true);
+  });
+
+  test("a fresh email code in the identity token becomes the wallet's one verification", async () => {
+    gate._resetEmailGate();
+    const { expiresAt } = await verifyEmailForPasskey(await emailToken(5), emailWallet);
+    assert.ok(Date.parse(expiresAt) > Date.now());
+    assert.equal(gate.hasEmailVerification(emailWallet), true);
+    assert.equal(await gate.consumeEmailVerification(emailWallet), true);
+    assert.equal(gate.hasEmailVerification(emailWallet), false);
+    assert.equal(await kind(async () => verifyEmailForPasskey(await emailToken(5), emailWallet)), 409); // same code again
+  });
+
+  test("ATTACK: an old identity token, a forged one, or another wallet's gets no verification", async () => {
+    gate._resetEmailGate();
+    assert.equal(await kind(async () => verifyEmailForPasskey(await emailToken(3600), emailWallet)), 403); // stale
+    assert.equal(await kind(async () => verifyEmailForPasskey(await idToken({ key: impostor.privateKey, accounts: [
+      { type: "email", address: "a@b.c", lv: Math.floor(Date.now() / 1000) },
+      { type: "wallet", address: emailWallet, chain_type: "ethereum", wallet_client_type: "privy", id: "w9", lv: 1 },
+    ] }), emailWallet)), 401); // forged
+    assert.equal(await kind(async () => verifyEmailForPasskey(await idToken(), embedded)), 400); // not an email wallet
+    assert.equal(gate.hasEmailVerification(emailWallet), false);
+    assert.equal(gate.hasEmailVerification(embedded), false);
   });
 
   console.log("privy");
