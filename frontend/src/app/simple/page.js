@@ -9,15 +9,21 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { OrchestraProvider, useOrchestra } from '@/context/OrchestraContext';
 import {
   sendIntent, getPrices, getPasskeyStatus, getApproval,
-  getTelegramStatus, telegramLinkRequest, telegramLink, listPasskeys,
+  getTelegramStatus, telegramLinkRequest, telegramLink, listPasskeys, rejectApproval,
 } from '@/lib/bridge';
-import { executeSwap, executeSend } from '@/lib/signing';
 import { registerPasskey, approveWithPasskey, setUpPhonePasskey, removePasskey } from '@/lib/passkey';
 import { PRIVY_APP_ID } from '@/lib/privy';
 import { shortAddress } from '@/lib/onboarding';
-import { PASSKEY_PROMPT, isPasskeyRequired, shouldOfferPasskey, userMaySign, pendingRequest, verifyStepFor, passkeyDraft, SOCIAL_NONE, SOCIAL_WRONG_ACCOUNT } from '@/lib/emailPasskey';
+import { SIGN_REFUSED, PASSKEY_PROMPT, isPasskeyRequired, shouldOfferPasskey, userMaySign, pendingRequest, verifyStepFor, passkeyDraft, SOCIAL_NONE, SOCIAL_WRONG_ACCOUNT } from '@/lib/emailPasskey';
 import EmailPasskeySetup from '@/components/EmailPasskeySetup';
 import SocialPasskeySetup from '@/components/SocialPasskeySetup';
+import LimitsSheet from '@/components/LimitsSheet';
+import { LIMITS_BUTTON_HINT } from '@/lib/limits';
+import {
+  ruleHint, declineLabel, declinedText, expiredText, ALREADY_SETTLED, approvalControls,
+  cardView, doneOutcome, outcomeAfterError,
+} from '@/lib/approvalCard';
+import { shouldRefreshBalances, approvalMovedFunds, refreshSoon } from '@/lib/balances';
 import { verdictLabel, ruleLabel, EXAMPLES, WELCOME, showWelcome, RECEIPT_LABEL, balanceTiles, ADD_PASSKEY_HINT } from '@/lib/plainLanguage';
 
 const ACCENT = '#C084FC';
@@ -28,6 +34,8 @@ const VERDICT_COLOR = {
   INFO: '#007AFF',
   BLOCKED: '#FF453A',
 };
+
+const PILL_COLOR = { good: '#30D158', calm: '#8d8a84', bad: '#FF453A' };
 
 // Statuses answered with plain text instead of a plan card.
 const TEXT_STATUSES = new Set(['reply', 'needs_clarification', 'unsupported']);
@@ -68,10 +76,13 @@ function SimpleChat() {
     endRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, busy]);
 
+  const refreshBalances = safe.refreshBalances;
+  const movedFunds = useCallback(() => refreshSoon(refreshBalances), [refreshBalances]);
   const [signingIdx, setSigningIdx] = useState(null);
   const [prices, setPrices] = useState(null);
   const [passkeyReg, setPasskeyReg] = useState(false);
   const [showPasskeys, setShowPasskeys] = useState(false);
+  const [showLimits, setShowLimits] = useState(false);
   const showError = useCallback((msg) => setMessages((m) => [...m, { role: 'agent', error: msg }]), []);
   const [setupOpen, setSetupOpen] = useState(false); // an email user's first-passkey steps
   const held = useRef(pendingRequest()); // the request held back until a passkey exists
@@ -107,12 +118,13 @@ function SimpleChat() {
       const data = await sendIntent(text, ledger.walletAddress, { history });
       if (isPasskeyRequired(data)) held.current.hold(text, history);
       setMessages((m) => [...m, { role: 'agent', data }]);
+      if (shouldRefreshBalances(data)) refreshSoon(refreshBalances);
     } catch (err) {
       setMessages((m) => [...m, { role: 'agent', error: err.message }]);
     } finally {
       setBusy(false);
     }
-  }, [ledger.walletAddress]);
+  }, [ledger.walletAddress, refreshBalances]);
 
   const send = useCallback(async (raw) => {
     const text = (raw ?? input).trim();
@@ -132,35 +144,32 @@ function SimpleChat() {
     await ask(text, history);
   }, [input, busy, messages, ledger.walletAddress, session.ready, session.status, ask]);
 
-  // Approve a swap, send or deposit into your account from an agent card.
+  // Fund your own account from your own wallet. Everything the account holds (send, swap,
+  // liquidity) is approved with a passkey or on Telegram instead, never paid from this wallet.
   const execute = useCallback(async (data, idx) => {
     if (!ledger.walletAddress) {
       setMessages((m) => [...m, { role: 'agent', error: 'Sign in first.' }]);
       return;
     }
-    const who = { emailWallet, hasPasskey: session.hasPasskey };
-    if (!userMaySign(who, data.depositData ? 'deposit' : 'send')) {
-      setMessages((m) => [...m, { role: 'agent', error: 'Confirm this with your passkey instead.' }]);
+    if (!data.depositData || !userMaySign({ emailWallet, hasPasskey: session.hasPasskey }, 'deposit')) {
+      setMessages((m) => [...m, { role: 'agent', error: SIGN_REFUSED }]);
       return;
     }
     setSigningIdx(idx);
     try {
-      const result = data.depositData
-        ? await safe.deposit(data.depositData.symbol.toLowerCase(), data.depositData.amount)
-        : data.quoteData
-          ? await executeSwap(ledger, data, who)
-          : await executeSend(ledger, data, who);
-      if (result.orderId) {
-        setMessages((m) => [...m, { role: 'system', text: 'Your swap order was sent. It can take a minute to go through.' }]);
-      } else {
-        setMessages((m) => [...m, { role: 'system', txHash: result.txHash, explorerUrl: result.explorerUrl }]);
-      }
+      const result = await safe.deposit(data.depositData.symbol.toLowerCase(), data.depositData.amount);
+      setMessages((m) => [...m, { role: 'system', txHash: result.txHash, explorerUrl: result.explorerUrl }]);
     } catch (err) {
       setMessages((m) => [...m, { role: 'agent', error: err.message }]);
     } finally {
       setSigningIdx(null);
     }
-  }, [ledger, safe, emailWallet, session.hasPasskey]);
+  }, [ledger.walletAddress, safe, emailWallet, session.hasPasskey]);
+
+  // Mark a held card as settled (done or failed) so it shows the outcome and loses its buttons.
+  const settleCard = useCallback((idx, outcome) => {
+    setMessages((m) => m.map((x, i) => (i === idx ? { ...x, outcome } : x)));
+  }, []);
 
   // Approve + execute with a passkey (biometric) instead of signing directly.
   const approvePasskey = useCallback(async (data, idx) => {
@@ -175,13 +184,19 @@ function SimpleChat() {
     setSigningIdx(idx);
     try {
       const result = await approveWithPasskey(ledger.walletAddress, data.approval.id);
-      setMessages((m) => [...m, { role: 'system', txHash: result.txHash, explorerUrl: result.explorerUrl }]);
+      settleCard(idx, doneOutcome(result));
+      refreshSoon(refreshBalances);
     } catch (err) {
-      setMessages((m) => [...m, { role: 'agent', error: err.message }]);
+      // If the server already settled it (it ran and failed, or lapsed), the card says so and loses
+      // its buttons; if it is still waiting (prompt cancelled, check failed) it stays open.
+      const approval = await getApproval(data.approval.id).catch(() => null);
+      const outcome = outcomeAfterError(err, approval, data.intentType);
+      if (outcome) settleCard(idx, outcome);
+      else setMessages((m) => [...m, { role: 'agent', error: err.message }]);
     } finally {
       setSigningIdx(null);
     }
-  }, [ledger.walletAddress]);
+  }, [ledger.walletAddress, settleCard, refreshBalances]);
 
   const registerPk = useCallback(async () => {
     if (!ledger.walletAddress) return;
@@ -271,6 +286,7 @@ function SimpleChat() {
               </button>
             )}
             <TelegramLink ledger={ledger} session={session} onError={(msg) => setMessages((m) => [...m, { role: 'agent', error: msg }])} />
+            {session.ready && <button onClick={() => setShowLimits((v) => !v)} style={pill(showLimits)} title={LIMITS_BUTTON_HINT}>Limits</button>}
             {session.ready && (passkeyReg
               ? <button onClick={() => setShowPasskeys((v) => !v)} style={pill(showPasskeys)} title="See, add or remove your passkeys">🔑 Passkeys</button>
               : <button onClick={registerPk} style={pill(false)} title={emailWallet ? 'Add a passkey on this device' : ADD_PASSKEY_HINT}>🔑 Add passkey</button>)}
@@ -304,6 +320,9 @@ function SimpleChat() {
       {connected && session.ready && showPasskeys && (
         <PasskeyPanel onAdd={registerPk} onChange={refreshPasskeyStatus} onClose={() => setShowPasskeys(false)} onError={showError} />
       )}
+      {connected && session.ready && showLimits && (
+        <LimitsSheet ledger={ledger} onClose={() => setShowLimits(false)} buttonStyle={approveBtn} />
+      )}
       {connected && session.ready && <SafeSetup safe={safe} canFund={userMaySign({ emailWallet, hasPasskey: session.hasPasskey }, 'deposit')} ledger={ledger} onError={(msg) => setMessages((m) => [...m, { role: 'agent', error: msg }])} />}
 
       {/* Messages */}
@@ -330,7 +349,8 @@ function SimpleChat() {
 
         {messages.map((m, i) => (
           <MessageRow key={i} m={m} idx={i} onExecute={execute} onPasskey={approvePasskey}
-            passkeyReg={passkeyReg} signing={signingIdx === i} emailWallet={emailWallet}
+            onAddPasskeyHere={registerPk} onMoved={movedFunds}
+            passkeyReg={passkeyReg} signing={signingIdx === i}
             onAddPasskey={() => setSetupOpen(true)} canAddPasskey={needsFirstPasskey} />
         ))}
         {busy && <div style={{ color: '#666', fontSize: 13, paddingLeft: 4 }}>Thinking…</div>}
@@ -375,7 +395,7 @@ function SimpleChat() {
   );
 }
 
-function MessageRow({ m, idx, onExecute, onPasskey, passkeyReg, signing, emailWallet, onAddPasskey, canAddPasskey }) {
+function MessageRow({ m, idx, onExecute, onPasskey, onAddPasskeyHere, onMoved, passkeyReg, signing, onAddPasskey, canAddPasskey }) {
   if (m.passkeyPrompt || isPasskeyRequired(m.data)) {
     return <PasskeyPrompt text={m.passkeyPrompt ? PASSKEY_PROMPT : agentText(m.data)} onAdd={onAddPasskey} canAdd={canAddPasskey} />;
   }
@@ -415,9 +435,11 @@ function MessageRow({ m, idx, onExecute, onPasskey, passkeyReg, signing, emailWa
       data={m.data}
       onExecute={() => onExecute(m.data, idx)}
       onPasskey={() => onPasskey(m.data, idx)}
+      onAddPasskey={onAddPasskeyHere}
+      onMoved={onMoved}
+      outcome={m.outcome}
       passkeyReg={passkeyReg}
       signing={signing}
-      emailWallet={emailWallet}
     />
   );
 }
@@ -460,18 +482,33 @@ function PasskeyPrompt({ text, onAdd, canAdd }) {
   );
 }
 
-function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing, emailWallet }) {
+function AgentCard({ data, onExecute, onPasskey, onAddPasskey, onMoved, passkeyReg, signing, outcome }) {
   const verdict = data.assessment?.verdict || 'UNKNOWN';
   const color = VERDICT_COLOR[verdict] || '#666';
   const triggered = data.assessment?.triggered || [];
   const needsSign = !data.autoExecuted && (data.quoteData || data.sendData || data.depositData || data.lpData || data.lpRemoveData);
-  const isSwap = !!data.quoteData;
-  const isDeposit = !!data.depositData;
-  // Liquidity is added from the account, so it can only be approved through a server-held
-  // approval (passkey / Telegram) — there is no "sign it in your wallet" path.
-  const isLp = !!(data.lpData || data.lpRemoveData);
-  const method = data.assessment?.approvalMethod; // 'passkey' | 'ledger' | 'none'
-  const usePasskey = needsSign && (method === 'passkey' || method === 'ledger') && passkeyReg && !!data.approval?.id;
+  const controls = needsSign ? approvalControls({ intentType: data.intentType, approval: data.approval, passkeyReg }) : null;
+  // After the user declines (or the request lapses) the card stays settled: no buttons.
+  const [ended, setEnded] = useState(null); // { text }
+  const [declining, setDeclining] = useState(false);
+  const [settled, setSettled] = useState(false); // settled elsewhere (e.g. said no on the phone)
+  const settle = useCallback(() => setSettled(true), []);
+
+  const view = cardView({ outcome, ended, signing, declining, settledElsewhere: settled, intentType: data.intentType });
+
+  const decline = async () => {
+    setDeclining(true);
+    try {
+      await rejectApproval(data.approval.id);
+      setEnded({ kind: 'declined', text: declinedText(data.intentType) });
+    } catch (err) {
+      if (err.status === 404) setEnded({ kind: 'expired', text: expiredText(data.intentType) });
+      else if (err.status === 409) setEnded({ kind: 'handled', text: ALREADY_SETTLED });
+      else setEnded({ text: err.message, retry: true });
+    } finally {
+      setDeclining(false);
+    }
+  };
 
   return (
     <div style={{ alignSelf: 'flex-start', maxWidth: '92%', display: 'flex', flexDirection: 'column', gap: 10,
@@ -509,12 +546,17 @@ function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing, emailWalle
 
       {/* Verdict + rule chips */}
       <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-        <span style={{ padding: '3px 10px', borderRadius: 100, fontSize: 11, fontWeight: 500,
-          background: `${color}22`, color, border: `1px solid ${color}44` }}>
-          {verdictLabel(verdict)}
-        </span>
-        {triggered.map((slug) => (
-          <span key={slug} style={{ fontSize: 10, padding: '2px 8px', borderRadius: 100,
+        {(() => {
+          const pillColor = view.pill ? PILL_COLOR[view.pill.tone] : color;
+          return (
+            <span style={{ padding: '3px 10px', borderRadius: 100, fontSize: 11, fontWeight: 500,
+              background: `${pillColor}22`, color: pillColor, border: `1px solid ${pillColor}44` }}>
+              {view.pill ? view.pill.label : verdictLabel(verdict)}
+            </span>
+          );
+        })()}
+        {view.showChips && triggered.map((slug) => (
+          <span key={slug} title={ruleHint(slug)} style={{ fontSize: 10, padding: '2px 8px', borderRadius: 100,
             background: `${color}18`, color, border: `1px solid ${color}33` }}>
             {ruleLabel(slug)}
           </span>
@@ -528,36 +570,40 @@ function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing, emailWalle
           ✓ Done — {RECEIPT_LABEL}
         </a>
       )}
-      {needsSign && data.approval?.channel === 'telegram' && <TelegramWait approval={data.approval} />}
-      {needsSign && data.approval?.channel !== 'telegram' && (
+      {controls && view.settled && (
+        <span style={{ fontSize: 13, color: outcome?.status === 'done' ? '#30D158' : '#999', lineHeight: 1.5 }}>
+          {view.line}
+          {view.receiptUrl && (
+            <> <a href={view.receiptUrl} target="_blank" rel="noreferrer" style={{ color: '#30D158', textDecoration: 'none' }}>{RECEIPT_LABEL}</a></>
+          )}
+        </span>
+      )}
+      {controls && !view.settled && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 2 }}>
-          {usePasskey ? (
-            <button onClick={onPasskey} disabled={signing} style={approveBtn(signing)}>
+          {controls.mode === 'telegram' && <TelegramWait approval={data.approval} onSettled={settle} onMoved={onMoved} />}
+          {controls.mode === 'passkey' && (
+            <button onClick={onPasskey} disabled={view.approveDisabled} style={approveBtn(signing)}>
               {signing ? 'Confirm on your device…' : '🔑 Approve with passkey'}
             </button>
-          ) : emailWallet && !isDeposit ? (
-            <span style={{ fontSize: 13, color: '#999', lineHeight: 1.5 }}>
-              Confirm this with your passkey: add one with the button at the top, then ask again.
-            </span>
-          ) : isLp ? (
-            <span style={{ fontSize: 13, color: '#999', lineHeight: 1.5 }}>
-              Liquidity comes from your account: approve it with a passkey (add one top-right) or link Telegram, then ask again.
-            </span>
-          ) : (
+          )}
+          {controls.mode === 'wallet' && (
             <button onClick={onExecute} disabled={signing} style={approveBtn(signing)}>
-              {signing ? 'Check your wallet…' : (isDeposit ? 'Confirm in your wallet' : isSwap ? 'Approve & Swap' : 'Approve & Send')}
+              {signing ? 'Check your wallet…' : 'Confirm in your wallet'}
             </button>
           )}
-          {method === 'passkey' && !passkeyReg && !isLp && (
-            <span style={{ fontSize: 11, color: '#777' }}>
-              Tip: add a passkey (top-right) to approve with your fingerprint instead.
-            </span>
+          {(controls.mode === 'need-passkey' || controls.mode === 'not-ready') && (
+            <span style={{ fontSize: 13, color: '#999', lineHeight: 1.5 }}>{controls.text}</span>
           )}
-          {method === 'ledger' && (
-            <span style={{ fontSize: 11, color: '#777' }}>
-              Ledger is paused. Approve with a passkey or your wallet instead.
-            </span>
+          {controls.mode === 'need-passkey' && (
+            <button onClick={onAddPasskey} style={{ ...approveBtn(false), alignSelf: 'flex-start' }}>🔑 Add passkey</button>
           )}
+          {controls.canDecline && view.showDecline && (
+            <button onClick={decline} disabled={view.declineDisabled} style={{ ...pill(false), alignSelf: 'flex-start', padding: '6px 12px', fontSize: 12 }}
+              title="Cancel this request. You can always ask again.">
+              {declining ? 'Cancelling…' : declineLabel(data.intentType)}
+            </button>
+          )}
+          {ended?.retry && <span style={{ fontSize: 12, color: '#FF453A' }}>Couldn&apos;t cancel it: {ended.text}</span>}
         </div>
       )}
       <Timing timing={data.timing} />
@@ -566,8 +612,16 @@ function AgentCard({ data, onExecute, onPasskey, passkeyReg, signing, emailWalle
 }
 
 // An approval sent to the user's phone: poll the server until it's settled there.
-function TelegramWait({ approval }) {
+function TelegramWait({ approval, onSettled, onMoved }) {
   const [state, setState] = useState(approval);
+
+  const live = ['pending', 'executing'].includes(state.status);
+  useEffect(() => { if (!live) onSettled?.(); }, [live, onSettled]);
+  const moved = approvalMovedFunds({ ...approval, ...state });
+  const told = useRef(false); // once per card, however often the parent re-renders
+  useEffect(() => {
+    if (moved && !told.current) { told.current = true; onMoved?.(); }
+  }, [moved, onMoved]);
 
   useEffect(() => {
     if (!['pending', 'executing'].includes(state.status)) return;

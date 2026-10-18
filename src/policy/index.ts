@@ -11,6 +11,7 @@
 // velocity caps) that replaces — rather than patches — the Gatekeeper LLM verdict.
 
 import { estimateUsd, resolveValuationSymbol } from "./prices";
+import { formatUsd } from "./money";
 
 export type Verdict = "AUTO_EXECUTE" | "NEEDS_APPROVAL" | "BLOCKED" | "INFO";
 
@@ -37,9 +38,13 @@ export function detectIntentType(steps: any[]): IntentType {
 }
 
 // ─── Daily limit resolution ───
-// Trust a positive numeric configured limit; otherwise fall back to the default.
+/** The highest daily limit a user can set (enforced when saving). */
+export const MAX_DAILY_LIMIT = 1000;
+
+// A configured limit of 0 is honoured ("always ask me"); only a missing or invalid value
+// (not a number, negative, NaN) falls back to the default.
 export function resolveDailyLimit(configured: unknown): number {
-  return typeof configured === "number" && configured > 0
+  return typeof configured === "number" && Number.isFinite(configured) && configured >= 0
     ? configured
     : DEFAULT_DAILY_LIMIT;
 }
@@ -122,7 +127,11 @@ export interface DecisionInput {
  * amount-vs-limit behaviour exactly.
  */
 export interface PolicyProfile {
-  /** Destination allow-list for `send` (any case; compared lowercased). */
+  /**
+   * Recipients the user has sent to before (any case; compared lowercased). Filled by the
+   * server from its own record, never from the user's stored policy. Missing or empty → every
+   * send to an address asks, so a profile that couldn't be read fails closed.
+   */
   knownAddresses?: string[];
   /** Token allow-list. If non-empty, any token NOT listed forces approval. */
   verifiedTokens?: string[];
@@ -220,7 +229,7 @@ function sendRecipient(steps: any[]): string | null {
  *   5. escalation rules        → each can force NEEDS_APPROVAL, none can weaken:
  *        · daily limit             (dailyLimitUsd — rolling 24h spend, always on)
  *        · unverified token        (profile.verifiedTokens)
- *        · unknown recipient       (profile.knownAddresses, send only)
+ *        · unknown recipient       (profile.knownAddresses, send only, always on)
  *        · daily count velocity    (profile.maxAutoTxPerDay + history)
  *        · habit anomaly           (profile.typicalMaxUsd)
  *   6. otherwise               → AUTO_EXECUTE
@@ -268,12 +277,31 @@ export function decide(input: DecisionInput): PolicyDecision {
 
   // 5a. Daily limit (always applies). A single tx over the limit, or cumulative
   // spend crossing it, requires approval.
-  if (spentToday + valueUsd > dailyLimitUsd) {
+  if (dailyLimitUsd <= 0) {
+    // 0 means "always ask me": even an action that can't be priced needs an OK.
+    escalations.push({ rule: "daily-limit", reason: "You asked me to check with you before every payment, so this needs your OK.", risk: 70 });
+  } else if (spentToday + valueUsd > dailyLimitUsd) {
     escalations.push({
       rule: "daily-limit",
-      reason: `This would go over your $${dailyLimitUsd} daily limit for automatic actions ($${spentToday} used today), so it needs your OK.`,
+      reason: `This would go over your ${formatUsd(dailyLimitUsd)} daily limit for automatic actions (${formatUsd(spentToday)} used today), so it needs your OK.`,
       risk: 70,
     });
+  }
+
+  // 5c. First send to an address (send only; always on). The known list comes from the server's
+  // own record — an empty or missing list means nobody is known yet, so the send asks.
+  if (intentType === "send") {
+    const to = sendRecipient(steps);
+    const known = new Set((profile?.knownAddresses ?? []).filter((a) => typeof a === "string").map((a) => a.toLowerCase()));
+    if (!to || !known.has(to.toLowerCase())) {
+      escalations.push({
+        rule: "unknown-recipient",
+        reason: to
+          ? "You haven't sent to this address before, so it needs your OK."
+          : "I couldn't tell who this goes to, so it needs your OK.",
+        risk: 60,
+      });
+    }
   }
 
   if (profile) {
@@ -285,19 +313,6 @@ export function decide(input: DecisionInput): PolicyDecision {
           rule: "unverified-token",
           reason: `The token ${shortAddr(unverified)} isn't on your list of checked tokens, so it needs your OK.`,
           risk: 65,
-        });
-      }
-    }
-
-    // 5c. Destination allow-list (send only).
-    if (intentType === "send" && profile.knownAddresses && profile.knownAddresses.length > 0) {
-      const to = sendRecipient(steps);
-      const allow = new Set(profile.knownAddresses.map((a) => a.toLowerCase()));
-      if (to && !allow.has(to.toLowerCase())) {
-        escalations.push({
-          rule: "unknown-recipient",
-          reason: `${shortAddr(to)} is a new recipient you haven't sent to before, so it needs your OK.`,
-          risk: 60,
         });
       }
     }
@@ -315,7 +330,7 @@ export function decide(input: DecisionInput): PolicyDecision {
     if (profile.typicalMaxUsd != null && profile.typicalMaxUsd > 0 && valueUsd > profile.typicalMaxUsd * HABIT_ANOMALY_MULTIPLE) {
       escalations.push({
         rule: "habit-anomaly",
-        reason: `$${valueUsd} is bigger than you usually move (typically up to $${profile.typicalMaxUsd}), so it needs your OK.`,
+        reason: `${formatUsd(valueUsd)} is bigger than you usually move (typically up to ${formatUsd(profile.typicalMaxUsd)}), so it needs your OK.`,
         risk: 55,
       });
     }
@@ -336,7 +351,7 @@ export function decide(input: DecisionInput): PolicyDecision {
   return {
     verdict: "AUTO_EXECUTE",
     riskScore: 15,
-    reason: `$${valueUsd} is within your $${dailyLimitUsd} daily limit for automatic actions ($${spentToday} used today).`,
+    reason: `${formatUsd(valueUsd)} is within your ${formatUsd(dailyLimitUsd)} daily limit for automatic actions (${formatUsd(spentToday)} used today).`,
     requiresLedger: false,
     triggered: [],
     approvalMethod: "none",
@@ -387,6 +402,7 @@ export function computeHabitProfile(history: ActivityRecord[]): HabitProfile {
   };
 }
 
+export * from "./money";
 export * from "./prices";
 export * from "./priceFeed";
 export * from "./quoteCheck";

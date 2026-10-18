@@ -33,6 +33,7 @@ import {
   type ActivityRecord,
 } from "../../policy";
 import { getPolicyProfile, getRecentActivity, recordActivity, readUserProfile, writeUserProfile } from "../../policy/store";
+import { readLimits, requestConfirmation, applyChange, LimitsError } from "../../policy/limits";
 import { loginRequest, login, issueToken, requireSession, sessionWallet, AuthError } from "../../auth";
 import { verifyPrivyUser, importPrivyPasskeys, noteEmailSignIn, verifyEmailForPasskey } from "../../auth/privy";
 import { getAdapter, type Balances } from "../../executor/adapters";
@@ -49,6 +50,7 @@ import {
   settle,
   getApproval,
   approvalView,
+  declineApproval,
   reject,
   issueReviewToken,
   approvalForReview,
@@ -56,6 +58,7 @@ import {
   type PendingApproval,
 } from "../../approvals";
 import { describeApproval, describeOutcome, reviewOf } from "../../approvals/describe";
+import { approveWithPasskeyFlow, telegramDecisionFlow, executeApprovalFlow, rememberSentRecipient } from "../../approvals/flows";
 import {
   telegramEnabled,
   getLink,
@@ -445,7 +448,13 @@ app.post("/intent", async (req, res) => {
     }
     const emailWallet = !!wallet && (await isEmailWallet(wallet));
 
-    const [profile, activity] = await Promise.all([profileP, activityP]);
+    const [storedProfile, activity] = await Promise.all([profileP, activityP]);
+    // The user's own wallet and own account are never "new recipients"; every other address
+    // is known only once a send to it has gone through (the server's own record).
+    const profile: PolicyProfile = {
+      ...storedProfile,
+      knownAddresses: [...(storedProfile.knownAddresses ?? []), ...[wallet, safeAddress].filter((a): a is string => !!a)],
+    };
     const decision = assessAction(action, { profile, history: activity });
     const { verdict, riskScore } = decision;
     if (decision.typicalMaxUsd != null) console.log(`[intent] Habit baseline: typicalMaxUsd=$${decision.typicalMaxUsd}`);
@@ -513,6 +522,8 @@ app.post("/intent", async (req, res) => {
               to: action.params.to,
               token: action.params.tokenIn || action.params.token,
             }).catch(() => {});
+            // The address now counts as one the user has sent to (it was already known, or they approved it).
+            if (intentType === "send") rememberSentRecipient(wallet, intentType, approvalExecution(intentType, result.payload) ?? undefined).catch(() => {});
           }
           res.json({
             status: "ok", intentType, autoExecuted: true,
@@ -617,20 +628,18 @@ function approvalExecution(intentType: string, payload: Record<string, unknown> 
 /** Execute a claimed approval's stored payload through the Safe and record the outcome. */
 async function executeApproval(a: PendingApproval): Promise<{ txHash: string; explorerUrl: string }> {
   try {
-    const adapter = getAdapter(a.intentType);
-    if (!adapter?.execute) throw new Error(`This ${a.intentType.replace(/_/g, " ")} can't be run from your account`);
-    const ctx = {
-      walletAddress: a.wallet, safeAddress: a.safeAddress, balanceAddress: a.safeAddress, provider,
-      params: {}, planSummary: a.summary, planSteps: [], totalEstimatedValueUsd: a.valueUsd, balances: null,
-    };
-    const exec = await adapter.execute(ctx, { payload: a.execution });
-    if (!exec) throw new Error("It ran but gave no result, so I can't confirm it went through");
-    const result = { txHash: exec.txHash, explorerUrl: exec.explorerUrl };
-    settle(a, { result });
-    console.log(`[approval] ${a.id} executed: ${exec.txHash}`);
+    const result = await executeApprovalFlow(a, async (a) => {
+      const adapter = getAdapter(a.intentType);
+      if (!adapter?.execute) throw new Error(`This ${a.intentType.replace(/_/g, " ")} can't be run from your account`);
+      const ctx = {
+        walletAddress: a.wallet, safeAddress: a.safeAddress, balanceAddress: a.safeAddress, provider,
+        params: {}, planSummary: a.summary, planSteps: [], totalEstimatedValueUsd: a.valueUsd, balances: null,
+      };
+      return adapter.execute(ctx, { payload: a.execution });
+    });
+    console.log(`[approval] ${a.id} executed: ${result.txHash}`);
     return result;
   } catch (err: any) {
-    settle(a, { error: err.message });
     console.error(`[approval] ${a.id} failed: ${err.message}`);
     throw err;
   }
@@ -645,37 +654,16 @@ async function refreshTelegramMessage(a: PendingApproval): Promise<void> {
   if (a.telegram) await settleApprovalMessage(a.telegram.chatId, a.telegram.messageId, describeApproval(a), describeOutcome(a));
 }
 
-// Approve / Reject pressed in Telegram. Answers fast; execution runs in the
-// background and the message is edited with the outcome.
-const onTelegramDecision: DecisionHandler = async ({ wallet, approvalId, approve }) => {
-  const a = getApproval(approvalId);
-  if (!a || a.channel !== "telegram") return "I can't find that approval. It may have expired.";
-  if (a.wallet !== wallet) return "This approval belongs to another wallet.";
-  if (a.status !== "pending") {
-    await refreshTelegramMessage(a);
-    return `Already ${a.status}.`;
-  }
-  if (!approve) {
-    reject(a.id, wallet);
-    console.log(`[telegram] ${a.id} rejected`);
-    await refreshTelegramMessage(a);
-    return "You said no. Nothing was done.";
-  }
-  // Phone-passkey approvals can't be approved with a chat button (there is none,
-  // but a crafted callback must not skip the passkey either).
-  if (a.factor === "phone-passkey") return "Open “Review & approve” and confirm with your phone's passkey.";
-  try {
-    await requirePasskeyToMoveFunds(wallet);
-  } catch (e: any) {
-    if (e instanceof PasskeyError) return "Add a passkey in Orchestra first. Nothing was done.";
-    throw e;
-  }
-  claim(a.id, wallet);
-  console.log(`[telegram] ${a.id} approved — executing via Safe`);
-  await refreshTelegramMessage(a); // "⏳ doing it…"
-  executeApproval(a).catch(() => {}).finally(() => refreshTelegramMessage(a));
-  return "Approved. Doing it now…";
-};
+// Approve / Reject pressed in Telegram (see telegramDecisionFlow).
+const onTelegramDecision: DecisionHandler = telegramDecisionFlow({
+  requirePasskey: requirePasskeyToMoveFunds,
+  isPasskeyError: (e) => e instanceof PasskeyError,
+  refresh: refreshTelegramMessage,
+  execute: (a) => {
+    console.log(`[telegram] ${a.id} approved — executing via Safe`);
+    return executeApproval(a);
+  },
+});
 
 /** A wallet in the body must match the session (catches a stale session after switching accounts). */
 function sameWalletOrAbsent(bodyWallet: unknown, res: express.Response): boolean {
@@ -849,18 +837,14 @@ app.post("/passkey/approve", requireSession, async (req, res) => {
     const walletAddress = res.locals.wallet as string;
     const { approvalId, response } = req.body;
     if (!response) { res.status(400).json({ error: "response required" }); return; }
-    const a = requirePending(approvalId, walletAddress);
-    requirePasskeyChannel(a);
-    const challenge = a.challenge;
-    a.challenge = undefined; // single-use, pass or fail
-    if (!challenge) { res.status(400).json({ error: "Request passkey options for this approval first." }); return; }
-
-    const ok = await verifyAuthentication(walletAddress, response, challenge, desktopRp(req));
-    if (!ok) { res.status(401).json({ error: "That passkey check didn't work. Please try again." }); return; }
-
-    claim(a.id, walletAddress);
-    console.log(`[passkey] ${a.id} approved by ${walletAddress} — executing via Safe`);
-    const result = await executeApproval(a);
+    const rp = desktopRp(req);
+    const { a, result } = await approveWithPasskeyFlow(walletAddress, approvalId, {
+      verify: (challenge) => verifyAuthentication(walletAddress, response, challenge, rp),
+      execute: (a) => {
+        console.log(`[passkey] ${a.id} approved by ${walletAddress} — executing via Safe`);
+        return executeApproval(a);
+      },
+    });
     res.json({ status: "ok", approvalId: a.id, ...result });
   } catch (e: any) { sendError(res, e); }
 });
@@ -870,6 +854,16 @@ app.get("/approvals/:id", (req, res) => {
   const a = getApproval(req.params.id);
   if (!a) { res.status(404).json({ error: "I can't find that approval. It may have expired." }); return; }
   res.json(approvalView(a));
+});
+
+// The user says no from the app. Works whichever channel the approval went out on, and
+// closes the matching Telegram message. Final: the approval can't be approved afterwards.
+app.post("/approvals/:id/reject", requireSession, async (req, res) => {
+  try {
+    const a = await declineApproval(req.params.id, res.locals.wallet, refreshTelegramMessage);
+    console.log(`[approval] ${a.id} declined by ${a.wallet} in the app`);
+    res.json(approvalView(a));
+  } catch (e: any) { sendError(res, e); }
 });
 
 // ─── Telegram linking ───
@@ -1076,12 +1070,12 @@ app.get("/auth/session", requireSession, async (_req, res) => {
 });
 
 // ─── Policy config ───
-// Read/merge the signed-in wallet's deterministic policy (user:profile:<wallet>.policy).
-// Fields: verifiedTokens, knownAddresses, dailyLimitUsd, maxAutoTxPerDay, typicalMaxUsd.
+// The signed-in wallet's limits (daily limit, automatic-payment count, usual amount) and the
+// addresses it has sent to. Lowering or removing applies at once; raising needs a passkey (or a
+// wallet signature when there is no passkey) — see src/policy/limits.ts.
 app.get("/policy", requireSession, async (_req, res) => {
   try {
-    const p = await readUserProfile(res.locals.wallet);
-    res.json({ policy: p.policy || {} });
+    res.json(await readLimits(res.locals.wallet));
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
@@ -1102,33 +1096,26 @@ app.get("/habit", async (req, res) => {
   }
 });
 
+// Step 1 of raising a limit: the challenge to answer (passkey options or typed data), or { required: false }.
+app.post("/policy/confirm-options", requireSession, async (req, res) => {
+  try {
+    res.json(await requestConfirmation(res.locals.wallet, req.body, desktopRp(req)));
+  } catch (e: any) { sendLimitsError(res, e); }
+});
+
 app.post("/policy", requireSession, async (req, res) => {
   try {
     const wallet = res.locals.wallet as string;
-    const patch = req.body?.policy;
-    if (!patch || typeof patch !== "object") {
-      res.status(400).json({ error: "body must be { policy: { ... } }" });
-      return;
-    }
-    const existing = await readUserProfile(wallet);
-    // Merge; a null value clears that field (lets you disable a rule).
-    const mergedPolicy: Record<string, unknown> = { ...(existing.policy || {}) };
-    for (const [k, v] of Object.entries(patch)) {
-      if (v === null) delete mergedPolicy[k];
-      else mergedPolicy[k] = v;
-    }
-    const updated = {
-      ...existing,
-      policy: mergedPolicy,
-      updatedAt: new Date().toISOString(),
-    };
-    await writeUserProfile(wallet, updated); // also drops the cached policy
-    console.log(`[policy] Updated for ${wallet}: ${JSON.stringify(updated.policy)}`);
-    res.json({ status: "ok", policy: updated.policy });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
+    const result = await applyChange(wallet, req.body, desktopRp(req), notifyPasskeyChange);
+    console.log(`[policy] Updated for ${wallet}${result.loosened ? " (raised, confirmed)" : ""}: ${JSON.stringify(result.policy)}`);
+    res.json({ status: "ok", ...result });
+  } catch (e: any) { sendLimitsError(res, e); }
 });
+
+function sendLimitsError(res: express.Response, e: any): void {
+  if (e instanceof LimitsError) { res.status(e.status).json({ error: e.message, ...(e.code ? { code: e.code } : {}), ...e.extra }); return; }
+  sendError(res, e);
+}
 
 // ─── Safe onboarding ───
 // Called automatically at sign-in. Starts (or joins) the wallet's one deployment and returns at

@@ -158,6 +158,34 @@ export function reject(id: string, wallet: string, now = Date.now()): PendingApp
   return a;
 }
 
+/**
+ * The user's own "no" from the app: rejects the wallet's pending approval, whatever
+ * channel it went out on (passkey or Telegram), and lets `afterReject` close the
+ * matching Telegram request. Final: a rejected approval can't be claimed, so a later
+ * passkey or Telegram "yes" for it is refused and nothing executes. A failure in
+ * `afterReject` (Telegram down) never undoes the decline.
+ */
+export async function declineApproval(
+  id: unknown,
+  wallet: unknown,
+  afterReject?: (a: PendingApproval) => Promise<void>,
+  now = Date.now(),
+): Promise<PendingApproval> {
+  const a = typeof id === "string" ? getApproval(id, now) : null;
+  if (!a || a.status === "expired") throw new ApprovalError(404, "This request expired. Nothing was sent.");
+  if (typeof wallet !== "string" || a.wallet !== wallet.toLowerCase()) throw new ApprovalError(403, "This approval belongs to another wallet.");
+  if (a.status !== "pending") throw new ApprovalError(409, `This request is already ${a.status}, so it can't be declined.`);
+  a.status = "rejected";
+  a.challenge = undefined;
+  a.passkeyOptions = undefined;
+  try {
+    await afterReject?.(a);
+  } catch {
+    /* the decline stands; the chat message just stays as it was */
+  }
+  return a;
+}
+
 export function settle(a: PendingApproval, outcome: { result: { txHash: string; explorerUrl: string } } | { error: string }): void {
   if ("result" in outcome) {
     a.status = "executed";

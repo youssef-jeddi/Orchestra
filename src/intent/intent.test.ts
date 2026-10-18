@@ -279,16 +279,24 @@ test("assessAction: resolved value drives the daily limit", async () => {
     const s = r.steps[0];
     return { id: "x", intentType: s.plan.action, summary: s.summary, steps: [s.plan], params: s.plan.params, valueUsd: s.valueUsd };
   };
-  assert.equal(assessAction(plan(small), { profile: {} }).verdict, "AUTO_EXECUTE");
+  const recipient = plan(small).params.to;
+  assert.equal(assessAction(plan(small), { profile: { knownAddresses: [recipient] } }).verdict, "AUTO_EXECUTE");
+  // ORC-68 attack: a request (even an injected one) to an address never sent to before does not auto-execute,
+  // whatever the profile says or doesn't say.
+  for (const profile of [undefined, {}, { knownAddresses: [] }, { knownAddresses: ["0x000000000000000000000000000000000000dEaD"] }]) {
+    const held = assessAction(plan(small), { profile });
+    assert.equal(held.verdict, "NEEDS_APPROVAL");
+    assert.deepEqual(held.triggered, ["unknown-recipient"]);
+  }
 
   const prev = process.env.LEDGER_APPROVAL;
   try {
     delete process.env.LEDGER_APPROVAL;
-    const off = assessAction(plan(big), { profile: {} });
+    const off = assessAction(plan(big), { profile: { knownAddresses: [recipient] } });
     assert.equal(off.verdict, "NEEDS_APPROVAL");
     assert.equal(off.approvalMethod, "passkey"); // Ledger tier disabled by default
     process.env.LEDGER_APPROVAL = "on";
-    assert.equal(assessAction(plan(big), { profile: {} }).approvalMethod, "ledger");
+    assert.equal(assessAction(plan(big), { profile: { knownAddresses: [recipient] } }).approvalMethod, "ledger");
   } finally {
     if (prev === undefined) delete process.env.LEDGER_APPROVAL;
     else process.env.LEDGER_APPROVAL = prev;
