@@ -4,17 +4,20 @@
 // before any chain or API call): routes that need a session refuse without one, another user's
 // address is refused, a website that isn't allowed gets 403 over HTTP and on the WebSocket
 // upgrade, and /mock-trade is absent unless a local dev bridge opts in.
+// The WebSocket: sign-in is the first message, approvals reach (and are answered by) only their owner.
 // Run with `npm run test:bridge-auth`.
 
 import assert from "node:assert/strict";
 import http from "node:http";
 import net from "node:net";
+import fs from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { WebSocket } from "ws";
 import { isOriginAllowed, originPermitted, parseAllowedOrigins, mockTradeEnabled, DEFAULT_ALLOWED_ORIGINS } from "./origins";
 import { ethers } from "ethers";
 import { isOwnAddress, approvalBelongsTo, broadcastSenderProblem } from "./access";
-import { issueToken, _setSecret } from "../../auth";
+import { issueToken, verifyToken, _setSecret } from "../../auth";
+import { BridgeServer } from "./bridge";
 
 let passed = 0;
 const tests: [string, () => void | Promise<void>][] = [];
@@ -287,7 +290,8 @@ test("/mock-trade works on a local dev bridge that opts in; ALLOWED_ORIGINS and 
   const keep = port;
   port = dev.port;
   try {
-    assert.equal((await call("POST", "/mock-trade", { body: {} })).status, 200);
+    assert.equal((await call("POST", "/mock-trade", { body: {} })).status, 401, "a session is needed even in dev");
+    assert.equal((await call("POST", "/mock-trade", { token: alice(), body: {} })).status, 200);
     assert.equal((await call("GET", "/health", { origin: "https://only.example.com" })).status, 200);
     assert.equal((await call("GET", "/health", { origin: "https://phone.example.com" })).status, 200);
     assert.equal((await call("GET", "/health", { origin: "https://getorchestra.xyz" })).status, 403, "defaults are replaced");
@@ -352,6 +356,181 @@ test("attack: /habit and /passkey/status refuse another wallet's address (403) a
 test("/approvals/:id answers 404 for an unknown id when signed in", async () => {
   const r = await call("GET", "/approvals/00000000-0000-4000-8000-000000000000", { token: alice() });
   assert.equal(r.status, 404);
+});
+
+// ── Model switch is gone ──
+
+test("/set-compute-provider and /compute-provider no longer exist (404), signed in or not", async () => {
+  for (const token of [undefined, alice()]) {
+    assert.equal((await call("POST", "/set-compute-provider", { token, body: { provider: "0g" } })).status, 404);
+    assert.equal((await call("GET", "/compute-provider", { token })).status, 404);
+  }
+});
+
+// ── Telegram link steps are for the signed-in wallet ──
+
+test("attack: /telegram/status and /telegram/link-request need a session and refuse another wallet's address", async () => {
+  assert.equal((await call("GET", `/telegram/status?wallet=${ALICE}`)).status, 401);
+  assert.equal((await call("POST", "/telegram/link-request", { body: { walletAddress: ALICE } })).status, 401);
+  const status = await call("GET", `/telegram/status?wallet=${ALICE}`, { token: bob() });
+  assert.equal(status.status, 403);
+  assert.equal(status.body.code, "not_your_address");
+  const link = await call("POST", "/telegram/link-request", { token: bob(), body: { walletAddress: ALICE } });
+  assert.equal(link.status, 403);
+  assert.equal(link.body.code, "not_your_address");
+});
+
+test("own wallet passes the Telegram gate (Telegram is not configured in tests, so the answers say so)", async () => {
+  for (const q of [`?wallet=${BOB}`, ""]) {
+    const r = await call("GET", `/telegram/status${q}`, { token: bob() });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body, { enabled: false, linked: false });
+  }
+  const link = await call("POST", "/telegram/link-request", { token: bob(), body: { walletAddress: BOB } });
+  assert.equal(link.status, 400);
+  assert.match(link.body.error, /aren't configured/);
+});
+
+test("/simple shows the Telegram pill and button only after sign-in", () => {
+  const page = fs.readFileSync(new URL("../../../frontend/src/app/simple/page.js", import.meta.url), "utf8");
+  assert.match(page, /\{session\.ready && <TelegramLink /);
+  assert.doesNotMatch(page.replace(/\{session\.ready && <TelegramLink /, ""), /<TelegramLink /, "no other place renders it");
+});
+
+// ── WebSocket sign-in and per-wallet delivery ──
+
+/** A WebSocket client that records what it receives and how it was closed. */
+class Probe {
+  ws: WebSocket;
+  got: any[] = [];
+  closed: number | null = null;
+  constructor(url: string, origin?: string) {
+    this.ws = new WebSocket(url, origin ? { origin } : {});
+    this.ws.on("message", (d) => this.got.push(JSON.parse(d.toString())));
+    this.ws.on("close", (code) => (this.closed = code));
+    this.ws.on("error", () => {});
+  }
+  opened() { return new Promise<void>((r) => (this.ws.readyState === WebSocket.OPEN ? r() : this.ws.once("open", () => r()))); }
+  send(m: unknown) { this.ws.send(JSON.stringify(m)); }
+  async waitFor(pred: (m: any) => boolean, ms = 3000) {
+    const end = Date.now() + ms;
+    while (Date.now() < end) { const m = this.got.find(pred); if (m) return m; await sleep(20); }
+    return null;
+  }
+  async waitClosed(ms = 3000) { const end = Date.now() + ms; while (this.closed === null && Date.now() < end) await sleep(20); return this.closed; }
+  async auth(token: string) { await this.opened(); this.send({ type: "AUTH", token }); return this.waitFor((m) => m.type === "AUTH_OK"); }
+}
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const request = (id: string) => ({ tradeId: id, unsignedTxHex: "0x00", summary: "test", riskLevel: "requires_approval" as const, timestamp: Date.now() });
+const result = (id: string) => ({ tradeId: id, approved: true });
+
+/** A BridgeServer on its own port with a short sign-in window and the real session check. */
+async function localBridge(authTimeoutMs = 300) {
+  const server = http.createServer();
+  const bridge = new BridgeServer(server, { authTimeoutMs, timeoutMs: 60_000, verifySession: verifyToken });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const url = `ws://127.0.0.1:${(server.address() as net.AddressInfo).port}/ws`;
+  return { bridge, url, close: () => { for (const c of (bridge as any).wss.clients) c.terminate(); server.close(); } };
+}
+
+test("attack: a socket that never signs in receives nothing and is closed after the timeout", async () => {
+  const b = await localBridge(300);
+  try {
+    const idle = new Probe(b.url);
+    await idle.opened();
+    void b.bridge.requestApproval(request("t-idle"), ALICE).catch(() => {});
+    assert.equal(await idle.waitClosed(2000), 4401);
+    assert.equal(idle.got.filter((m) => m.type === "APPROVAL_REQUIRED").length, 0, "nothing delivered before sign-in");
+  } finally { b.close(); }
+});
+
+test("attack: speaking before signing in, forged and expired tokens are refused and closed", async () => {
+  const b = await localBridge(5000);
+  try {
+    const early = new Probe(b.url);
+    await early.opened();
+    early.send({ type: "APPROVAL_RESULT", payload: result("x") });
+    assert.equal(await early.waitClosed(), 4401);
+    assert.ok(early.got.some((m) => m.type === "ERROR" && m.payload.code === "session_required"));
+
+    for (const token of ["abc.def", "", 42, issueToken(ALICE, Date.now() - 9 * 3_600_000).token]) {
+      const p = new Probe(b.url);
+      await p.opened();
+      p.send({ type: "AUTH", token });
+      assert.equal(await p.waitClosed(), 4401, `token ${String(token).slice(0, 8)}`);
+      assert.equal(p.got.some((m) => m.type === "AUTH_OK"), false);
+    }
+  } finally { b.close(); }
+});
+
+test("attack: Bob's socket never receives Alice's approval, and Bob answering it is refused and doesn't resolve it", async () => {
+  const b = await localBridge();
+  try {
+    const a = new Probe(b.url), bo = new Probe(b.url);
+    assert.ok(await a.auth(alice()));
+    assert.ok(await bo.auth(bob()));
+    let resolved: any = null;
+    void b.bridge.requestApproval(request("t-alice"), ALICE).then((r) => (resolved = r)).catch(() => {});
+    assert.ok(await a.waitFor((m) => m.type === "APPROVAL_REQUIRED" && m.payload.tradeId === "t-alice"), "Alice gets her approval");
+    await sleep(200);
+    assert.equal(bo.got.some((m) => m.type === "APPROVAL_REQUIRED"), false, "Bob gets nothing");
+
+    bo.send({ type: "APPROVAL_RESULT", payload: result("t-alice") });
+    assert.ok(await bo.waitFor((m) => m.type === "ERROR" && m.payload.code === "not_your_approval"), "Bob is told no");
+    await sleep(100);
+    assert.equal(resolved, null, "Bob's answer didn't resolve it");
+    bo.send({ type: "APPROVAL_RESULT", payload: result("never-existed") });
+    await sleep(100);
+    assert.equal(bo.got.filter((m) => m.type === "ERROR").length, 2, "an unknown id is refused the same way");
+
+    a.send({ type: "APPROVAL_RESULT", payload: result("t-alice") });
+    await sleep(200);
+    assert.deepEqual(resolved, result("t-alice"), "Alice's own answer resolves it");
+  } finally { b.close(); }
+});
+
+test("a session that expires mid-connection stops receiving and is closed", async () => {
+  const b = await localBridge();
+  try {
+    const short = issueToken(ALICE, Date.now() - 8 * 3_600_000 + 400).token; // valid for ~0.4s
+    const a = new Probe(b.url);
+    assert.ok(await a.auth(short));
+    await sleep(700);
+    void b.bridge.requestApproval(request("t-late"), ALICE).catch(() => {});
+    assert.equal(await a.waitClosed(), 4401);
+    assert.equal(a.got.some((m) => m.type === "APPROVAL_REQUIRED"), false);
+  } finally { b.close(); }
+});
+
+test("end to end on the real bridge: sign in → mock trade → receive → answer → resolved; Bob sees and can do nothing", async () => {
+  const dev = await startBridge({ ENABLE_MOCK_TRADE: "1" });
+  const keep = port;
+  port = dev.port;
+  const url = `ws://127.0.0.1:${dev.port}/ws`;
+  try {
+    const a = new Probe(url, "http://localhost:3000"), bo = new Probe(url, "http://localhost:3000");
+    assert.ok(await a.auth(alice()));
+    assert.ok(await bo.auth(bob()));
+    assert.equal((await call("POST", "/mock-trade", { token: alice(), body: { summary: "Mock for Alice" } })).status, 200);
+    const got = await a.waitFor((m) => m.type === "APPROVAL_REQUIRED");
+    assert.equal(got.payload.summary, "Mock for Alice");
+    const id = got.payload.tradeId;
+    await sleep(200);
+    assert.equal(bo.got.some((m) => m.type === "APPROVAL_REQUIRED"), false);
+    bo.send({ type: "APPROVAL_RESULT", payload: result(id) });
+    assert.ok(await bo.waitFor((m) => m.type === "ERROR" && m.payload.code === "not_your_approval"));
+    a.send({ type: "APPROVAL_RESULT", payload: result(id) });
+    await sleep(300);
+    a.send({ type: "APPROVAL_RESULT", payload: result(id) }); // already resolved: nothing left to answer
+    assert.ok(await a.waitFor((m) => m.type === "ERROR" && m.payload.code === "not_your_approval"), "the first answer resolved it");
+  } finally { port = keep; dev.child.kill(); }
+});
+
+test("the real bridge closes a socket that never signs in (default window)", async () => {
+  const idle = new Probe(`ws://127.0.0.1:${port}/ws`);
+  await idle.opened();
+  assert.equal(await idle.waitClosed(8000), 4401);
+  assert.deepEqual(idle.got.map((m) => m.type), ["ERROR"]);
 });
 
 (async () => {
