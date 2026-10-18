@@ -1,6 +1,7 @@
 import Safe from '@safe-global/protocol-kit';
 import { ethers } from 'ethers';
 import { ALLOWANCE_MODULE_ADDRESS } from '../../types/safe';
+import type { TxTracker } from './inflight';
 
 const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
 
@@ -28,7 +29,7 @@ async function initSafe(safeAddress: string, signerPrivateKey: string) {
 }
 
 // Helper: wait for nonce to increment on-chain
-async function waitForNonce(safeAddress: string, signerPrivateKey: string, expectedNonce: number, maxWaitMs = 15000): Promise<void> {
+async function waitForNonce(safeAddress: string, signerPrivateKey: string, expectedNonce: number, maxWaitMs = 90000): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
     const safe = await initSafe(safeAddress, signerPrivateKey);
@@ -36,19 +37,25 @@ async function waitForNonce(safeAddress: string, signerPrivateKey: string, expec
     if (current >= expectedNonce) return;
     await new Promise(r => setTimeout(r, 2000));
   }
-  console.warn(`[Safe] Nonce wait timeout — expected ${expectedNonce}`);
+  // Not confirmed yet: carrying on would build the next transaction on a stale nonce. The caller's
+  // in-flight record keeps the sent transaction from being sent again.
+  throw new Error(`Safe transaction not confirmed yet (waiting for nonce ${expectedNonce})`);
 }
 
-// Helper: create, sign, execute one Safe tx with nonce confirmation
-async function execSafeTx(safeAddress: string, signerPrivateKey: string, to: string, data: string): Promise<string> {
+// Helper: create, sign, execute one Safe tx with nonce confirmation. The tracker (setup only)
+// records the send, so a run that stops while it is unconfirmed doesn't send it twice.
+async function execSafeTx(safeAddress: string, signerPrivateKey: string, to: string, data: string, tracker?: TxTracker): Promise<string> {
   const safe = await initSafe(safeAddress, signerPrivateKey);
   const nonce = await safe.getNonce();
   const tx = await safe.createTransaction({ transactions: [{ to, value: '0', data }] });
   const signedTx = await safe.signTransaction(tx);
+  await tracker?.begin();
   const result = await safe.executeTransaction(signedTx);
   const hash = (result as any).hash || '';
+  if (hash) await tracker?.sent(hash);
   // Wait for nonce to increment (confirms tx was mined)
   await waitForNonce(safeAddress, signerPrivateKey, nonce + 1);
+  await tracker?.settled();
   return hash;
 }
 
@@ -63,7 +70,7 @@ export function allowanceTokens(limitUSD: number) {
 }
 
 /** Turn the AllowanceModule on for the Safe; does nothing if it already is. */
-export async function enableAllowanceModule(safeAddress: string, signerPrivateKey: string): Promise<void> {
+export async function enableAllowanceModule(safeAddress: string, signerPrivateKey: string, tracker?: TxTracker): Promise<void> {
   const safe = await initSafe(safeAddress, signerPrivateKey);
   if (await safe.isModuleEnabled(ALLOWANCE_MODULE_ADDRESS)) {
     console.log('[Safe] AllowanceModule already enabled');
@@ -73,21 +80,25 @@ export async function enableAllowanceModule(safeAddress: string, signerPrivateKe
   const nonceBefore = await safe.getNonce();
   const enableTx = await safe.createEnableModuleTx(ALLOWANCE_MODULE_ADDRESS);
   const signedEnableTx = await safe.signTransaction(enableTx);
+  await tracker?.begin();
   const enableResult = await safe.executeTransaction(signedEnableTx);
-  console.log(`[Safe] AllowanceModule enabled: ${(enableResult as any).hash || 'ok'}`);
+  const hash = (enableResult as any).hash || '';
+  if (hash) await tracker?.sent(hash);
+  console.log(`[Safe] AllowanceModule enabled: ${hash || 'ok'}`);
   // Wait for nonce to increment before proceeding
   await waitForNonce(safeAddress, signerPrivateKey, nonceBefore + 1);
+  await tracker?.settled();
 }
 
 /** Make the agent a delegate of the module (required before setAllowance); does nothing if it already is. */
-export async function addAgentDelegate(safeAddress: string, agentWalletAddress: string, signerPrivateKey: string): Promise<void> {
+export async function addAgentDelegate(safeAddress: string, agentWalletAddress: string, signerPrivateKey: string, tracker?: TxTracker): Promise<void> {
   if (await isAgentDelegate(safeAddress, agentWalletAddress)) {
     console.log('[Safe] Agent already a delegate');
     return;
   }
   console.log('[Safe] Adding agent as delegate...');
   const data = new ethers.Interface(ALLOWANCE_ABI).encodeFunctionData('addDelegate', [agentWalletAddress]);
-  const hash = await execSafeTx(safeAddress, signerPrivateKey, ALLOWANCE_MODULE_ADDRESS, data);
+  const hash = await execSafeTx(safeAddress, signerPrivateKey, ALLOWANCE_MODULE_ADDRESS, data, tracker);
   console.log(`[Safe] Delegate added: ${hash}`);
 }
 
@@ -114,7 +125,7 @@ export async function tokensWithoutAllowance(safeAddress: string, agentWalletAdd
 
 /** Set the allowance for the given token addresses only (all three when omitted). */
 export async function setAgentAllowances(
-  safeAddress: string, agentWalletAddress: string, limitUSD: number, signerPrivateKey: string, only?: string[],
+  safeAddress: string, agentWalletAddress: string, limitUSD: number, signerPrivateKey: string, only?: string[], tracker?: TxTracker,
 ): Promise<void> {
   const allowanceIface = new ethers.Interface(ALLOWANCE_ABI);
   for (const token of allowanceTokens(limitUSD)) {
@@ -123,7 +134,7 @@ export async function setAgentAllowances(
     const data = allowanceIface.encodeFunctionData('setAllowance', [
       agentWalletAddress, token.address, token.amount, 1440, 0,
     ]);
-    const hash = await execSafeTx(safeAddress, signerPrivateKey, ALLOWANCE_MODULE_ADDRESS, data);
+    const hash = await execSafeTx(safeAddress, signerPrivateKey, ALLOWANCE_MODULE_ADDRESS, data, tracker);
     console.log(`[Safe] ${token.name} allowance set: ${hash}`);
   }
 }

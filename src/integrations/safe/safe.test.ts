@@ -277,7 +277,7 @@ test("UI: a poll that finds the setup forgotten (not_started) starts it again", 
 
 test("UI: errors are plain sentences, never raw text", () => {
   assert.match(onboardingErrorMessage(Object.assign(new Error("Try again in 5 minutes."), { code: "onboarding_rate_limited" })), /5 minutes/);
-  assert.equal(onboardingErrorMessage(new Error("execution reverted: 0xabc")), "We couldn't set up your account. Please try again.");
+  assert.equal(onboardingErrorMessage(new Error("execution reverted: 0xabc")), "We couldn't finish setting up your account. Please try again.");
   assert.equal(shortAddress("0x1234567890abcdef1234567890abcdef12345678"), "0x1234…5678");
 });
 

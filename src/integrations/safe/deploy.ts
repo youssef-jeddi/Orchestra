@@ -1,6 +1,7 @@
 import Safe from '@safe-global/protocol-kit';
 import { ethers } from 'ethers';
 import { getAgentWallet } from './agentWallet';
+import type { TxTracker } from './inflight';
 
 const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
 
@@ -30,7 +31,8 @@ export async function predictSafeAddress(userAddress: string, agentWalletAddress
 export async function deploySafe(
   ledgerAddress: string,
   agentWalletAddress: string,
-  provider: ethers.Provider
+  provider: ethers.Provider,
+  tracker?: TxTracker,
 ): Promise<string> {
   console.log('[Safe] Deploying new Safe...');
   console.log(`[Safe]   owners: [${agentWalletAddress}, ${ledgerAddress}]`);
@@ -54,6 +56,7 @@ export async function deploySafe(
   }
 
   const deploymentTx = await safe.createSafeDeploymentTransaction();
+  await tracker?.begin(); // refuses while an earlier deploy may still confirm
   const txResponse = await agentWallet.sendTransaction({
     to: deploymentTx.to,
     value: BigInt(deploymentTx.value),
@@ -61,7 +64,9 @@ export async function deploySafe(
   });
 
   console.log(`[Safe] Deployment tx: ${txResponse.hash}`);
+  await tracker?.sent(txResponse.hash);
   const receipt = await txResponse.wait();
+  await tracker?.settled();
   console.log(`[Safe] Deployed at: ${safeAddress} (block ${receipt?.blockNumber})`);
 
   return safeAddress;

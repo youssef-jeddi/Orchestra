@@ -10,7 +10,8 @@ import { useState, useEffect, useCallback } from 'react';
 import { getPolicy, getHabit } from '@/lib/bridge';
 import { saveLimits } from '@/lib/limitsFlow';
 import { shortAddress } from '@/lib/onboarding';
-import { LIMITS_TEXT, MAX_DAILY, MAX_COUNT, habitLine, confirmingText, removeConfirmText, formFrom, formAfterSave, changesFrom } from '@/lib/limits';
+import { LIMITS_TEXT, MAX_DAILY, MAX_COUNT, NO_NOTE, habitLine, confirmingText, removeConfirmText, formFrom, formAfterSave, changesFrom, noteAfterAction } from '@/lib/limits';
+import { HINT_COLOR, HINT_SIZE } from '@/lib/contrast';
 
 export default function LimitsSheet({ ledger, onClose, buttonStyle }) {
   const wallet = ledger.walletAddress;
@@ -19,7 +20,7 @@ export default function LimitsSheet({ ledger, onClose, buttonStyle }) {
   const [habit, setHabit] = useState(null);
   const [form, setForm] = useState({ daily: '', count: '' });
   const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState({ text: '', bad: false });
+  const [note, setNote] = useState(NO_NOTE);
   const [confirming, setConfirming] = useState(null); // the saved address being removed, asked about inline
 
   const show = useCallback((limits) => {
@@ -33,10 +34,13 @@ export default function LimitsSheet({ ledger, onClose, buttonStyle }) {
     if (wallet) getHabit(wallet).then(setHabit).catch(() => {});
   }, [wallet, show]);
 
+  // "Saved." and "Nothing was changed." describe the last save: anything the user does next makes them stale.
+  const moveOn = useCallback(() => setNote((n) => noteAfterAction(n, !!policy)), [policy]);
+
   // `resetOnFail`: a limit change that is cancelled or refused puts the saved numbers back in the form.
   const run = async (change, { resetOnFail = false } = {}) => {
     setBusy(true);
-    setNote({ text: '', bad: false });
+    setNote(NO_NOTE);
     try {
       const out = await saveLimits(ledger, change, (method) => setNote({ text: confirmingText(method), bad: false }));
       if (out.saved) {
@@ -70,46 +74,46 @@ export default function LimitsSheet({ ledger, onClose, buttonStyle }) {
         <span style={{ fontSize: 15, color: '#E8E4DE' }}>{LIMITS_TEXT.title}</span>
         <button onClick={onClose} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: 16 }} title="Close">×</button>
       </div>
-      <p style={{ margin: '0 0 12px', fontSize: 12, color: '#777', lineHeight: 1.5 }}>{LIMITS_TEXT.intro}</p>
+      <p style={{ margin: '0 0 12px', fontSize: HINT_SIZE, color: HINT_COLOR, lineHeight: 1.5 }}>{LIMITS_TEXT.intro}</p>
 
-      {!policy && !note.bad && <p style={{ fontSize: 12, color: '#555', margin: 0 }}>Loading…</p>}
+      {!policy && !note.bad && <p style={{ fontSize: HINT_SIZE, color: HINT_COLOR, margin: 0 }}>Loading…</p>}
       {policy && (
         <>
           <label style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 13, color: '#B9B5AE' }}>
             {LIMITS_TEXT.daily}
             <input type="number" min="0" max={MAX_DAILY} value={form.daily} disabled={busy}
-              onChange={(e) => setForm((f) => ({ ...f, daily: e.target.value }))} style={input} />
+              onChange={(e) => { moveOn(); setForm((f) => ({ ...f, daily: e.target.value })); }} style={input} />
           </label>
-          <p style={{ margin: '4px 0 12px', fontSize: 11, color: '#666' }}>{LIMITS_TEXT.dailyHint}</p>
+          <p style={{ margin: '4px 0 12px', fontSize: HINT_SIZE, color: HINT_COLOR }}>{LIMITS_TEXT.dailyHint}</p>
 
           <label style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 13, color: '#B9B5AE' }}>
             {LIMITS_TEXT.count}
-            <input type="number" min="0" max={MAX_COUNT} placeholder="off" value={form.count} disabled={busy}
-              onChange={(e) => setForm((f) => ({ ...f, count: e.target.value }))} style={input} />
+            <input type="number" min="0" max={MAX_COUNT} placeholder={LIMITS_TEXT.countPlaceholder} value={form.count} disabled={busy}
+              onChange={(e) => { moveOn(); setForm((f) => ({ ...f, count: e.target.value })); }} style={input} />
           </label>
-          <p style={{ margin: '4px 0 12px', fontSize: 11, color: '#666' }}>{LIMITS_TEXT.countHint}</p>
+          <p style={{ margin: '4px 0 12px', fontSize: HINT_SIZE, color: HINT_COLOR }}>{LIMITS_TEXT.countHint}</p>
 
           <p style={{ margin: '0 0 12px', fontSize: 13, color: '#B9B5AE' }}>{habitLine(habit)}</p>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <button onClick={save} disabled={busy} style={buttonStyle(busy)}>{busy ? 'Saving…' : LIMITS_TEXT.save}</button>
-            {note.text && <span style={{ fontSize: 12, color: note.bad ? '#FF453A' : '#999' }}>{note.text}</span>}
+            {note.text && <span style={{ fontSize: 12, color: note.bad ? '#FF453A' : HINT_COLOR }}>{note.text}</span>}
           </div>
 
           <div style={{ marginTop: 16, borderTop: '1px solid #1c1c22', paddingTop: 10 }}>
-            <span style={{ fontSize: 12, color: '#999' }} title={LIMITS_TEXT.removeHint}>{LIMITS_TEXT.addresses}</span>
-            {recipients.length === 0 && <p style={{ fontSize: 12, color: '#666', margin: '6px 0 0' }}>{LIMITS_TEXT.noAddresses}</p>}
+            <span style={{ fontSize: HINT_SIZE, color: HINT_COLOR }} title={LIMITS_TEXT.removeHint}>{LIMITS_TEXT.addresses}</span>
+            {recipients.length === 0 && <p style={{ fontSize: HINT_SIZE, color: HINT_COLOR, margin: '6px 0 0' }}>{LIMITS_TEXT.noAddresses}</p>}
             {recipients.map((a) => (
               confirming === a ? (
                 <div key={a} style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', padding: '6px 0' }}>
                   <span style={{ fontSize: 13, color: '#E8E4DE' }}>{removeConfirmText(shortAddress(a))}</span>
                   <button onClick={() => { setConfirming(null); run({ removeAddress: a }); }} disabled={busy} style={smallBtn}>{LIMITS_TEXT.remove}</button>
-                  <button onClick={() => setConfirming(null)} disabled={busy} style={smallBtn}>{LIMITS_TEXT.keep}</button>
+                  <button onClick={() => { setConfirming(null); moveOn(); }} disabled={busy} style={smallBtn}>{LIMITS_TEXT.keep}</button>
                 </div>
               ) : (
                 <div key={a} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 0' }}>
                   <span style={{ fontSize: 13, color: '#E8E4DE' }} title={a}>{shortAddress(a)}</span>
-                  <button onClick={() => setConfirming(a)} disabled={busy} style={{ ...smallBtn, marginLeft: 'auto' }}
+                  <button onClick={() => { moveOn(); setConfirming(a); }} disabled={busy} style={{ ...smallBtn, marginLeft: 'auto' }}
                     title={LIMITS_TEXT.removeHint}>{LIMITS_TEXT.remove}</button>
                 </div>
               )

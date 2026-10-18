@@ -5,6 +5,7 @@
 // into sentences. Pure, so it's tested without a browser (src/policy/limitsSheet.test.ts).
 
 import { formatUsd } from './money';
+import { PASSKEY_MEANS } from './plainLanguage';
 
 export const MAX_DAILY = 1000;
 export const MAX_COUNT = 100;
@@ -17,6 +18,7 @@ export const LIMITS_TEXT = {
   dailyHint: 'Type 0 and I will always ask you first.',
   count: 'Automatic payments a day before I ask you',
   countHint: 'Leave empty for no limit.',
+  countPlaceholder: 'No limit',
   addresses: "Addresses you've sent to",
   noAddresses: "None yet. I'll ask you the first time you send to a new address.",
   removeHint: "Remove an address and I'll ask you again before the next send to it.",
@@ -27,6 +29,18 @@ export const LIMITS_TEXT = {
   cancelled: 'Nothing was changed.',
   noChange: 'Nothing to save.',
 };
+
+/** No status line next to Save. */
+export const NO_NOTE = { text: '', bad: false };
+
+/**
+ * The status line after the user does something else. "Saved." or "Nothing was changed." describe
+ * the last save only: editing a field, asking to remove an address or keeping one makes them stale.
+ * A line that says the limits couldn't be loaded stays (nothing else has happened).
+ */
+export function noteAfterAction(note, loaded) {
+  return loaded ? NO_NOTE : note;
+}
 
 /** The sheet's button in the header. */
 export const LIMITS_BUTTON_HINT = 'See and change how much I can do without asking you';
@@ -52,7 +66,7 @@ export function habitLine(habit) {
 export function confirmingText(method) {
   return method === 'wallet'
     ? 'Raising a limit needs your OK. Check your wallet to sign.'
-    : 'Raising a limit needs your OK. Confirm with your passkey.';
+    : `Raising a limit needs your OK. Confirm with your passkey (${PASSKEY_MEANS}).`;
 }
 
 /** Cancelling the passkey or wallet prompt changes nothing. */

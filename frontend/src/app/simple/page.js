@@ -13,18 +13,20 @@ import {
 } from '@/lib/bridge';
 import { registerPasskey, approveWithPasskey, setUpPhonePasskey, removePasskey } from '@/lib/passkey';
 import { PRIVY_APP_ID } from '@/lib/privy';
-import { shortAddress } from '@/lib/onboarding';
+import { shortAddress, setupProgressText } from '@/lib/onboarding';
 import { SIGN_REFUSED, PASSKEY_PROMPT, isPasskeyRequired, shouldOfferPasskey, userMaySign, pendingRequest, verifyStepFor, passkeyDraft, SOCIAL_NONE, SOCIAL_WRONG_ACCOUNT } from '@/lib/emailPasskey';
 import EmailPasskeySetup from '@/components/EmailPasskeySetup';
 import SocialPasskeySetup from '@/components/SocialPasskeySetup';
 import LimitsSheet from '@/components/LimitsSheet';
 import { LIMITS_BUTTON_HINT } from '@/lib/limits';
+import { HINT_COLOR, HINT_SIZE } from '@/lib/contrast';
+import { headerState, CONNECTING_GIVE_UP_MS } from '@/lib/connection';
 import {
   ruleHint, declineLabel, declinedText, expiredText, ALREADY_SETTLED, approvalControls,
-  cardView, doneOutcome, outcomeAfterError,
+  cardView, doneOutcome, outcomeAfterError, valueSuffix,
 } from '@/lib/approvalCard';
 import { shouldRefreshBalances, approvalMovedFunds, refreshSoon } from '@/lib/balances';
-import { verdictLabel, ruleLabel, EXAMPLES, WELCOME, showWelcome, RECEIPT_LABEL, balanceTiles, ADD_PASSKEY_HINT } from '@/lib/plainLanguage';
+import { verdictLabel, ruleLabel, EXAMPLES, WELCOME, showWelcome, RECEIPT_LABEL, balanceTiles, ADD_PASSKEY_HINT, PASSKEY_MEANS } from '@/lib/plainLanguage';
 
 const ACCENT = '#C084FC';
 
@@ -256,6 +258,15 @@ function SimpleChat() {
   }, [ledger.walletAddress, emailWallet, session.hasPasskey, session.ready, accountReady]);
 
   const connected = !!ledger.walletAddress;
+  // Until the sign-in service says whether the user is already signed in, the header shows neither
+  // "Sign in" nor the wallet buttons. If it never answers, the buttons appear after a few seconds.
+  const [gaveUp, setGaveUp] = useState(false);
+  const head = headerState({ connected, privyConfigured: !!PRIVY_APP_ID, privyReady: ledger.privyReady, privyAuthenticated: ledger.privyAuthenticated, gaveUp });
+  useEffect(() => {
+    if (head !== 'connecting') return;
+    const id = setTimeout(() => setGaveUp(true), CONNECTING_GIVE_UP_MS);
+    return () => clearTimeout(id);
+  }, [head]);
 
   return (
     <div style={{
@@ -277,7 +288,9 @@ function SimpleChat() {
             </span>
           )}
         </div>
-        {connected ? (
+        {head === 'connecting' ? (
+          <span style={{ fontSize: 13, color: HINT_COLOR }}>Connecting…</span>
+        ) : connected ? (
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             {!session.ready && (
               <button onClick={session.signIn} disabled={session.status === 'signing'} style={pill(true)}
@@ -385,8 +398,8 @@ function SimpleChat() {
             Send
           </button>
         </div>
-        {!connected && (
-          <p style={{ fontSize: 11, color: '#555', textAlign: 'center', margin: '8px 0 0' }}>
+        {head === 'signed-out' && (
+          <p style={{ fontSize: HINT_SIZE, color: HINT_COLOR, textAlign: 'center', margin: '8px 0 0' }}>
             Sign in to see your balance and to have your limits protect you.
           </p>
         )}
@@ -518,8 +531,8 @@ function AgentCard({ data, onExecute, onPasskey, onAddPasskey, onMoved, passkeyR
       {data.plan?.summary && (
         <p style={{ margin: 0, fontSize: 15, color: '#E8E4DE', whiteSpace: 'pre-line', overflowWrap: 'anywhere' }}>
           {data.plan.summary}
-          {data.plan.totalEstimatedValueUsd > 0 && (
-            <span style={{ color: '#777' }}> — ${Number(data.plan.totalEstimatedValueUsd).toFixed(2)}</span>
+          {valueSuffix(data.plan.summary, data.plan.totalEstimatedValueUsd) && (
+            <span style={{ color: HINT_COLOR }}>{valueSuffix(data.plan.summary, data.plan.totalEstimatedValueUsd)}</span>
           )}
         </p>
       )}
@@ -530,7 +543,7 @@ function AgentCard({ data, onExecute, onPasskey, onAddPasskey, onMoved, passkeyR
           {balanceTiles(data.balances).map((t) => (
             <div key={t.label} style={{ flex: '1 1 80px', padding: '10px 12px', background: 'rgba(255,255,255,0.03)',
               borderRadius: 10, border: '1px solid rgba(255,255,255,0.06)' }}>
-              <span style={{ fontSize: 11, color: '#666' }}>{t.label}{t.hint ? ` · ${t.hint}` : ''}</span>
+              <span style={{ fontSize: HINT_SIZE, color: HINT_COLOR }}>{t.label}{t.hint ? ` · ${t.hint}` : ''}</span>
               <p style={{ margin: '2px 0 0', fontSize: 16, color: '#E8E4DE' }}>{t.value ?? '—'}</p>
             </div>
           ))}
@@ -539,7 +552,7 @@ function AgentCard({ data, onExecute, onPasskey, onAddPasskey, onMoved, passkeyR
 
       {/* Reasoning (compact) */}
       {data.agentReasoning?.gatekeeper && (
-        <p style={{ margin: 0, fontSize: 13, color: '#999', lineHeight: 1.5 }}>
+        <p style={{ margin: 0, fontSize: 13, color: HINT_COLOR, lineHeight: 1.5 }}>
           {data.agentReasoning.gatekeeper}
         </p>
       )}
@@ -571,7 +584,7 @@ function AgentCard({ data, onExecute, onPasskey, onAddPasskey, onMoved, passkeyR
         </a>
       )}
       {controls && view.settled && (
-        <span style={{ fontSize: 13, color: outcome?.status === 'done' ? '#30D158' : '#999', lineHeight: 1.5 }}>
+        <span style={{ fontSize: 13, color: outcome?.status === 'done' ? '#30D158' : HINT_COLOR, lineHeight: 1.5 }}>
           {view.line}
           {view.receiptUrl && (
             <> <a href={view.receiptUrl} target="_blank" rel="noreferrer" style={{ color: '#30D158', textDecoration: 'none' }}>{RECEIPT_LABEL}</a></>
@@ -592,7 +605,7 @@ function AgentCard({ data, onExecute, onPasskey, onAddPasskey, onMoved, passkeyR
             </button>
           )}
           {(controls.mode === 'need-passkey' || controls.mode === 'not-ready') && (
-            <span style={{ fontSize: 13, color: '#999', lineHeight: 1.5 }}>{controls.text}</span>
+            <span style={{ fontSize: 13, color: HINT_COLOR, lineHeight: 1.5 }}>{controls.text}</span>
           )}
           {controls.mode === 'need-passkey' && (
             <button onClick={onAddPasskey} style={{ ...approveBtn(false), alignSelf: 'flex-start' }}>🔑 Add passkey</button>
@@ -633,7 +646,7 @@ function TelegramWait({ approval, onSettled, onMoved }) {
 
   const text = {
     pending: approval.factor === 'phone-passkey'
-      ? '📱 Sent to your Telegram. Tap “Review & approve” on your phone and confirm with its passkey.'
+      ? '📱 Sent to your Telegram. Tap “Review & approve” on your phone and confirm with Face ID, your fingerprint or its screen lock.'
       : '📱 Sent to your Telegram. Check the details there and say yes or no.',
     executing: '⏳ Approved on your phone. Doing it now…',
     rejected: '🚫 You said no on your phone. Nothing was done.',
@@ -649,7 +662,7 @@ function TelegramWait({ approval, onSettled, onMoved }) {
       </a>
     );
   }
-  return <span style={{ fontSize: 13, color: state.status === 'failed' ? '#FF453A' : '#999' }}>{text}</span>;
+  return <span style={{ fontSize: 13, color: state.status === 'failed' ? '#FF453A' : HINT_COLOR }}>{text}</span>;
 }
 
 // Link a Telegram chat: the wallet signs a one-time code, then the user presses Start in Telegram.
@@ -845,7 +858,7 @@ function SafeSetup({ safe, canFund, ledger, onError }) {
         marginTop: 12, padding: '10px 12px', border: '1px solid #2a2a30', borderRadius: 12, background: '#141418',
       }}>
         <p style={{ margin: 0, fontSize: 13, color: '#999', lineHeight: 1.4 }}>
-          {safe.setupError || "We couldn't set up your account. Please try again."}
+          {safe.setupError || "We couldn't finish setting up your account. Please try again."}
         </p>
         <button onClick={safe.retry} style={pill(true)}>Try again</button>
       </div>
@@ -855,7 +868,7 @@ function SafeSetup({ safe, canFund, ledger, onError }) {
   if (safe.safeStatus !== 'deployed') {
     return (
       <p style={{ fontSize: 14, color: '#B9B5AE', margin: '10px 0 0' }}>
-        Setting up your account…
+        {setupProgressText(safe.finishing)}
         {safe.safeAddress && (
           <span title="Your account address. You can send funds to it now." style={{ marginLeft: 8, fontSize: 13, color: '#8d8a84' }}>
             {shortAddress(safe.safeAddress)}
@@ -880,11 +893,11 @@ function SafeSetup({ safe, canFund, ledger, onError }) {
       </span>
       <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
         <button onClick={() => fund('eth', '0.01')} disabled={!!busy || !canFund} style={pill(false)}
-          title={canFund ? 'Move 0.01 ETH from your wallet into your account' : 'Add a passkey first'}>
+          title={canFund ? 'Move 0.01 ETH from your wallet into your account' : `Add a passkey first (🔑 at the top): confirm with ${PASSKEY_MEANS}`}>
           {busy === 'eth' ? '…' : '+ 0.01 ETH'}
         </button>
         <button onClick={() => fund('usdc', '10')} disabled={!!busy || !canFund} style={pill(false)}
-          title={canFund ? 'Move 10 USDC from your wallet into your account' : 'Add a passkey first'}>
+          title={canFund ? 'Move 10 USDC from your wallet into your account' : `Add a passkey first (🔑 at the top): confirm with ${PASSKEY_MEANS}`}>
           {busy === 'usdc' ? '…' : '+ 10 USDC'}
         </button>
       </div>

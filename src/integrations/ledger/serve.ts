@@ -16,8 +16,8 @@ import { executeSwap } from "../uniswap/execution";
 import { WETH_SEPOLIA, USDC_SEPOLIA, CHAIN_ID } from "../uniswap/types";
 import { write, read, append } from "../zero-g/storage";
 import { setComputeProvider, getComputeProvider } from "../zero-g/compute";
-import { onboarding, storedSpendingLimit } from "../safe/onboard";
-import { OnboardingError } from "../safe/onboarding";
+import { onboarding, storedSpendingLimit, isAccountReady } from "../safe/onboard";
+import { OnboardingError, ACCOUNT_NOT_READY_REASON } from "../safe/onboarding";
 import { detectExistingSafe } from "../safe/detect";
 import { setInitialSpendingLimits, updateSpendingLimit, buildLimitUpdateTx } from "../safe/spendingLimit";
 import { getAgentAddress } from "../safe/agentWallet";
@@ -481,6 +481,13 @@ app.post("/intent", async (req, res) => {
     // A blocked plan must not come back with a signable transaction.
     if (verdict === "BLOCKED" || !adapter) {
       res.json({ status: "ok", intentType, autoExecuted: false, safeAddress, plan, assessment, agentReasoning, timing: timing() });
+      return;
+    }
+
+    // The agent acts only for an account whose setup is finished (fails closed: an unreadable
+    // status counts as unfinished). Neither an automatic run nor a held approval is offered.
+    if (adapter.execute && safeAddress && wallet && !(await isAccountReady(wallet))) {
+      res.json({ status: "unsupported", intentType, reason: ACCOUNT_NOT_READY_REASON, reasoning: ACCOUNT_NOT_READY_REASON, plan, timing: timing() });
       return;
     }
 
