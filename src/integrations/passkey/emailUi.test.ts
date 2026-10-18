@@ -59,6 +59,25 @@ const test = (name: string, fn: () => void | Promise<void>) => tests.push([name,
     assert.deepEqual(touched, [], "the embedded wallet was never asked to sign");
   });
 
+  test("UI: with a passkey the embedded wallet signs a top-up of the user's own account — and nothing else", async () => {
+    const wallet = addr();
+    const safe = addr();
+    const sent: any[] = [];
+    const ledger = { connectionType: "privy", walletAddress: wallet, getProvider: () => ({
+      request: async ({ method, params }: any) => { if (method === "eth_chainId") return "0xaa36a7"; if (method === "eth_sendTransaction") { sent.push(params[0]); return "0xabc"; } throw new Error(method); },
+    }) };
+    const who = { emailWallet: true, hasPasskey: true };
+    await depositToSafe(ledger, safe, "eth", "0.01", who);
+    await depositToSafe(ledger, safe, "usdc", "5", who);
+    assert.equal(sent.length, 2);
+    assert.equal(sent[0].to, safe);
+    assert.equal(new ethers.Interface(["function transfer(address,uint256)"]).parseTransaction({ data: sent[1].data })!.args[0], safe);
+    const data = { sendData: { unsignedTx: { to: addr(), data: "0x", value: "1" } }, quoteData: {} };
+    await assert.rejects(executeSend(ledger, data, who), /passkey/, "an outgoing send is refused even with a passkey");
+    await assert.rejects(executeSwap(ledger, data, who), /passkey/);
+    assert.equal(sent.length, 2, "nothing else reached the wallet");
+  });
+
   test("UI: the held-back request is sent once after the passkey is added, then forgotten", () => {
     const held = ui.pendingRequest();
     assert.equal(held.take(), null);

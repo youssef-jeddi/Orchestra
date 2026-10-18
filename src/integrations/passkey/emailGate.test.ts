@@ -364,6 +364,70 @@ const test = (name: string, fn: () => void | Promise<void>) => tests.push([name,
     gate._setWalletLookup(null);
   });
 
+
+  // ── Top-up: the one thing a passkey-gated wallet may sign itself ──
+
+  const USDC = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238";
+  const WETH = "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14";
+  const erc20 = new ethers.Interface(["function transfer(address,uint256)", "function approve(address,uint256)", "function transferFrom(address,address,uint256)"]);
+  const depositCtx = (wallet: string, safe: string, params: any) => ({ walletAddress: wallet, safeAddress: safe, balanceAddress: safe, provider: {} as any, params, planSummary: "", planSteps: [], totalEstimatedValueUsd: 1, balances: null }) as any;
+
+  test("a passkey-gated social/email wallet with a passkey can top up its own account (ETH and USDC) through the deposit path", async () => {
+    await storage.clear();
+    gate._resetEmailGate();
+    const wallet = addr();
+    const safe = addr();
+    await gate.markEmailWallet(wallet, "did:privy:t1");
+    assert.equal(await code(pk.requirePasskeyToMoveFunds(wallet)), "passkey_required", "no passkey, no top-up either");
+    assert.equal((await gate.grantEmailVerification(wallet, socialUser("did:privy:t1", wallet, "google_oauth", 1_000))).granted, true);
+    await register(wallet);
+    assert.equal(await code(pk.requirePasskeyToMoveFunds(wallet)), "no error");
+    const deposit = getAdapter("deposit")!;
+    const eth = await deposit.build(depositCtx(wallet, safe, { symbol: "ETH", amount: "0.01" }));
+    assert.equal((eth.payload as any).depositData.unsignedTx.to, safe);
+    const usdc = await deposit.build(depositCtx(wallet, safe, { symbol: "USDC", amount: "5", token: USDC }));
+    const tx = (usdc.payload as any).depositData.unsignedTx;
+    assert.equal(tx.to, USDC);
+    assert.equal(erc20.parseTransaction({ data: tx.data })!.args[0], safe);
+    assert.equal(deposit.execute, undefined, "the server never moves the user's own wallet funds");
+  });
+
+  test("an outgoing send from that wallet is still refused (passkey_required) while it has no passkey; the deposit adapter can't be used to send", async () => {
+    const wallet = addr();
+    await gate.markEmailWallet(wallet, "did:privy:t2");
+    const send = getAdapter("send")!;
+    await assert.rejects(send.execute!(depositCtx(wallet, addr(), {}), { payload: { sendData: { unsignedTx: { to: addr(), data: "0x", value: "1" } } } } as any), (e: any) => e.code === "passkey_required");
+    // a deposit asked to go to someone else still goes to the account (the recipient is not a parameter)
+    const safe = addr();
+    const thief = addr();
+    const built = await getAdapter("deposit")!.build(depositCtx(wallet, safe, { symbol: "ETH", amount: "1", to: thief }));
+    assert.equal((built.payload as any).depositData.unsignedTx.to, safe);
+    assert.ok(!JSON.stringify(built).toLowerCase().includes(thief.toLowerCase()));
+  });
+
+  test("ATTACK: a 'top-up' whose recipient isn't the user's own account is refused", async () => {
+    const { isTopUpToOwnAccount: ok } = await import("../../executor/topUp");
+    const safe = addr();
+    const thief = addr();
+    const t = (to: string, data = "0x", value = "0") => ({ to, data, value });
+    assert.equal(ok(t(safe, "0x", "5"), safe), true);
+    assert.equal(ok(t(USDC, erc20.encodeFunctionData("transfer", [safe, 5n])), safe), true);
+    assert.equal(ok(t(WETH, erc20.encodeFunctionData("transfer", [safe, 5n])), safe), true);
+    assert.equal(ok(t(thief, "0x", "5"), safe), false, "ETH to a third party");
+    assert.equal(ok(t(USDC, erc20.encodeFunctionData("transfer", [thief, 5n])), safe), false, "token transfer to a third party");
+    assert.equal(ok(t(USDC, erc20.encodeFunctionData("approve", [thief, 5n])), safe), false, "approve");
+    assert.equal(ok(t(USDC, erc20.encodeFunctionData("approve", [safe, 5n])), safe), false, "approve even to the account");
+    assert.equal(ok(t(USDC, erc20.encodeFunctionData("transferFrom", [addr(), safe, 5n])), safe), false, "transferFrom");
+    assert.equal(ok(t(addr(), erc20.encodeFunctionData("transfer", [safe, 5n])), safe), false, "unsupported token");
+    assert.equal(ok(t(USDC, erc20.encodeFunctionData("transfer", [safe, 5n]) + "00", "0"), safe), false, "extra bytes");
+    assert.equal(ok(t(USDC, erc20.encodeFunctionData("transfer", [safe, 5n]), "1"), safe), false, "token transfer carrying ETH");
+    assert.equal(ok(t(safe, "0xa9059cbb", "0"), safe), false, "a call into the account");
+    assert.equal(ok(t(safe), "not-an-address"), false);
+    // a send whose params are crafted to look like a deposit: the adapter refuses an unsupported token
+    const bad = await getAdapter("deposit")!.build(depositCtx(addr(), safe, { symbol: "XYZ", amount: "1", token: thief }));
+    assert.ok(bad.refusal && !bad.payload);
+  });
+
   console.log("email gate");
   for (const [name, fn] of tests) {
     await fn();

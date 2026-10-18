@@ -21,6 +21,7 @@ import {
 } from "../integrations/uniswap/liquidity";
 import { tokenByAddress } from "../intent/tokens";
 import { requirePasskeyToMoveFunds } from "../integrations/passkey";
+import { isTopUpToOwnAccount } from "./topUp";
 import { TOKEN_DECIMALS, toTokenWei, symbolFromAddress, estimateUsd, checkSwapQuote, formatTokenAmount, type QuoteCheck } from "../policy";
 
 /** Uniswap's native-ETH sentinel. A WETH address would pull ERC-20 the Safe may not hold. */
@@ -212,6 +213,11 @@ const depositAdapter: IntentAdapter = {
     if (!ctx.safeAddress) return { refusal: "Your account isn't set up yet. It's created when you sign in, so try signing in again." };
     const built = await sendAdapter.build({ ...ctx, params: { ...ctx.params, to: ctx.safeAddress } });
     const sendData = (built.payload as any).sendData;
+    // Last check on what the user's own wallet will be asked to sign: nothing but a top-up of their
+    // own account (a passkey-gated wallet may sign this and nothing else).
+    if (!isTopUpToOwnAccount(sendData?.unsignedTx, ctx.safeAddress)) {
+      return { refusal: "I can only add ETH, USDC or WETH to your own account this way. To send money to someone else, confirm it with your passkey." };
+    }
     return { payload: { depositData: { ...sendData, safeAddress: ctx.safeAddress } } };
   },
 };
