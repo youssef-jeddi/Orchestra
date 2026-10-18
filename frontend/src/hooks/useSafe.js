@@ -96,11 +96,11 @@ export function useSafe(ledger, session) {
   const deposit = useCallback(async (token, amount) => {
     if (!ledger.walletAddress || !safeAddress) throw new Error('Connect a wallet first: your account is set up when you sign in.');
     ledger.log(`Depositing ${amount} ${String(token).toUpperCase()} to your account...`);
-    const result = await depositToSafe(ledger, safeAddress, token, amount);
+    const result = await depositToSafe(ledger, safeAddress, token, amount, { emailWallet: session?.emailWallet, hasPasskey: session?.hasPasskey });
     ledger.log(`Deposit broadcast: ${result.txHash}`);
     setTimeout(() => refreshBalances(), 5000);
     return result;
-  }, [ledger, safeAddress, refreshBalances]);
+  }, [ledger, safeAddress, refreshBalances, session?.emailWallet, session?.hasPasskey]);
 
   return {
     safeAddress, spendingLimit, balances, safeStatus, setupError,

@@ -8,6 +8,7 @@
 // Used by the /simple route; the full app has its own inline copy of this flow.
 
 import { broadcast, submitSwap, getNonce } from './bridge';
+import { userMaySign, SIGN_REFUSED } from './emailPasskey';
 
 const CHAIN_ID = 11155111; // Sepolia
 const CHAIN_ID_HEX = '0xaa36a7';
@@ -45,6 +46,13 @@ export async function ensureSepolia(eth) {
   if (String(after).toLowerCase() !== CHAIN_ID_HEX) {
     throw new Error('Switch your wallet to the Sepolia test network to continue.');
   }
+}
+
+// Email users approve with a passkey only (the server also refuses to hold such a request without one):
+// nothing here may hand their embedded wallet a transaction, except funding their own account.
+// `who` is { emailWallet, hasPasskey } from the session.
+function assertMaySign(who, kind) {
+  if (!who || !userMaySign(who, kind)) throw new Error(SIGN_REFUSED); // a caller that forgot `who` is refused, not allowed
 }
 
 function toHex(v) {
@@ -89,7 +97,8 @@ async function sendTx(ledger, tx, gasLimit) {
 }
 
 // ── Fund a Safe from the connected wallet (ETH or ERC-20) ──
-export async function depositToSafe(ledger, safeAddress, token, amount) {
+export async function depositToSafe(ledger, safeAddress, token, amount, who) {
+  assertMaySign(who, 'deposit');
   const { ethers } = await import('ethers');
   const t = String(token || 'eth').toLowerCase();
   let tx;
@@ -110,13 +119,15 @@ export async function depositToSafe(ledger, safeAddress, token, amount) {
 }
 
 // ── Send: single transfer tx ──
-export async function executeSend(ledger, data) {
+export async function executeSend(ledger, data, who) {
+  assertMaySign(who, 'send');
   const txHash = await sendTx(ledger, data.sendData.unsignedTx, 60000);
   return { txHash, explorerUrl: explorer(txHash) };
 }
 
 // ── Swap: (optional approval) → (optional Permit2 typed data) → swap tx ──
-export async function executeSwap(ledger, data) {
+export async function executeSwap(ledger, data, who) {
+  assertMaySign(who, 'swap');
   const q = data.quoteData;
   if (!q) throw new Error('No quote to sign');
   // The Permit2 typed data is bound to Sepolia too, so switch before any signature.

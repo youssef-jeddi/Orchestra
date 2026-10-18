@@ -56,6 +56,12 @@ export async function authPrivy(walletAddress, identityToken) {
   return bridgeFetch('/auth/privy', { method: 'POST', body: JSON.stringify({ walletAddress, identityToken }) });
 }
 
+// An email user's fresh email code, as Privy's new identity token: the server keeps it as the
+// single-use proof for their first passkey (and decides if it's fresh enough).
+export async function emailVerify(identityToken) {
+  return bridgeFetch('/passkey/email-verify', { method: 'POST', body: JSON.stringify({ identityToken }) });
+}
+
 export async function getSession() {
   return bridgeFetch('/auth/session');
 }

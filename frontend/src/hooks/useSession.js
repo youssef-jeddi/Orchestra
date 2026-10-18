@@ -9,6 +9,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { authLoginRequest, authLogin, authPrivy, getSession, setSessionToken, onSessionInvalid } from '@/lib/bridge';
+import { accountFrom } from '@/lib/emailPasskey';
 
 const storageKey = (wallet) => `orchestra:session:${wallet.toLowerCase()}`;
 
@@ -50,6 +51,9 @@ export function useSession(ledger) {
   const [status, setStatus] = useState('none'); // 'none' | 'signing' | 'ready' | 'error'
   const [error, setError] = useState(null);
   const [expiresAt, setExpiresAt] = useState(null);
+  // What the server knows about the wallet's passkeys. Until it answers an email user must not look like a
+  // wallet user, so the session only turns 'ready' once this is loaded.
+  const [account, setAccount] = useState({ emailWallet: false, hasPasskey: false });
   const autoTried = useRef(null); // wallet we already auto-prompted for
 
   // A different wallet starts signed out; the effect below then restores or asks.
@@ -57,6 +61,7 @@ export function useSession(ledger) {
   if (wallet !== prevWallet) {
     setPrevWallet(wallet);
     setStatus('none');
+    setAccount({ emailWallet: false, hasPasskey: false });
   }
 
   /** Ask the wallet to sign in. Resolves true once a session is active. */
@@ -65,11 +70,13 @@ export function useSession(ledger) {
     setStatus('signing');
     setError(null);
     try {
-      const { token, expiresAt } = viaPrivy(ledger)
+      const answer = viaPrivy(ledger)
         ? await authPrivy(wallet, ledger.getIdentityToken())
         : await signedLogin(wallet, ledger);
+      const { token, expiresAt } = answer;
       saveToken(wallet, token, expiresAt);
       setSessionToken(token);
+      setAccount(accountFrom(await getSession().catch(() => null), answer));
       setExpiresAt(expiresAt);
       setStatus('ready');
       return true;
@@ -94,7 +101,7 @@ export function useSession(ledger) {
     if (stored) {
       setSessionToken(stored.token);
       getSession()
-        .then(() => { if (alive) { setExpiresAt(stored.expiresAt); setStatus('ready'); } })
+        .then((info) => { if (alive) { setAccount(accountFrom(info)); setExpiresAt(stored.expiresAt); setStatus('ready'); } })
         .catch(() => { if (alive) { dropToken(wallet); setStatus('none'); } });
     } else if (privy || autoTried.current !== wallet) {
       autoTried.current = wallet;
@@ -123,5 +130,13 @@ export function useSession(ledger) {
   /** True when signed in — asking the wallet to sign in first if needed. */
   const ensure = useCallback(async () => (status === 'ready' ? true : signIn()), [status, signIn]);
 
-  return { status, error, signIn, ensure, ready: status === 'ready' };
+  /** Re-read the wallet's passkey state, e.g. after the user adds one. */
+  const refreshAccount = useCallback(async () => {
+    try { setAccount(accountFrom(await getSession())); } catch { /* keep what we had */ }
+  }, []);
+
+  return {
+    status, error, signIn, ensure, ready: status === 'ready',
+    emailWallet: account.emailWallet, hasPasskey: account.hasPasskey, refreshAccount,
+  };
 }
