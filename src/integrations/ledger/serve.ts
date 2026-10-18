@@ -16,7 +16,8 @@ import { executeSwap } from "../uniswap/execution";
 import { WETH_SEPOLIA, USDC_SEPOLIA, CHAIN_ID } from "../uniswap/types";
 import { write, read, append } from "../zero-g/storage";
 import { setComputeProvider, getComputeProvider } from "../zero-g/compute";
-import { deploySafe } from "../safe/deploy";
+import { onboarding, storedSpendingLimit } from "../safe/onboard";
+import { OnboardingError } from "../safe/onboarding";
 import { detectExistingSafe } from "../safe/detect";
 import { setInitialSpendingLimits, updateSpendingLimit, buildLimitUpdateTx } from "../safe/spendingLimit";
 import { getAgentAddress } from "../safe/agentWallet";
@@ -659,6 +660,7 @@ function desktopRp(req: express.Request): RelyingParty {
 
 function sendError(res: express.Response, err: any, fallbackStatus = 500): void {
   if (err instanceof PasskeyError) { res.status(err.status).json({ error: err.message, code: err.code }); return; }
+  if (err instanceof OnboardingError) { res.status(err.status).json({ error: err.message, code: err.code }); return; }
   res.status(err instanceof ApprovalError ? err.status : fallbackStatus).json({ error: err.message });
 }
 
@@ -1089,91 +1091,30 @@ app.post("/policy", requireSession, async (req, res) => {
 });
 
 // ─── Safe onboarding ───
+// Called automatically at sign-in. Starts (or joins) the wallet's one deployment and returns at
+// once with the account address; the client polls /onboard/status. The body is ignored: the
+// wallet is the session's and policy values are the server's defaults.
 app.post("/onboard", requireSession, async (req, res) => {
   try {
-    const ledgerAddress = ethers.getAddress(res.locals.wallet);
+    const wallet = ethers.getAddress(res.locals.wallet);
     if (!sameWalletOrAbsent(req.body?.ledgerAddress, res)) return;
-    const { spendingLimitUSD = 100 } = req.body;
-
-    console.log(`[onboard] Checking Safe for ${ledgerAddress}...`);
-
-    // Check for existing Safe
-    const existing = await detectExistingSafe(ledgerAddress);
-    if (existing) {
-      const stored = await read(`safe:${ledgerAddress.toLowerCase()}`);
-      console.log(`[onboard] Returning user — Safe: ${existing}`);
-      res.json({
-        isNewUser: false,
-        safeAddress: existing,
-        spendingLimitUSD: (stored as any)?.spendingLimitUSD || 100,
-      });
-      return;
-    }
-
-    // New user — deploy Safe
-    console.log(`[onboard] New user — deploying Safe...`);
-    let agentWalletAddress: string;
-    try {
-      agentWalletAddress = getAgentAddress();
-    } catch {
-      res.status(500).json({ error: "Agent wallet not configured (AGENT_PRIVATE_KEY)" });
-      return;
-    }
-
-    const safeAddress = await deploySafe(ledgerAddress, agentWalletAddress, provider);
-
-    // Set spending limits (non-blocking — may fail on some Safe SDK versions)
-    const agentKey = process.env.AGENT_PRIVATE_KEY!;
-    try {
-      await setInitialSpendingLimits(safeAddress, agentWalletAddress, spendingLimitUSD, agentKey);
-    } catch (limitErr: any) {
-      console.warn(`[onboard] Spending limits setup deferred: ${limitErr.message}`);
-    }
-
-    // Register on OrchestraPolicy
-    let policyTxHash: string | undefined;
-    const policyAddress = process.env.ORCHESTRA_POLICY_ADDRESS;
-    if (policyAddress) {
-      const policyAbi = ['function registerSafe(address safeAddress, address agentWallet, uint256 spendingLimitUSD) external'];
-      const agentWallet = new ethers.Wallet(agentKey, provider);
-      const policy = new ethers.Contract(policyAddress, policyAbi, agentWallet);
-      const tx = await policy.registerSafe(safeAddress, agentWalletAddress, spendingLimitUSD * 100);
-      await tx.wait();
-      policyTxHash = tx.hash;
-      console.log(`[onboard] Policy registered: ${policyTxHash}`);
-    }
-
-    // Write to 0G Storage
-    await write(`safe:${ledgerAddress.toLowerCase()}`, {
-      safeAddress,
-      agentWallet: agentWalletAddress,
-      spendingLimitUSD,
-      deployedAt: new Date().toISOString(),
-    });
-
-    // Merge: keep any existing guardrail policy instead of wiping it.
-    const existingProfile = await readUserProfile(ledgerAddress);
-    await writeUserProfile(ledgerAddress, {
-      ...existingProfile,
-      address: ledgerAddress,
-      safeAddress,
-      riskTolerance: existingProfile.riskTolerance || "moderate",
-      autoApproveLimit: spendingLimitUSD,
-      preferredTokens: existingProfile.preferredTokens || ["USDC", "WETH", "ETH"],
-      createdAt: existingProfile.createdAt || new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    });
-
-    console.log(`[onboard] New user onboarded — Safe: ${safeAddress}`);
+    const result = await onboarding.start(wallet, req.ip || "unknown");
     res.json({
-      isNewUser: true,
-      safeAddress,
-      spendingLimitUSD,
-      policyTxHash,
+      ...result,
+      isNewUser: !!result.started,
+      spendingLimitUSD: await storedSpendingLimit(wallet),
     });
   } catch (err: any) {
-    console.error("[onboard] Error:", err.message);
-    res.status(500).json({ error: err.message });
+    if (!(err instanceof OnboardingError)) console.error("[onboard] Error:", err.message);
+    sendError(res, err);
+  }
+});
+
+app.get("/onboard/status", requireSession, async (_req, res) => {
+  try {
+    res.json(await onboarding.status(ethers.getAddress(res.locals.wallet)));
+  } catch (err: any) {
+    sendError(res, err);
   }
 });
 
