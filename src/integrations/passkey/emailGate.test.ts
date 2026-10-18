@@ -428,6 +428,77 @@ const test = (name: string, fn: () => void | Promise<void>) => tests.push([name,
     assert.ok(bad.refusal && !bad.payload);
   });
 
+
+  // ── Social first passkey: the same provider account, signed in again ──
+
+  const googleUser = (id: string, wallet: string, subject: string, agoMs: number, extra: any[] = []) => ({
+    id,
+    linked_accounts: [
+      { type: "google_oauth", subject, email: "a@b.c", latest_verified_at: sec(Date.now() - agoMs) },
+      { type: "wallet", address: wallet, chain_type: "ethereum", wallet_client_type: "privy", latest_verified_at: 1 },
+      ...extra,
+    ],
+  }) as any;
+
+  test("social: signing in again with the same Google account is accepted for the first passkey, once", async () => {
+    await storage.clear();
+    gate._resetEmailGate();
+    const { noteEmailSignIn } = await import("../../auth/privy");
+    const w = addr();
+    assert.equal(await noteEmailSignIn(googleUser("did:privy:s1", w, "g-111", 3_600_000), w), true);
+    assert.deepEqual(await gate.verificationAccountTypes(w), ["google_oauth"]);
+    assert.equal((await gate.grantEmailVerification(w, googleUser("did:privy:s1", w, "g-111", 2_000))).granted, true);
+    await register(w);
+    assert.equal(await pk.hasAnyPasskey(w), true);
+  });
+
+  test("ATTACK (social): a stale sign-in is refused", async () => {
+    const w = addr();
+    await gate.markEmailWallet(w, "did:privy:s2", gate.loginAccountKeys(googleUser("did:privy:s2", w, "g-222", 0)));
+    assert.deepEqual(await gate.grantEmailVerification(w, googleUser("did:privy:s2", w, "g-222", gate.EMAIL_VERIFICATION_WINDOW_MS + 60_000)), { granted: false, reason: "stale" });
+  });
+
+  test("ATTACK (social): another Privy user's fresh sign-in is refused", async () => {
+    const w = addr();
+    await gate.markEmailWallet(w, "did:privy:s3", gate.loginAccountKeys(googleUser("did:privy:s3", w, "g-333", 0)));
+    assert.deepEqual(await gate.grantEmailVerification(w, googleUser("did:privy:intruder", w, "g-333", 0)), { granted: false, reason: "other_user" });
+  });
+
+  test("ATTACK (social): a different Google account linked later can't supply the proof, however fresh", async () => {
+    const w = addr();
+    await gate.markEmailWallet(w, "did:privy:s4", gate.loginAccountKeys(googleUser("did:privy:s4", w, "g-444", 0)));
+    const linkedLater = { type: "google_oauth", subject: "g-EVIL", email: "x@y.z", latest_verified_at: sec(Date.now() - 1_000) };
+    const user = googleUser("did:privy:s4", w, "g-444", 3_600_000, [linkedLater]); // the original is old, the new one fresh
+    assert.deepEqual(await gate.grantEmailVerification(w, user), { granted: false, reason: "other_account" });
+    assert.equal(gate.hasEmailVerification(w), false);
+    assert.equal(await code(register(w)), "email_verification_required");
+    // the original account signing in again is still what works
+    assert.equal((await gate.grantEmailVerification(w, googleUser("did:privy:s4", w, "g-444", 1_000, [linkedLater]))).granted, true);
+  });
+
+  test("ATTACK (social): the same sign-in can't be used twice", async () => {
+    await storage.clear();
+    gate._resetEmailGate();
+    const w = addr();
+    await gate.markEmailWallet(w, "did:privy:s5", gate.loginAccountKeys(googleUser("did:privy:s5", w, "g-555", 0)));
+    const proof = googleUser("did:privy:s5", w, "g-555", 2_000);
+    assert.equal((await gate.grantEmailVerification(w, proof)).granted, true);
+    await register(w);
+    assert.deepEqual(await gate.grantEmailVerification(w, proof), { granted: false, reason: "already_used" });
+  });
+
+  test("an email user keeps the email path; a user with both can verify with either of the accounts they had", async () => {
+    const w = addr();
+    const both = (agoEmail: number, agoGoogle: number) => ({ id: "did:privy:s6", linked_accounts: [
+      { type: "email", address: "a@b.c", latest_verified_at: sec(Date.now() - agoEmail) },
+      { type: "google_oauth", subject: "g-666", latest_verified_at: sec(Date.now() - agoGoogle) },
+      { type: "wallet", address: w, chain_type: "ethereum", wallet_client_type: "privy" },
+    ] }) as any;
+    await gate.markEmailWallet(w, "did:privy:s6", gate.loginAccountKeys(both(0, 0)));
+    assert.deepEqual(await gate.verificationAccountTypes(w), ["email", "google_oauth"]);
+    assert.equal((await gate.grantEmailVerification(w, both(1_000, 3_600_000))).granted, true);
+  });
+
   console.log("email gate");
   for (const [name, fn] of tests) {
     await fn();

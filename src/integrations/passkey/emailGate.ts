@@ -48,12 +48,29 @@ const isLoginAccount = (a: any) =>
   (typeof a.type === "string" && a.type.endsWith("_oauth"));
 
 /**
- * When the user last passed a code or signed in again through a login provider, in ms, or null if
- * the token doesn't say. Privy moves `latest_verified_at` forward on each such sign-in.
+ * A stable name for one login account: its type and the provider's own id for it (Google subject,
+ * email address, …), lowercased. Two Google accounts have the same type and different keys, so
+ * "the Google account you signed up with" can be told apart from one linked later.
  */
-export function loginVerifiedAtMs(user: Pick<User, "linked_accounts">): number | null {
+export function accountKey(a: any): string | null {
+  const id = a?.subject ?? a?.address ?? a?.number ?? a?.fid ?? a?.telegram_user_id ?? a?.username;
+  return typeof a?.type === "string" && (typeof id === "string" || typeof id === "number") ? `${a.type}:${String(id).toLowerCase()}` : null;
+}
+
+/** The keys of the user's login accounts (email, phone, social), as present in the identity token. */
+export function loginAccountKeys(user: Pick<User, "linked_accounts">): string[] {
+  return (user.linked_accounts as any[]).filter(isLoginAccount).map(accountKey).filter((k): k is string => k !== null);
+}
+
+/**
+ * When the user last passed a code or signed in again through a login provider, in ms, or null if
+ * the token doesn't say. Privy moves `latest_verified_at` forward on each such sign-in. With
+ * `only`, just those accounts count (see accountKey).
+ */
+export function loginVerifiedAtMs(user: Pick<User, "linked_accounts">, only?: string[]): number | null {
   let latest: number | null = null;
   for (const a of user.linked_accounts as any[]) {
+    if (only && !only.includes(accountKey(a) ?? "")) continue;
     const lv = isLoginAccount(a) ? a.latest_verified_at : null;
     if (typeof lv !== "number" || !Number.isFinite(lv) || lv <= 0) continue;
     const ms = lv > 1e11 ? lv : lv * 1000; // Privy reports seconds
@@ -82,6 +99,12 @@ export function passkeyGate(input: { emailWallet: boolean; passkeyCount: number 
 interface EmailWalletRecord {
   userId: string;
   since: string;
+  /**
+   * The login accounts the user had when the wallet was flagged. Only a fresh sign-in through one
+   * of these counts for the first passkey, so an account linked afterwards can't supply it.
+   * Absent on records from before this was tracked: then any login account counts.
+   */
+  accounts?: string[];
   /** Newest verification already spent on a first passkey: the same one can't be spent twice, even after a restart. */
   usedVerifiedAt?: number;
 }
@@ -97,9 +120,18 @@ async function readRecord(wallet: string): Promise<EmailWalletRecord | null> {
  * Flag the wallet as an email one. There is deliberately no way to clear it: a later EIP-712
  * login with the same wallet, or a changed Privy account, must not lift the rules.
  */
-export async function markEmailWallet(wallet: string, userId: string): Promise<void> {
+export async function markEmailWallet(wallet: string, userId: string, accounts?: string[]): Promise<void> {
   if (await readRecord(wallet)) return;
-  await write(key(wallet), { userId, since: new Date().toISOString() } satisfies EmailWalletRecord);
+  await write(key(wallet), { userId, since: new Date().toISOString(), ...(accounts?.length ? { accounts } : {}) } satisfies EmailWalletRecord);
+}
+
+/**
+ * The kinds of account that can verify this wallet's first passkey ("email", "google_oauth", …),
+ * email first. Empty when the record doesn't say (older records) or the wallet isn't flagged.
+ */
+export async function verificationAccountTypes(wallet: string): Promise<string[]> {
+  const types = [...new Set(((await readRecord(wallet))?.accounts ?? []).map((k) => k.split(":")[0]))];
+  return types.sort((a, b) => Number(b === "email") - Number(a === "email"));
 }
 
 // ── Recognising an embedded wallet that never came through POST /auth/privy ──
@@ -147,7 +179,7 @@ async function recogniseEmbedded(wallet: string, now = Date.now()): Promise<bool
   if (until !== undefined && until > now) return false;
   const user = await find(wallet);
   if (user && ownsEmbeddedWallet(user, wallet)) {
-    await markEmailWallet(wallet, user.id);
+    await markEmailWallet(wallet, user.id, loginAccountKeys(user));
     return true;
   }
   if (notEmbedded.size >= NOT_EMBEDDED_MAX) notEmbedded.delete(notEmbedded.keys().next().value!);
@@ -171,7 +203,7 @@ const grants = new Map<string, Grant>();
 
 export type GrantResult =
   | { granted: true; expiresAt: string }
-  | { granted: false; reason: "not_email_wallet" | "other_user" | "stale" | "already_used" };
+  | { granted: false; reason: "not_email_wallet" | "other_user" | "other_account" | "stale" | "already_used" };
 
 /**
  * Record a fresh email verification for the wallet, from a signature-checked Privy `user`
@@ -182,8 +214,12 @@ export async function grantEmailVerification(wallet: string, user: Pick<User, "i
   const record = await readRecord(wallet);
   if (!record) return { granted: false, reason: "not_email_wallet" };
   if (record.userId !== user.id) return { granted: false, reason: "other_user" };
-  const verifiedAtMs = loginVerifiedAtMs(user);
-  if (!isFreshVerification(verifiedAtMs, now)) return { granted: false, reason: "stale" };
+  // Only the accounts the wallet was flagged with count: a different (or newly linked) Google
+  // account, however fresh, is not the one the user signed up with.
+  const verifiedAtMs = loginVerifiedAtMs(user, record.accounts);
+  if (!isFreshVerification(verifiedAtMs, now)) {
+    return { granted: false, reason: record.accounts && isFreshVerification(loginVerifiedAtMs(user), now) ? "other_account" : "stale" };
+  }
   if (record.usedVerifiedAt !== undefined && verifiedAtMs! <= record.usedVerifiedAt) return { granted: false, reason: "already_used" };
   grants.set(wallet.toLowerCase(), { verifiedAtMs: verifiedAtMs!, userId: user.id });
   return { granted: true, expiresAt: new Date(verifiedAtMs! + EMAIL_VERIFICATION_WINDOW_MS).toISOString() };

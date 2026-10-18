@@ -88,7 +88,7 @@ import {
   type RelyingParty,
 } from "../passkey";
 import { createSetupToken, getSetup, consumeSetup } from "../passkey/phoneSetup";
-import { isEmailWallet, hasEmailVerification } from "../passkey/emailGate";
+import { isEmailWallet, hasEmailVerification, verificationAccountTypes } from "../passkey/emailGate";
 
 const provider = makeSepoliaProvider();
 const PORT = Number(process.env.PORT) || Number(process.env.LEDGER_BRIDGE_PORT) || 3001;
@@ -769,8 +769,8 @@ app.post("/passkey/confirm-options", requireSession, async (req, res) => {
   } catch (e: any) { sendError(res, e); }
 });
 
-// An email wallet's first passkey needs a fresh email code. The client has the user pass one
-// (Privy emails it and checks it), then sends the new identity token here; the server keeps
+// An email wallet's first passkey needs a fresh check that it's them: an email code, or signing in
+// again with the same social account. The client has the user do it (Privy runs it), then sends the new identity token here; the server keeps
 // that as the wallet's single-use verification, which registration spends.
 app.post("/passkey/email-verify", requireSession, async (req, res) => {
   try {
@@ -1070,7 +1070,8 @@ app.get("/auth/session", requireSession, async (_req, res) => {
   try {
     const wallet = res.locals.wallet as string;
     const [emailWallet, passkey] = await Promise.all([isEmailWallet(wallet), hasAnyPasskey(wallet)]);
-    res.json({ wallet, emailWallet, hasPasskey: passkey, emailVerified: emailWallet && hasEmailVerification(wallet) });
+    // verifyWith: which account types can confirm the first passkey, so the chat offers the right step
+    res.json({ wallet, emailWallet, hasPasskey: passkey, emailVerified: emailWallet && hasEmailVerification(wallet), verifyWith: emailWallet ? await verificationAccountTypes(wallet) : [] });
   } catch (e: any) { sendError(res, e); }
 });
 

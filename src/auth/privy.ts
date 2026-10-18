@@ -27,7 +27,7 @@ import { createRemoteJWKSet, type CryptoKey, type JWTVerifyGetKey } from "jose";
 import { PrivyClient, verifyIdentityToken, type User } from "@privy-io/node";
 import { issueToken, AuthError } from "./index";
 import { addExternalCredentials } from "../integrations/passkey";
-import { isEmbeddedSignIn, isEmailWallet, markEmailWallet, grantEmailVerification } from "../integrations/passkey/emailGate";
+import { isEmbeddedSignIn, isEmailWallet, markEmailWallet, grantEmailVerification, loginAccountKeys } from "../integrations/passkey/emailGate";
 
 const PRIVY_API_URL = "https://api.privy.io";
 
@@ -127,7 +127,7 @@ export async function importPrivyPasskeys(user: User, wallet: string, rpID: stri
  * the wallet is an email wallet (now or from an earlier sign-in).
  */
 export async function noteEmailSignIn(user: User, wallet: string): Promise<boolean> {
-  if (isEmbeddedSignIn(user, wallet)) await markEmailWallet(wallet, user.id);
+  if (isEmbeddedSignIn(user, wallet)) await markEmailWallet(wallet, user.id, loginAccountKeys(user));
   return isEmailWallet(wallet);
 }
 
@@ -141,8 +141,9 @@ export async function verifyEmailForPasskey(identityToken: unknown, wallet: stri
   if (result.granted) return { expiresAt: result.expiresAt };
   if (result.reason === "not_email_wallet") throw new AuthError(400, "This account signed in with a wallet, so there's nothing to check.");
   if (result.reason === "other_user") throw new AuthError(403, "This email doesn't belong to this account.");
+  if (result.reason === "other_account") throw new AuthError(403, "That isn't the account you signed up with. Confirm it with the same one.");
   if (result.reason === "already_used") throw new AuthError(409, "That code was already used. Ask for a new one.");
-  throw new AuthError(403, "That code is too old. Ask for a new one and enter it right away.");
+  throw new AuthError(403, "That confirmation is too old. Confirm it again and add your passkey right away.");
 }
 
 /** Test hook: verify against a fixed key instead of Privy's JWKS. */

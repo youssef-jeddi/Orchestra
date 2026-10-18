@@ -219,6 +219,20 @@ const test = (name: string, fn: () => void | Promise<void>) => tests.push([name,
     assert.equal(gate.hasEmailVerification(embedded), false);
   });
 
+  test("a Google user: signing in again with the same account verifies; a Google account linked later gets 'not the account you signed up with'", async () => {
+    await storage.clear();
+    gate._resetEmailGate();
+    const w = ethers.Wallet.createRandom().address;
+    const now = Math.floor(Date.now() / 1000);
+    const token = (accounts: any[]) => idToken({ accounts: [...accounts, { type: "wallet", address: w, chain_type: "ethereum", wallet_client_type: "privy", id: "w10", lv: 1 }] });
+    const g = (subject: string, agoSec: number) => ({ type: "google_oauth", subject, email: "a@b.c", lv: now - agoSec });
+    assert.equal(await noteEmailSignIn(await verifyPrivyUser(await token([g("g-1", 5)]), w), w), true);
+    assert.equal(await kind(async () => verifyEmailForPasskey(await token([g("g-1", 3600), g("g-2", 5)]), w)), 403); // only the new account is fresh
+    assert.equal(gate.hasEmailVerification(w), false);
+    const { expiresAt } = await verifyEmailForPasskey(await token([g("g-1", 5), g("g-2", 3600)]), w);
+    assert.ok(Date.parse(expiresAt) > Date.now());
+  });
+
   console.log("privy");
   for (const [name, fn] of tests) {
     await fn();
