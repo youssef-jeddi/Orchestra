@@ -69,7 +69,7 @@ function Setup() {
       <div style={s.card}>
         <p style={s.ok}>✓ Passkey set up on this phone.</p>
         <p style={s.muted}>
-          From now on, risky transactions{wallet ? ` for ${wallet.slice(0, 6)}…${wallet.slice(-4)}` : ''} arrive
+          From now on, risky actions{wallet ? ` for ${wallet.slice(0, 6)}…${wallet.slice(-4)}` : ''} arrive
           in Telegram with a “Review &amp; approve” button, and you confirm them here with this passkey.
           You can close this page.
         </p>
@@ -82,8 +82,8 @@ function Setup() {
     <div style={s.card}>
       <h1 style={{ margin: 0, fontSize: 20, fontWeight: 500 }}>Set up this phone</h1>
       <p style={s.muted}>
-        Create a passkey on this phone. Risky transactions will then need it: you&apos;ll see exactly what
-        will execute, and confirm with your fingerprint or face.
+        Create a passkey on this phone. Risky actions will then need it: you&apos;ll see exactly what
+        will happen, and confirm with your fingerprint or face.
       </p>
       {blocked && <p style={s.error}>{env.supported ? OPEN_IN_BROWSER : 'This browser doesn’t support passkeys. ' + OPEN_IN_BROWSER}</p>}
       <button onClick={create} disabled={state === 'working' || !prepared} style={s.primary(state === 'working' || !prepared)}>

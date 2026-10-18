@@ -171,6 +171,11 @@ interface Escalation {
   risk: number;
 }
 
+/** 0x1234…abcd, so reasons shown in the chat stay readable. */
+function shortAddr(a: string): string {
+  return /^0x[0-9a-fA-F]{40}$/.test(a) ? `${a.slice(0, 6)}…${a.slice(-4)}` : a;
+}
+
 /** Scan plan steps for any token address on the denylist. Returns it, or null. */
 function findDenylistedToken(steps: any[]): string | null {
   for (const step of steps) {
@@ -227,27 +232,27 @@ export function decide(input: DecisionInput): PolicyDecision {
 
   // 1. Read-only query.
   if (intentType === "balance") {
-    return { verdict: "INFO", riskScore: 0, reason: "Read-only query — no funds move.", requiresLedger: false, triggered: [], approvalMethod: "none" };
+    return { verdict: "INFO", riskScore: 0, reason: "Just a lookup — no money moves.", requiresLedger: false, triggered: [], approvalMethod: "none" };
   }
 
   // 2. Malformed plan.
   if (!plan || typeof plan.summary !== "string" || plan.summary.trim() === "") {
-    return { verdict: "BLOCKED", riskScore: 100, reason: "Plan is malformed (missing summary).", requiresLedger: false, triggered: ["malformed"], approvalMethod: "none" };
+    return { verdict: "BLOCKED", riskScore: 100, reason: "I couldn't make sense of this request, so nothing was done.", requiresLedger: false, triggered: ["malformed"], approvalMethod: "none" };
   }
   const steps = Array.isArray(plan.steps) ? plan.steps : [];
   if (intentType !== "unknown" && steps.length === 0) {
-    return { verdict: "BLOCKED", riskScore: 100, reason: "Plan has no executable steps.", requiresLedger: false, triggered: ["malformed"], approvalMethod: "none" };
+    return { verdict: "BLOCKED", riskScore: 100, reason: "I couldn't make sense of this request, so nothing was done.", requiresLedger: false, triggered: ["malformed"], approvalMethod: "none" };
   }
 
   // 3. Denylisted token.
   const denied = findDenylistedToken(steps);
   if (denied) {
-    return { verdict: "BLOCKED", riskScore: 100, reason: `Token ${denied} is denylisted.`, requiresLedger: false, triggered: ["denylist"], approvalMethod: "none" };
+    return { verdict: "BLOCKED", riskScore: 100, reason: `The token ${shortAddr(denied)} is on the list of tokens that are never allowed.`, requiresLedger: false, triggered: ["denylist"], approvalMethod: "none" };
   }
 
   // 4. Unrecognized action — fail closed.
   if (intentType === "unknown") {
-    return { verdict: "NEEDS_APPROVAL", riskScore: 60, reason: "Unrecognized action type — requires manual approval.", requiresLedger: approvalMethod === "ledger", triggered: ["unknown-intent"], approvalMethod };
+    return { verdict: "NEEDS_APPROVAL", riskScore: 60, reason: "I don't recognise this kind of action, so it needs your OK.", requiresLedger: approvalMethod === "ledger", triggered: ["unknown-intent"], approvalMethod };
   }
 
   // 5. Value-bearing intents (swap / send / add_liquidity): accumulate escalations.
@@ -266,7 +271,7 @@ export function decide(input: DecisionInput): PolicyDecision {
   if (spentToday + valueUsd > dailyLimitUsd) {
     escalations.push({
       rule: "daily-limit",
-      reason: `This would exceed your $${dailyLimitUsd} daily auto-approve limit ($${spentToday} used today) — approval required.`,
+      reason: `This would go over your $${dailyLimitUsd} daily limit for automatic actions ($${spentToday} used today), so it needs your OK.`,
       risk: 70,
     });
   }
@@ -278,7 +283,7 @@ export function decide(input: DecisionInput): PolicyDecision {
       if (unverified) {
         escalations.push({
           rule: "unverified-token",
-          reason: `Token ${unverified} is not in your verified list — approval required.`,
+          reason: `The token ${shortAddr(unverified)} isn't on your list of checked tokens, so it needs your OK.`,
           risk: 65,
         });
       }
@@ -291,7 +296,7 @@ export function decide(input: DecisionInput): PolicyDecision {
       if (to && !allow.has(to.toLowerCase())) {
         escalations.push({
           rule: "unknown-recipient",
-          reason: `Recipient ${to} is not a known address — approval required.`,
+          reason: `${shortAddr(to)} is a new recipient you haven't sent to before, so it needs your OK.`,
           risk: 60,
         });
       }
@@ -301,7 +306,7 @@ export function decide(input: DecisionInput): PolicyDecision {
     if (profile.maxAutoTxPerDay != null && recent.length >= profile.maxAutoTxPerDay) {
       escalations.push({
         rule: "daily-count-velocity",
-        reason: `You've reached your ${profile.maxAutoTxPerDay} auto-approvals per day — approval required.`,
+        reason: `You've reached your limit of ${profile.maxAutoTxPerDay} automatic actions per day, so this needs your OK.`,
         risk: 60,
       });
     }
@@ -310,7 +315,7 @@ export function decide(input: DecisionInput): PolicyDecision {
     if (profile.typicalMaxUsd != null && profile.typicalMaxUsd > 0 && valueUsd > profile.typicalMaxUsd * HABIT_ANOMALY_MULTIPLE) {
       escalations.push({
         rule: "habit-anomaly",
-        reason: `$${valueUsd} is unusually large versus your typical $${profile.typicalMaxUsd} — approval required.`,
+        reason: `$${valueUsd} is bigger than you usually move (typically up to $${profile.typicalMaxUsd}), so it needs your OK.`,
         risk: 55,
       });
     }
@@ -331,7 +336,7 @@ export function decide(input: DecisionInput): PolicyDecision {
   return {
     verdict: "AUTO_EXECUTE",
     riskScore: 15,
-    reason: `$${valueUsd} is within your $${dailyLimitUsd} daily auto-approve limit ($${spentToday} used today).`,
+    reason: `$${valueUsd} is within your $${dailyLimitUsd} daily limit for automatic actions ($${spentToday} used today).`,
     requiresLedger: false,
     triggered: [],
     approvalMethod: "none",

@@ -2,12 +2,14 @@
 
 // ── Wallet session ──
 // Proves wallet ownership to the bridge: the wallet signs an EIP-712 login once
-// (MetaMask or Ledger), the server returns a short-lived token, and bridgeFetch
-// sends it on every request. The token is kept per wallet in localStorage so a
+// (MetaMask or Ledger) — or, for wallets that came through Privy, Privy's identity
+// token stands in for the signature — the server returns a short-lived token, and
+// bridgeFetch sends it on every request. The token is kept per wallet in localStorage so a
 // reload doesn't ask for another signature until it expires.
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { authLoginRequest, authLogin, getSession, setSessionToken, onSessionInvalid } from '@/lib/bridge';
+import { authLoginRequest, authLogin, authPrivy, getSession, setSessionToken, onSessionInvalid } from '@/lib/bridge';
+import { accountFrom } from '@/lib/emailPasskey';
 
 const storageKey = (wallet) => `orchestra:session:${wallet.toLowerCase()}`;
 
@@ -33,12 +35,34 @@ function dropToken(wallet) {
   try { localStorage.removeItem(storageKey(wallet)); } catch { /* ignore */ }
 }
 
+const viaPrivy = (ledger) => ledger.connectionType === 'privy' || ledger.connectionType === 'external';
+
+async function signedLogin(wallet, ledger) {
+  const { nonce, typedData } = await authLoginRequest(wallet);
+  const sig = await ledger.signTyped(typedData);
+  const { ethers } = await import('ethers');
+  // Ledger returns {v,r,s}; MetaMask returns a serialized hex string.
+  const signature = typeof sig === 'string' ? sig : ethers.Signature.from({ v: sig.v, r: sig.r, s: sig.s }).serialized;
+  return authLogin(wallet, nonce, signature);
+}
+
 export function useSession(ledger) {
   const wallet = ledger.walletAddress;
   const [status, setStatus] = useState('none'); // 'none' | 'signing' | 'ready' | 'error'
   const [error, setError] = useState(null);
   const [expiresAt, setExpiresAt] = useState(null);
+  // What the server knows about the wallet's passkeys. Until it answers an email user must not look like a
+  // wallet user, so the session only turns 'ready' once this is loaded.
+  const [account, setAccount] = useState({ emailWallet: false, hasPasskey: false, verifyWith: [] });
   const autoTried = useRef(null); // wallet we already auto-prompted for
+
+  // A different wallet starts signed out; the effect below then restores or asks.
+  const [prevWallet, setPrevWallet] = useState(wallet);
+  if (wallet !== prevWallet) {
+    setPrevWallet(wallet);
+    setStatus('none');
+    setAccount({ emailWallet: false, hasPasskey: false, verifyWith: [] });
+  }
 
   /** Ask the wallet to sign in. Resolves true once a session is active. */
   const signIn = useCallback(async () => {
@@ -46,14 +70,13 @@ export function useSession(ledger) {
     setStatus('signing');
     setError(null);
     try {
-      const { nonce, typedData } = await authLoginRequest(wallet);
-      const sig = await ledger.signTyped(typedData);
-      const { ethers } = await import('ethers');
-      // Ledger returns {v,r,s}; MetaMask returns a serialized hex string.
-      const signature = typeof sig === 'string' ? sig : ethers.Signature.from({ v: sig.v, r: sig.r, s: sig.s }).serialized;
-      const { token, expiresAt } = await authLogin(wallet, nonce, signature);
+      const answer = viaPrivy(ledger)
+        ? await authPrivy(wallet, ledger.getIdentityToken())
+        : await signedLogin(wallet, ledger);
+      const { token, expiresAt } = answer;
       saveToken(wallet, token, expiresAt);
       setSessionToken(token);
+      setAccount(accountFrom(await getSession().catch(() => null), answer));
       setExpiresAt(expiresAt);
       setStatus('ready');
       return true;
@@ -66,22 +89,24 @@ export function useSession(ledger) {
   }, [wallet, ledger]);
 
   // New wallet: reuse a stored token if the server still accepts it, else ask once.
+  // Privy wallets always get a fresh session: it costs no prompt, and signing in is
+  // when the server picks up the user's sign-in passkey for approvals.
   useEffect(() => {
     let alive = true;
     setSessionToken(null);
-    if (!wallet) { setStatus('none'); return; }
+    if (!wallet) return;
 
-    const stored = loadToken(wallet);
+    const privy = viaPrivy(ledger);
+    const stored = privy ? null : loadToken(wallet);
     if (stored) {
       setSessionToken(stored.token);
       getSession()
-        .then(() => { if (alive) { setExpiresAt(stored.expiresAt); setStatus('ready'); } })
+        .then((info) => { if (alive) { setAccount(accountFrom(info)); setExpiresAt(stored.expiresAt); setStatus('ready'); } })
         .catch(() => { if (alive) { dropToken(wallet); setStatus('none'); } });
-    } else if (autoTried.current !== wallet) {
+    } else if (privy || autoTried.current !== wallet) {
       autoTried.current = wallet;
-      signIn();
-    } else {
-      setStatus('none');
+      // Signing in is the side effect here; signIn only marks 'signing' before it awaits the server.
+      signIn(); // eslint-disable-line react-hooks/set-state-in-effect
     }
     return () => { alive = false; };
   }, [wallet]); // eslint-disable-line react-hooks/exhaustive-deps -- signIn changes with ledger; run once per wallet
@@ -105,5 +130,13 @@ export function useSession(ledger) {
   /** True when signed in — asking the wallet to sign in first if needed. */
   const ensure = useCallback(async () => (status === 'ready' ? true : signIn()), [status, signIn]);
 
-  return { status, error, signIn, ensure, ready: status === 'ready' };
+  /** Re-read the wallet's passkey state, e.g. after the user adds one. */
+  const refreshAccount = useCallback(async () => {
+    try { setAccount(accountFrom(await getSession())); } catch { /* keep what we had */ }
+  }, []);
+
+  return {
+    status, error, signIn, ensure, ready: status === 'ready',
+    emailWallet: account.emailWallet, hasPasskey: account.hasPasskey, verifyWith: account.verifyWith, refreshAccount,
+  };
 }

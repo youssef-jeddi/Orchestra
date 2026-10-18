@@ -34,7 +34,7 @@ export interface PlanStep {
 }
 
 export interface ResolvedStep {
-  action: "swap" | "send" | "add_liquidity" | "remove_liquidity" | "deposit" | "balance" | "price" | "positions";
+  action: "swap" | "send" | "add_liquidity" | "remove_liquidity" | "deposit" | "balance" | "price" | "positions" | "address";
   summary: string;
   plan: PlanStep;
   valueUsd: number;
@@ -88,7 +88,7 @@ async function resolveStep(step: StepT, order: number, ctx: ResolveContext): Pro
 
     case "balance": {
       const token = step.token ? requireToken(step.token) : null;
-      if (!ctx.connected) throw clarify("Connect a wallet first so I can check your balance.");
+      if (!ctx.connected) throw clarify("Connect your wallet first so I can check your balance.");
       return {
         action: "balance",
         summary: token ? `Your ${token.symbol} balance` : "Your balances",
@@ -98,11 +98,21 @@ async function resolveStep(step: StepT, order: number, ctx: ResolveContext): Pro
       };
     }
 
+    case "address": {
+      if (!ctx.connected) throw clarify("Sign in first so I can show your address.");
+      return {
+        action: "address",
+        summary: "Your addresses",
+        plan: planStep("native", "balance", {}, order),
+        valueUsd: 0,
+      };
+    }
+
     case "swap": {
       const from = requireToken(step.from);
       const to = requireToken(step.to);
       if (from.symbol === to.symbol) throw clarify(`You asked to swap ${from.symbol} for ${to.symbol}. Which token do you want to receive?`);
-      if (from.address === to.address) throw unsupported("Wrapping and unwrapping between ETH and WETH isn't supported yet.");
+      if (from.address === to.address) throw unsupported("Swapping between ETH and WETH (the same coin in a wrapped form) isn't supported yet.");
 
       let amountIn: string;
       let summary: string;
@@ -146,8 +156,8 @@ async function resolveStep(step: StepT, order: number, ctx: ResolveContext): Pro
 
     case "deposit": {
       const token = requireToken(step.token);
-      if (!ctx.connected) throw clarify("Connect a wallet first so I can move funds from it into your Safe.");
-      // The wallet funds the deposit and pays its gas, so amounts come from the wallet, not the Safe.
+      if (!ctx.connected) throw clarify("Connect your wallet first so I can move funds from it into your account.");
+      // The wallet funds the deposit and pays its network fee, so amounts come from the wallet, not the account.
       const fromWallet = () => (ctx.getWalletBalances ? ctx.getWalletBalances() : Promise.resolve(null));
       const amount = await resolveAmount(step.amount, step.unit, token, ctx, "deposit", fromWallet);
       await requireBalance(amount, token, ctx, "deposit", { getBalances: fromWallet, gasReserve: token.native ? ETH_GAS_RESERVE : 0 });
@@ -155,20 +165,20 @@ async function resolveStep(step: StepT, order: number, ctx: ResolveContext): Pro
       const valueUsd = computePlanValueUsd("deposit", params);
       return {
         action: "deposit",
-        summary: withUsd(`Move ${amount} ${token.symbol} from your wallet into your Safe`, valueUsd, token),
+        summary: withUsd(`Move ${amount} ${token.symbol} from your wallet into your account`, valueUsd, token),
         plan: planStep("native", "deposit", params, order, token.native ? "21000" : "80000"),
         valueUsd,
       };
     }
 
     case "positions": {
-      if (!ctx.connected) throw clarify("Connect a wallet first so I can look up your liquidity positions.");
+      if (!ctx.connected) throw clarify("Connect your wallet first so I can look up your liquidity positions.");
       const positions = await loadPositions(ctx);
       return { action: "positions", summary: describePositions(positions), plan: planStep("uniswap", "balance", {}, order), valueUsd: 0 };
     }
 
     case "remove_liquidity": {
-      if (!ctx.connected) throw clarify("Connect a wallet first so I can find your liquidity positions.");
+      if (!ctx.connected) throw clarify("Connect your wallet first so I can find your liquidity positions.");
       const percent = sharePercent(step.amount);
       const positions = await loadPositions(ctx);
       const open = positions.filter((p) => p.liquidity > 0n);
@@ -179,7 +189,7 @@ async function resolveStep(step: StepT, order: number, ctx: ResolveContext): Pro
       if (step.positionId) {
         candidates = open.filter((p) => p.tokenId === step.positionId);
         if (candidates.length === 0) {
-          throw clarify(`I couldn't find an open position #${step.positionId} in your Safe. ${describePositions(positions)}`);
+          throw clarify(`I couldn't find an open position #${step.positionId} in your account. ${describePositions(positions)}`);
         }
       } else {
         const holds = (p: Position, t: TokenDef) =>
@@ -187,7 +197,7 @@ async function resolveStep(step: StepT, order: number, ctx: ResolveContext): Pro
         candidates = open.filter((p) => (!a || holds(p, a)) && (!b || holds(p, b)));
       }
       if (candidates.length === 0) {
-        if (open.length === 0) throw unsupported("You don't have any liquidity positions in your Safe to remove.");
+        if (open.length === 0) throw unsupported("You don't have any liquidity positions in your account to remove.");
         throw clarify(`None of your positions hold ${[a?.symbol, b?.symbol].filter(Boolean).join(" and ")}. ${describePositions(positions)}`);
       }
       if (candidates.length > 1) {
@@ -207,7 +217,7 @@ async function resolveStep(step: StepT, order: number, ctx: ResolveContext): Pro
       const share = percent === 100 ? "all" : `${percent}%`;
       return {
         action: "remove_liquidity",
-        summary: `Remove ${share} of liquidity position #${p.tokenId} (${pairName(p)}): ≈${formatTokenAmount(back0, shown(p.token0.symbol))} ${shown(p.token0.symbol)} + ≈${formatTokenAmount(back1, shown(p.token1.symbol))} ${shown(p.token1.symbol)} back to your Safe, plus fees earned`,
+        summary: `Take out ${share} of liquidity position #${p.tokenId} (${pairName(p)}): ≈${formatTokenAmount(back0, shown(p.token0.symbol))} ${shown(p.token0.symbol)} + ≈${formatTokenAmount(back1, shown(p.token1.symbol))} ${shown(p.token1.symbol)} back to your account, plus the fees earned`,
         plan: planStep("uniswap", "remove_liquidity", params, order, "400000"),
         valueUsd,
       };
@@ -228,7 +238,7 @@ async function resolveStep(step: StepT, order: number, ctx: ResolveContext): Pro
       const valueUsd = computePlanValueUsd("add_liquidity", params);
       return {
         action: "add_liquidity",
-        summary: `Add liquidity: ${amountA} ${a.symbol} + ${amountB} ${b.symbol} (~$${formatUsd(valueUsd)})`,
+        summary: `Add liquidity (lend to a trading pool to earn fees): ${amountA} ${a.symbol} + ${amountB} ${b.symbol} (~$${formatUsd(valueUsd)})`,
         plan: planStep("uniswap", "add_liquidity", params, order, "500000"),
         valueUsd,
       };
@@ -251,7 +261,7 @@ function positionLine(p: Position): string {
 }
 
 function describePositions(positions: Position[]): string {
-  if (positions.length === 0) return "You don't have any liquidity positions in your Safe.";
+  if (positions.length === 0) return "You don't have any liquidity positions in your account.";
   const n = positions.length;
   return `You have ${n} liquidity position${n === 1 ? "" : "s"}:${positions.map((p) => `\n${positionLine(p)}`).join("")}`;
 }
@@ -276,7 +286,7 @@ function sharePercent(raw: string): number {
 function requireToken(raw: string): TokenDef {
   const token = lookupToken(raw);
   if (!token) {
-    throw unsupported(`I only support ${SUPPORTED_SYMBOLS.join(", ")} on Sepolia right now, and "${raw}" isn't one of them.`);
+    throw unsupported(`I only support ${SUPPORTED_SYMBOLS.join(", ")} on this test network right now, and "${raw}" isn't one of them.`);
   }
   return token;
 }
@@ -285,7 +295,7 @@ async function resolveRecipient(raw: string, ctx: ResolveContext): Promise<{ add
   const to = raw.trim();
   if (/^0x/i.test(to)) {
     if (!ethers.isAddress(to)) {
-      throw clarify(`"${to}" isn't a valid Ethereum address (wrong length or checksum). Can you double-check it?`);
+      throw clarify(`"${to}" isn't a valid wallet address (it looks mistyped). Can you double-check it?`);
     }
     const address = ethers.getAddress(to);
     if (address === ethers.ZeroAddress) throw unsupported("I won't send to the zero address. Funds sent there are lost.");
@@ -293,10 +303,10 @@ async function resolveRecipient(raw: string, ctx: ResolveContext): Promise<{ add
   }
   if (ENS_NAME.test(to)) {
     const address = await ctx.resolveEns(to.toLowerCase());
-    if (!address) throw clarify(`I couldn't find an address for ${to}. Can you give me the 0x address instead?`);
+    if (!address) throw clarify(`I couldn't find an address for ${to}. Can you give me the full address (starting with 0x) instead?`);
     return { address: ethers.getAddress(address), label: to.toLowerCase() };
   }
-  throw clarify(`Who should I send it to? I need a 0x address or an ENS name, not "${to}".`);
+  throw clarify(`Who should I send it to? I need a wallet address (starting with 0x) or a name like alice.eth, not "${to}".`);
 }
 
 type Purpose = "swap" | "send" | "deposit" | "receive";
@@ -315,14 +325,14 @@ async function resolveAmount(
     if (purpose === "receive") throw clarify(`How much ${token.symbol} do you want to receive?`);
     const fraction = raw.endsWith("%") ? Number(raw.slice(0, -1)) / 100 : 1;
     if (!(fraction > 0 && fraction <= 1)) throw clarify(`${raw} isn't a valid share of your balance. What percentage did you mean?`);
-    if (!ctx.connected) throw clarify(`Connect a wallet so I can work out ${raw} of your ${token.symbol}, or give me an exact amount.`);
+    if (!ctx.connected) throw clarify(`Connect your wallet so I can work out ${raw} of your ${token.symbol}, or give me an exact amount.`);
 
     const balances = await getBalances();
     if (!balances) throw clarify(`I couldn't read your ${token.symbol} balance right now. Can you give me an exact amount?`);
     const held = heldBalance(balances, token);
     const spendable = token.native ? Math.max(0, held - ETH_GAS_RESERVE) : held;
     const amount = spendable * fraction;
-    if (!(amount > 0)) throw clarify(`You don't have any ${token.symbol} to ${purpose}${token.native ? " after keeping a little for gas" : ""}.`);
+    if (!(amount > 0)) throw clarify(`You don't have any ${token.symbol} to ${purpose}${token.native ? " after keeping a little for network fees" : ""}.`);
     return formatAmount(amount, token);
   }
 
@@ -359,7 +369,7 @@ async function requireBalance(
   const reserve = opts.gasReserve ?? 0;
   if (Number(amount) + reserve > held) {
     const have = held > 0 ? `${formatAmount(held, token)} ${token.symbol}` : `no ${token.symbol}`;
-    const gas = reserve > 0 ? ` plus ~${reserve} ${token.symbol} for gas` : "";
+    const gas = reserve > 0 ? ` plus ~${reserve} ${token.symbol} for network fees` : "";
     throw unsupported(`Not enough ${token.symbol}: you have ${have}, but this ${purpose} needs ${amount} ${token.symbol}${gas}.`);
   }
 }

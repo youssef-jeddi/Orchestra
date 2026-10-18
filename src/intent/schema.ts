@@ -74,8 +74,11 @@ export const RemoveLiquidityStep = z.object({
 /** List the user's liquidity positions. */
 export const PositionsStep = z.object({ action: z.literal("positions") });
 
+/** Show the user's own addresses (wallet and Safe). The server fills them in, never the model. */
+export const AddressStep = z.object({ action: z.literal("address") });
+
 export const Step = z.discriminatedUnion("action", [
-  SwapStep, SendStep, BalanceStep, PriceStep, AddLiquidityStep, DepositStep, RemoveLiquidityStep, PositionsStep,
+  SwapStep, SendStep, BalanceStep, PriceStep, AddLiquidityStep, DepositStep, RemoveLiquidityStep, PositionsStep, AddressStep,
 ]);
 
 export const PlannerOutput = z.discriminatedUnion("type", [

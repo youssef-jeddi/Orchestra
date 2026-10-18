@@ -51,6 +51,17 @@ export async function authLogin(walletAddress, nonce, signature) {
   return bridgeFetch('/auth/login', { method: 'POST', body: JSON.stringify({ walletAddress, nonce, signature }) });
 }
 
+// Privy sign-in: the identity token proves the wallet is the user's, no signature needed.
+export async function authPrivy(walletAddress, identityToken) {
+  return bridgeFetch('/auth/privy', { method: 'POST', body: JSON.stringify({ walletAddress, identityToken }) });
+}
+
+// An email user's fresh email code, as Privy's new identity token: the server keeps it as the
+// single-use proof for their first passkey (and decides if it's fresh enough).
+export async function emailVerify(identityToken) {
+  return bridgeFetch('/passkey/email-verify', { method: 'POST', body: JSON.stringify({ identityToken }) });
+}
+
 export async function getSession() {
   return bridgeFetch('/auth/session');
 }
@@ -93,11 +104,13 @@ export async function checkSafe(address) {
   return bridgeFetch(`/check-safe?address=${address}`);
 }
 
-export async function deploySafe(ledgerAddress, spendingLimitUSD) {
-  return bridgeFetch('/onboard', {
-    method: 'POST',
-    body: JSON.stringify({ ledgerAddress, spendingLimitUSD }),
-  });
+/** Starts (or joins) the signed-in wallet's account setup; the server decides every value. */
+export async function startOnboarding() {
+  return bridgeFetch('/onboard', { method: 'POST', body: JSON.stringify({}) });
+}
+
+export async function getOnboardingStatus() {
+  return bridgeFetch('/onboard/status');
 }
 
 export async function getSafeBalances(address) {
@@ -167,9 +180,14 @@ export async function getPasskeyStatus(walletAddress) {
   return bridgeFetch(`/passkey/status?wallet=${walletAddress}`);
 }
 
-export async function passkeyRegisterOptions(walletAddress) {
+/** A check with the wallet's existing passkey ({ required, options }), needed to add another. */
+export async function passkeyConfirmOptions() {
+  return bridgeFetch('/passkey/confirm-options', { method: 'POST', body: '{}' });
+}
+
+export async function passkeyRegisterOptions(walletAddress, assertion) {
   return bridgeFetch('/passkey/register-options', {
-    method: 'POST', body: JSON.stringify({ walletAddress }),
+    method: 'POST', body: JSON.stringify({ walletAddress, assertion }),
   });
 }
 
@@ -177,6 +195,16 @@ export async function passkeyRegister(walletAddress, response) {
   return bridgeFetch('/passkey/register', {
     method: 'POST', body: JSON.stringify({ walletAddress, response }),
   });
+}
+
+/** The account's passkeys (no keys): { passkeys: [{ id, rpID, label, source, createdAt }] }. */
+export async function listPasskeys() {
+  return bridgeFetch('/passkey/list');
+}
+
+/** Remove a passkey; `assertion` is the check with an existing passkey. */
+export async function passkeyRemove(id, assertion) {
+  return bridgeFetch('/passkey/remove', { method: 'POST', body: JSON.stringify({ id, assertion }) });
 }
 
 export async function passkeyAuthOptions(walletAddress, approvalId) {
@@ -209,9 +237,12 @@ export async function telegramLinkRequest(walletAddress) {
   });
 }
 
-/** Send a one-time phone passkey setup link to the linked Telegram (needs a session). */
-export async function requestPhoneSetup() {
-  return bridgeFetch('/passkey/phone-setup', { method: 'POST', body: '{}' });
+/**
+ * Send a one-time phone passkey setup link to the linked Telegram (needs a
+ * session, and `assertion` from an existing passkey once the wallet has one).
+ */
+export async function requestPhoneSetup(assertion) {
+  return bridgeFetch('/passkey/phone-setup', { method: 'POST', body: JSON.stringify({ assertion }) });
 }
 
 export async function telegramLink(walletAddress, code, signature) {

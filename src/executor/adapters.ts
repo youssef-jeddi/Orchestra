@@ -20,6 +20,8 @@ import {
   type LpSide, type PoolState,
 } from "../integrations/uniswap/liquidity";
 import { tokenByAddress } from "../intent/tokens";
+import { requirePasskeyToMoveFunds } from "../integrations/passkey";
+import { isTopUpToOwnAccount } from "./topUp";
 import { TOKEN_DECIMALS, toTokenWei, symbolFromAddress, estimateUsd, checkSwapQuote, formatTokenAmount, type QuoteCheck } from "../policy";
 
 /** Uniswap's native-ETH sentinel. A WETH address would pull ERC-20 the Safe may not hold. */
@@ -58,7 +60,7 @@ interface QuoteLeg {
 function assessQuote(quote: any, leg: QuoteLeg): { amountOut: number | null; check: QuoteCheck | null; refusal?: string } {
   const raw = quote?.output?.amount ?? quote?.orderInfo?.outputs?.[0]?.startAmount;
   if (raw == null || !/^\d+$/.test(String(raw))) {
-    return { amountOut: null, check: null, refusal: "Not swapping: the Uniswap quote has no readable output amount, so its price can't be checked." };
+    return { amountOut: null, check: null, refusal: "Not swapping: I couldn't read how much you'd receive, so I can't check the price is fair." };
   }
   const amountOut = Number(ethers.formatUnits(String(raw), decimalsFor(leg.tokenOut)));
   const amountIn = Number(ethers.formatUnits(leg.amountIn, decimalsFor(leg.tokenIn)));
@@ -71,7 +73,7 @@ function swapSummary(amountIn: string, symbolIn: string, amountOut: number, symb
   const usd = estimateUsd(symbolIn, Number(amountIn));
   let s = `Swap ${amountIn} ${symbolIn} for ~${formatTokenAmount(amountOut, symbolOut)} ${symbolOut}`;
   if (symbolIn !== "USDC" && usd > 0) s += ` (~$${usd.toFixed(2)})`;
-  if (check && check.shortfall >= 0.01) s += `, ${(check.shortfall * 100).toFixed(1)}% below market`;
+  if (check && check.shortfall >= 0.01) s += `, ${(check.shortfall * 100).toFixed(1)}% below the market price`;
   return s;
 }
 
@@ -207,10 +209,15 @@ const sendAdapter: IntentAdapter = {
 const depositAdapter: IntentAdapter = {
   kind: "deposit",
   async build(ctx) {
-    if (!ctx.walletAddress) return { refusal: "Connect a wallet first so I can move funds from it into your Safe." };
-    if (!ctx.safeAddress) return { refusal: "You don't have a Safe yet. Create one first (the \"Create Safe\" button), then fund it." };
+    if (!ctx.walletAddress) return { refusal: "Connect your wallet first so I can move funds from it into your account." };
+    if (!ctx.safeAddress) return { refusal: "Your account isn't set up yet. It's created when you sign in, so try signing in again." };
     const built = await sendAdapter.build({ ...ctx, params: { ...ctx.params, to: ctx.safeAddress } });
     const sendData = (built.payload as any).sendData;
+    // Last check on what the user's own wallet will be asked to sign: nothing but a top-up of their
+    // own account (a passkey-gated wallet may sign this and nothing else).
+    if (!isTopUpToOwnAccount(sendData?.unsignedTx, ctx.safeAddress)) {
+      return { refusal: "I can only add ETH, USDC or WETH to your own account this way. To send money to someone else, confirm it with your passkey." };
+    }
     return { payload: { depositData: { ...sendData, safeAddress: ctx.safeAddress } } };
   },
 };
@@ -234,7 +241,7 @@ const addLiquidityAdapter: IntentAdapter = {
   async build(ctx) {
     const p = ctx.params;
     if (!ctx.safeAddress) {
-      return { refusal: "Adding liquidity runs from your Safe. Create one first (the \"Create Safe\" button), then fund it." };
+      return { refusal: "Adding liquidity runs from your account, which isn't set up yet. It's created when you sign in, so try signing in again." };
     }
     const a = lpSide(p.tokenA || WETH_SEPOLIA, p.symbolA || symbolFromAddress(p.tokenA || WETH_SEPOLIA, "WETH"), p.amountA || "0");
     const b = lpSide(p.tokenB || USDC_SEPOLIA, p.symbolB || symbolFromAddress(p.tokenB || USDC_SEPOLIA, "USDC"), p.amountB || "0");
@@ -245,9 +252,9 @@ const addLiquidityAdapter: IntentAdapter = {
     try {
       state = await readPool(ctx.provider, a.address, b.address, fee);
     } catch (err: any) {
-      return { refusal: `I couldn't read the Uniswap pool right now (${err.message}). Nothing was built.` };
+      return { refusal: `I couldn't read the trading pool right now (${err.message}). Nothing was done.` };
     }
-    if (!state) return { refusal: `There's no ${pair} Uniswap v3 pool on Sepolia.` };
+    if (!state) return { refusal: `There's no ${pair} trading pool on this test network.` };
 
     const [t0, t1] = orderSides(a, b);
     const problem = lpPriceProblem(state.sqrtPriceX96, t0, t1);
@@ -262,8 +269,8 @@ const addLiquidityAdapter: IntentAdapter = {
     const usedA = human(a, usedOf(a));
     const usedB = human(b, usedOf(b));
     const leftover = usedOf(a) < a.amount || usedOf(b) < b.amount;
-    const summary = `Add liquidity to ${pair} (full range): ≈${formatTokenAmount(usedA, a.symbol)} ${a.symbol} + ≈${formatTokenAmount(usedB, b.symbol)} ${b.symbol}` +
-      (leftover ? " at the pool's ratio; the rest stays in your Safe" : "");
+    const summary = `Add liquidity (lend to the ${pair} trading pool to earn fees): ≈${formatTokenAmount(usedA, a.symbol)} ${a.symbol} + ≈${formatTokenAmount(usedB, b.symbol)} ${b.symbol}` +
+      (leftover ? " at the pool's ratio; the rest stays in your account" : "");
     console.log(`[adapter:add_liquidity] ${summary} (pool ${state.pool})`);
 
     const lpData = {
@@ -287,7 +294,7 @@ const addLiquidityAdapter: IntentAdapter = {
     const b = lpSide(d.tokenB, d.symbolB, BigInt(d.amountB));
     const fee = Number(d.feeTier) || 3000;
     const state = await readPool(ctx.provider, a.address, b.address, fee);
-    if (!state) throw new Error("The Uniswap pool no longer exists.");
+    if (!state) throw new Error("The trading pool no longer exists.");
     const [t0, t1] = orderSides(a, b);
     const problem = lpPriceProblem(state.sqrtPriceX96, t0, t1);
     if (problem) throw new Error(problem);
@@ -312,7 +319,7 @@ const addLiquidityAdapter: IntentAdapter = {
 const removeLiquidityAdapter: IntentAdapter = {
   kind: "remove_liquidity",
   async build(ctx) {
-    if (!ctx.safeAddress) return { refusal: "Liquidity positions live in your Safe, and you don't have one yet." };
+    if (!ctx.safeAddress) return { refusal: "Liquidity positions live in your account, which isn't set up yet. It's created when you sign in, so try signing in again." };
     const p = ctx.params;
     const lpRemoveData = {
       tokenId: String(p.tokenId), percent: Number(p.percent),
@@ -332,12 +339,12 @@ const removeLiquidityAdapter: IntentAdapter = {
 
     const owner = await positionOwner(ctx.provider, d.tokenId).catch(() => null);
     if (!owner || owner.toLowerCase() !== ctx.safeAddress.toLowerCase()) {
-      throw new Error(`Position #${d.tokenId} is no longer held by your Safe.`);
+      throw new Error(`Position #${d.tokenId} is no longer in your account.`);
     }
     const position = (await readPositions(ctx.provider, ctx.safeAddress, tokenByAddress)).find((x) => x.tokenId === d.tokenId);
     if (!position || position.liquidity === 0n) throw new Error(`Position #${d.tokenId} has no liquidity left to remove.`);
     if (position.token0.address.toLowerCase() !== String(d.token0).toLowerCase() || position.token1.address.toLowerCase() !== String(d.token1).toLowerCase()) {
-      throw new Error(`Position #${d.tokenId} doesn't hold the approved tokens.`);
+      throw new Error(`Position #${d.tokenId} no longer matches what you approved.`);
     }
 
     const plan = planRemove(position, d.percent);
@@ -471,14 +478,28 @@ const swapAdapter: IntentAdapter = {
 };
 
 // ─── Registry ───
-const REGISTRY: Record<string, IntentAdapter> = {
-  [balanceAdapter.kind]: balanceAdapter,
-  [sendAdapter.kind]: sendAdapter,
-  [depositAdapter.kind]: depositAdapter,
-  [addLiquidityAdapter.kind]: addLiquidityAdapter,
-  [removeLiquidityAdapter.kind]: removeLiquidityAdapter,
-  [swapAdapter.kind]: swapAdapter,
-};
+/**
+ * Every execution, auto-executed or approved (passkey, Telegram, phone), runs through the
+ * registry's `execute`, so this is where the email-wallet rule lives: no passkey, no funds move.
+ * A call without a wallet is refused too, since the rule can't be checked.
+ */
+function withPasskeyGate(adapter: IntentAdapter): IntentAdapter {
+  const run = adapter.execute?.bind(adapter);
+  if (!run) return adapter;
+  return {
+    ...adapter,
+    async execute(ctx, built) {
+      if (!ctx.walletAddress) throw new Error("No wallet to execute for.");
+      await requirePasskeyToMoveFunds(ctx.walletAddress);
+      return run(ctx, built);
+    },
+  };
+}
+
+const REGISTRY: Record<string, IntentAdapter> = Object.fromEntries(
+  [balanceAdapter, sendAdapter, depositAdapter, addLiquidityAdapter, removeLiquidityAdapter, swapAdapter]
+    .map((a) => [a.kind, withPasskeyGate(a)]),
+);
 
 /** Look up the adapter for an intent kind, or undefined if none is registered. */
 export function getAdapter(kind: string): IntentAdapter | undefined {

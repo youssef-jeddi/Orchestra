@@ -121,7 +121,7 @@ test("describe: ERC-20 send is decoded from the calldata, ignoring the summary",
   const html = describeApproval(a);
   assert.match(html, /<b>Send 150 USDC<\/b>/);
   assert.match(html, new RegExp(`to <code>${VITALIK}</code>`));
-  assert.match(html, /over your daily auto-approve limit/);
+  assert.match(html, /over your daily limit for automatic actions/);
   assert.doesNotMatch(html, /alice/);
 });
 
@@ -140,13 +140,13 @@ test("describe: swap shows exact input, expected output and the market guard", (
   const html = describeApproval(a);
   assert.match(html, /Swap 10 USDC → ETH/);
   assert.match(html, /You spend exactly 10 USDC/);
-  assert.match(html, /≈ 0\.00372 ETH \(refused if more than 5% below market\)/);
+  assert.match(html, /≈ 0\.00372 ETH \(I won't go ahead if that's more than 5% below the market price\)/);
 });
 
 test("describe: an undecodable payload is flagged, never summarised", () => {
   const a = createApproval(base({ execution: { sendData: { unsignedTx: { to: USDC_SEPOLIA, value: "0", data: "0xdeadbeef" } } } }));
   const html = describeApproval(a);
-  assert.match(html, /couldn't decode this transaction/);
+  assert.match(html, /couldn't work out what this would do/);
   assert.doesNotMatch(html, /Send 150/);
 });
 
@@ -179,7 +179,7 @@ test("review + phone hint: structured review matches the message; the chat says 
   assert.doesNotMatch(describeApproval(a), /passkey/);
 });
 
-test("describe: add liquidity is decoded from lpData — max deposit, expected use, full range, to the Safe", () => {
+test("describe: add liquidity is decoded from lpData — max deposit, expected use, full range, to your account", () => {
   const a = createApproval(base({
     intentType: "add_liquidity",
     execution: { lpData: {
@@ -189,25 +189,26 @@ test("describe: add liquidity is decoded from lpData — max deposit, expected u
     } },
   }));
   const r = reviewOf(a);
-  assert.equal(r.title, "Add liquidity: ETH/USDC 0.3%");
+  assert.equal(r.title, "Add liquidity: ETH/USDC (0.3% pool)");
   assert.deepEqual(r.details.map((d) => d.value), [
+    "you lend these to a trading pool and earn a share of its fees",
     "0.01 ETH + 25 USDC",
-    "0.01 ETH + 25 USDC (the rest stays in your Safe)",
-    "full range (refused if the pool's price is far from market)",
-    "your Safe",
+    "0.01 ETH + 25 USDC (the rest stays in your account)",
+    "all prices (I won't go ahead if the pool's price is far from the market price)",
+    "your account",
   ]);
   const unknown = createApproval(base({ intentType: "add_liquidity", execution: { lpData: { tokenA: "0x0000000000000000000000000000000000000001", tokenB: USDC_SEPOLIA, feeTier: 3000 } } }));
   assert.equal(reviewOf(unknown).decoded, false);
 });
 
-test("describe: remove liquidity is decoded from lpRemoveData — position, share, back to the Safe", () => {
+test("describe: remove liquidity is decoded from lpRemoveData — position, share, back to your account", () => {
   const a = createApproval(base({
     intentType: "remove_liquidity",
     execution: { lpRemoveData: { tokenId: "1234", percent: 50, token0: USDC_SEPOLIA, token1: "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14", symbol0: "USDC", symbol1: "WETH", fee: 3000 } },
   }));
   const r = reviewOf(a);
-  assert.equal(r.title, "Remove liquidity: USDC/ETH 0.3%");
-  assert.deepEqual(r.details.map((d) => d.value), ["#1234", "50%", "USDC and ETH at the pool's current price, plus the fees earned", "your Safe"]);
+  assert.equal(r.title, "Take out liquidity: USDC/ETH (0.3% pool)");
+  assert.deepEqual(r.details.map((d) => d.value), ["#1234", "50%", "USDC and ETH at today's price, plus the fees earned", "your account"]);
   const bad = createApproval(base({ intentType: "remove_liquidity", execution: { lpRemoveData: { tokenId: "1234", percent: 150, token0: USDC_SEPOLIA, token1: USDC_SEPOLIA, fee: 3000 } } }));
   assert.equal(reviewOf(bad).decoded, false);
 });

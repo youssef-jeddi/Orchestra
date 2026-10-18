@@ -4,15 +4,36 @@
 
 import { startRegistration, startAuthentication } from '@simplewebauthn/browser';
 import {
-  passkeyRegisterOptions, passkeyRegister,
-  passkeyAuthOptions, passkeyApprove,
+  passkeyConfirmOptions, passkeyRegisterOptions, passkeyRegister,
+  passkeyAuthOptions, passkeyApprove, requestPhoneSetup, passkeyRemove,
 } from './bridge';
 
-/** Register a device passkey for this wallet. Prompts the OS biometric UI. */
+/**
+ * Adding a passkey to a wallet that already has one takes that passkey first:
+ * returns its assertion, or null when the wallet has none yet.
+ */
+async function confirmExistingPasskey() {
+  const { required, options } = await passkeyConfirmOptions();
+  if (!required) return null;
+  return startAuthentication({ optionsJSON: options });
+}
+
+/** Register a device passkey for this wallet. Prompts the OS biometric UI (twice if it already has one). */
 export async function registerPasskey(walletAddress) {
-  const optionsJSON = await passkeyRegisterOptions(walletAddress);
+  const assertion = await confirmExistingPasskey();
+  const optionsJSON = await passkeyRegisterOptions(walletAddress, assertion);
   const response = await startRegistration({ optionsJSON });
   return passkeyRegister(walletAddress, response);
+}
+
+/** Remove one of the account's passkeys, confirming with an existing one. Returns the updated list. */
+export async function removePasskey(id) {
+  return passkeyRemove(id, await confirmExistingPasskey());
+}
+
+/** Ask for a phone passkey setup link on Telegram, confirming with the existing passkey if there is one. */
+export async function setUpPhonePasskey() {
+  return requestPhoneSetup(await confirmExistingPasskey());
 }
 
 /**

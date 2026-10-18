@@ -16,7 +16,8 @@ import { executeSwap } from "../uniswap/execution";
 import { WETH_SEPOLIA, USDC_SEPOLIA, CHAIN_ID } from "../uniswap/types";
 import { write, read, append } from "../zero-g/storage";
 import { setComputeProvider, getComputeProvider } from "../zero-g/compute";
-import { deploySafe } from "../safe/deploy";
+import { onboarding, storedSpendingLimit } from "../safe/onboard";
+import { OnboardingError } from "../safe/onboarding";
 import { detectExistingSafe } from "../safe/detect";
 import { setInitialSpendingLimits, updateSpendingLimit, buildLimitUpdateTx } from "../safe/spendingLimit";
 import { getAgentAddress } from "../safe/agentWallet";
@@ -32,11 +33,13 @@ import {
   type ActivityRecord,
 } from "../../policy";
 import { getPolicyProfile, getRecentActivity, recordActivity, readUserProfile, writeUserProfile } from "../../policy/store";
-import { loginRequest, login, requireSession, sessionWallet, AuthError } from "../../auth";
+import { loginRequest, login, issueToken, requireSession, sessionWallet, AuthError } from "../../auth";
+import { verifyPrivyUser, importPrivyPasskeys, noteEmailSignIn, verifyEmailForPasskey } from "../../auth/privy";
 import { getAdapter, type Balances } from "../../executor/adapters";
 import { interpretIntent, assessAction } from "../../intent/pipeline";
 import { sanitizeHistory } from "../../intent/planner";
 import { fetchBalances, resolveEnsName } from "../../intent/context";
+import { describeAddresses, describeBalances } from "../../intent/replies";
 import { makeSepoliaProvider, withTimeout } from "../../utils/rpc";
 import {
   createApproval,
@@ -71,13 +74,21 @@ import {
   authenticationOptions,
   verifyAuthentication,
   hasPasskey,
+  hasAnyPasskey,
   hasPhonePasskey,
+  requirePasskeyToMoveFunds,
+  ownerCheckOptions,
+  verifyOwner,
+  listPasskeys,
+  removePasskey,
+  PasskeyError,
   phoneRp,
   browserRp,
   rpForOrigin,
   type RelyingParty,
 } from "../passkey";
 import { createSetupToken, getSetup, consumeSetup } from "../passkey/phoneSetup";
+import { isEmailWallet, hasEmailVerification, verificationAccountTypes } from "../passkey/emailGate";
 
 const provider = makeSepoliaProvider();
 const PORT = Number(process.env.PORT) || Number(process.env.LEDGER_BRIDGE_PORT) || 3001;
@@ -387,19 +398,22 @@ app.post("/intent", async (req, res) => {
 
     const safeAddress = await safeP;
     const balanceAddress = safeAddress || wallet || null;
-    const infoAssessment = { verdict: "INFO", riskScore: 0, reasons: ["Read-only query — no funds move."], requiresLedger: false, triggered: [], approvalMethod: "none" };
+    const infoAssessment = { verdict: "INFO", riskScore: 0, reasons: ["Just a lookup — no money moves."], requiresLedger: false, triggered: [], approvalMethod: "none" };
 
-    // ── Read-only: balance / price ──
+    // ── Read-only: balance / price / positions / address ──
     if (outcome.kind === "read") {
       const wantsBalance = outcome.steps.some((s) => s.action === "balance");
       const balances = wantsBalance ? await balancesP : null;
       const prices = outcome.steps.filter((s) => s.action === "price").map((s) => s.price!);
       const summary = outcome.steps
-        .map((s) => (s.action === "balance" ? describeBalances(balances, s.token) : s.summary))
+        .map((s) => (s.action === "balance" ? describeBalances(balances, s.token)
+          : s.action === "address" ? describeAddresses(wallet!, safeAddress)
+          : s.summary))
         .join(" · ");
+      const has = (action: string) => outcome.steps.some((s) => s.action === action);
       res.json({
         status: "ok",
-        intentType: wantsBalance ? "balance" : outcome.steps.some((s) => s.action === "positions") ? "positions" : "price",
+        intentType: wantsBalance ? "balance" : has("positions") ? "positions" : has("address") ? "address" : "price",
         autoExecuted: false,
         safeAddress,
         plan: { id: crypto.randomUUID(), summary, steps: [], totalEstimatedValueUsd: 0 },
@@ -415,6 +429,22 @@ app.post("/intent", async (req, res) => {
     // ── Value-bearing action: deterministic verdict ──
     const action = outcome.action;
     const intentType = action.intentType;
+
+    // A wallet that signed in with an email can't move funds, even small auto-executed amounts,
+    // until it holds a passkey: say so now, in the chat, before anything is built or held.
+    // (The registry's execute enforces the same rule for every path that gets past this.)
+    if (wallet) {
+      try {
+        await requirePasskeyToMoveFunds(wallet);
+      } catch (e: any) {
+        if (!(e instanceof PasskeyError)) throw e;
+        console.log(`[intent] ${intentType} held back: ${wallet} has no passkey yet`);
+        res.json({ status: "passkey_required", code: e.code, intentType, reason: e.message, reasoning: e.message, timing: timing() });
+        return;
+      }
+    }
+    const emailWallet = !!wallet && (await isEmailWallet(wallet));
+
     const [profile, activity] = await Promise.all([profileP, activityP]);
     const decision = assessAction(action, { profile, history: activity });
     const { verdict, riskScore } = decision;
@@ -539,12 +569,22 @@ app.post("/intent", async (req, res) => {
           console.log(`[approval] ${approval.id} sent to Telegram chat ${link.chatId} (${approval.factor})`);
         } catch (err: any) {
           // Fail closed: never fall back to a weaker factor because the phone was unreachable.
-          settle(approval, { error: `Telegram delivery failed: ${err.message}` });
+          settle(approval, { error: `I couldn't send the approval to Telegram: ${err.message}` });
           const reason = "I couldn't deliver the approval to your Telegram, so nothing will execute. Try again in a moment.";
           res.json({ status: "unsupported", intentType, reason, reasoning: reason, plan, timing: timing() });
           return;
         }
       }
+    }
+
+    // An email wallet approves with a passkey only. Without a server-held approval (no account
+    // yet, nothing to execute) the response would carry a transaction for the user's own wallet
+    // to sign, which this user must never be offered. A deposit is the one thing they sign
+    // themselves: their own wallet to their own account.
+    if (emailWallet && intentType !== "deposit" && !approval) {
+      const reason = "Your account isn't ready yet, so I can't do that right now. Try again in a moment.";
+      res.json({ status: "unsupported", intentType, reason, reasoning: reason, plan, timing: timing() });
+      return;
     }
 
     res.json({
@@ -578,13 +618,13 @@ function approvalExecution(intentType: string, payload: Record<string, unknown> 
 async function executeApproval(a: PendingApproval): Promise<{ txHash: string; explorerUrl: string }> {
   try {
     const adapter = getAdapter(a.intentType);
-    if (!adapter?.execute) throw new Error(`${a.intentType} can't be executed through the Safe`);
+    if (!adapter?.execute) throw new Error(`This ${a.intentType.replace(/_/g, " ")} can't be run from your account`);
     const ctx = {
       walletAddress: a.wallet, safeAddress: a.safeAddress, balanceAddress: a.safeAddress, provider,
       params: {}, planSummary: a.summary, planSteps: [], totalEstimatedValueUsd: a.valueUsd, balances: null,
     };
     const exec = await adapter.execute(ctx, { payload: a.execution });
-    if (!exec) throw new Error("execution produced no result");
+    if (!exec) throw new Error("It ran but gave no result, so I can't confirm it went through");
     const result = { txHash: exec.txHash, explorerUrl: exec.explorerUrl };
     settle(a, { result });
     console.log(`[approval] ${a.id} executed: ${exec.txHash}`);
@@ -609,7 +649,7 @@ async function refreshTelegramMessage(a: PendingApproval): Promise<void> {
 // background and the message is edited with the outcome.
 const onTelegramDecision: DecisionHandler = async ({ wallet, approvalId, approve }) => {
   const a = getApproval(approvalId);
-  if (!a || a.channel !== "telegram") return "Unknown approval.";
+  if (!a || a.channel !== "telegram") return "I can't find that approval. It may have expired.";
   if (a.wallet !== wallet) return "This approval belongs to another wallet.";
   if (a.status !== "pending") {
     await refreshTelegramMessage(a);
@@ -619,16 +659,22 @@ const onTelegramDecision: DecisionHandler = async ({ wallet, approvalId, approve
     reject(a.id, wallet);
     console.log(`[telegram] ${a.id} rejected`);
     await refreshTelegramMessage(a);
-    return "Rejected. Nothing was executed.";
+    return "You said no. Nothing was done.";
   }
   // Phone-passkey approvals can't be approved with a chat button (there is none,
   // but a crafted callback must not skip the passkey either).
   if (a.factor === "phone-passkey") return "Open “Review & approve” and confirm with your phone's passkey.";
+  try {
+    await requirePasskeyToMoveFunds(wallet);
+  } catch (e: any) {
+    if (e instanceof PasskeyError) return "Add a passkey in Orchestra first. Nothing was done.";
+    throw e;
+  }
   claim(a.id, wallet);
   console.log(`[telegram] ${a.id} approved — executing via Safe`);
-  await refreshTelegramMessage(a); // "⏳ executing…"
+  await refreshTelegramMessage(a); // "⏳ doing it…"
   executeApproval(a).catch(() => {}).finally(() => refreshTelegramMessage(a));
-  return "Approved. Executing…";
+  return "Approved. Doing it now…";
 };
 
 /** A wallet in the body must match the session (catches a stale session after switching accounts). */
@@ -648,15 +694,38 @@ function desktopRp(req: express.Request): RelyingParty {
 }
 
 function sendError(res: express.Response, err: any, fallbackStatus = 500): void {
+  if (err instanceof PasskeyError) { res.status(err.status).json({ error: err.message, code: err.code }); return; }
+  if (err instanceof OnboardingError) { res.status(err.status).json({ error: err.message, code: err.code }); return; }
   res.status(err instanceof ApprovalError ? err.status : fallbackStatus).json({ error: err.message });
 }
 
-function describeBalances(b: Balances | null, token?: string): string {
-  if (!b) return "I couldn't read your balance right now (the RPC endpoint didn't answer).";
-  if (token === "ETH") return `You have ${b.eth.toFixed(4)} ETH`;
-  if (token === "WETH") return `You have ${b.weth.toFixed(4)} WETH`;
-  if (token === "USDC") return `You have ${b.usdc.toFixed(2)} USDC`;
-  return `Portfolio: ${b.eth.toFixed(4)} ETH, ${b.weth.toFixed(4)} WETH, ${b.usdc.toFixed(2)} USDC (~$${b.totalUsd.toFixed(2)})`;
+/**
+ * Adding a passkey to a wallet that already has one takes a check with an
+ * existing passkey (`assertion`, over the challenge from /passkey/confirm-options).
+ * Returns whether that check was made; a wallet's first passkey needs none.
+ */
+async function checkOwnerToAddPasskey(wallet: string, req: express.Request): Promise<boolean> {
+  if (!(await hasAnyPasskey(wallet))) return false;
+  await verifyOwner(wallet, req.body?.assertion, desktopRp(req));
+  return true;
+}
+
+/** Tell the user on Telegram whenever a passkey is added or removed, so a change they didn't make doesn't go unnoticed. */
+async function notifyPasskeyChange(wallet: string, text: string): Promise<void> {
+  const link = telegramEnabled() ? await getLink(wallet) : null;
+  if (link) await sendText(link.chatId, text);
+}
+
+function notifyNewPasskey(wallet: string, where: string): void {
+  notifyPasskeyChange(wallet,
+    `🔑 A new passkey was added to your Orchestra account (${where}). It can approve transactions.\n` +
+    "If this wasn't you, remove it in Orchestra (🔑 Passkeys) and reject any approval you didn't ask for.").catch(() => {});
+}
+
+/** Where a passkey lives, in the user's words. */
+function describePasskey(p: { label: string; rpID: string; source?: string }): string {
+  const what = p.source === "privy" ? "sign-in passkey" : p.label === "phone" ? "phone passkey" : "browser passkey";
+  return `${what} on ${p.rpID}`;
 }
 
 // ─── Compute provider toggle ───
@@ -685,11 +754,42 @@ app.get("/passkey/status", async (req, res) => {
 });
 
 // Registering a passkey for a wallet requires a session for that wallet;
-// otherwise anyone could register one for a wallet that has none.
+// otherwise anyone could register one for a wallet that has none. Once the
+// wallet has a passkey, adding another also takes that passkey: a session alone
+// (stolen token, someone in the user's email) mustn't be able to add its own.
+//
+// 1. confirm-options → a check with an existing passkey, or { required: false }
+// 2. register-options with that check's assertion → options to create the new one
+// 3. register → the new passkey is verified and saved
+app.post("/passkey/confirm-options", requireSession, async (req, res) => {
+  try {
+    const walletAddress = res.locals.wallet as string;
+    if (!(await hasAnyPasskey(walletAddress))) { res.json({ required: false }); return; }
+    res.json({ required: true, options: await ownerCheckOptions(walletAddress, desktopRp(req)) });
+  } catch (e: any) { sendError(res, e); }
+});
+
+// An email wallet's first passkey needs a fresh check that it's them: an email code, or signing in
+// again with the same social account. The client has the user do it (Privy runs it), then sends the new identity token here; the server keeps
+// that as the wallet's single-use verification, which registration spends.
+app.post("/passkey/email-verify", requireSession, async (req, res) => {
+  try {
+    const walletAddress = res.locals.wallet as string;
+    const { expiresAt } = await verifyEmailForPasskey(req.body?.identityToken, walletAddress);
+    console.log(`[passkey] email code checked for ${walletAddress}`);
+    res.json({ status: "ok", verified: true, expiresAt });
+  } catch (e: any) {
+    if (e instanceof AuthError) { res.status(e.status).json({ error: e.message, code: "email_verification_failed" }); return; }
+    sendError(res, e);
+  }
+});
+
 app.post("/passkey/register-options", requireSession, async (req, res) => {
   try {
     const walletAddress = res.locals.wallet as string;
-    res.json(await registrationOptions(walletAddress, desktopRp(req)));
+    const rp = desktopRp(req);
+    const ownerChecked = await checkOwnerToAddPasskey(walletAddress, req);
+    res.json(await registrationOptions(walletAddress, rp, false, ownerChecked));
   } catch (e: any) { sendError(res, e); }
 });
 
@@ -698,10 +798,34 @@ app.post("/passkey/register", requireSession, async (req, res) => {
     const walletAddress = res.locals.wallet as string;
     const { response } = req.body;
     if (!response) { res.status(400).json({ error: "response required" }); return; }
-    await verifyRegistration(walletAddress, response, { rp: desktopRp(req) });
+    const rp = desktopRp(req);
+    await verifyRegistration(walletAddress, response, { rp });
     console.log(`[passkey] registered for ${walletAddress}`);
+    notifyNewPasskey(walletAddress, describePasskey({ label: "browser", rpID: rp.rpID }));
     res.json({ status: "ok", registered: true });
   } catch (e: any) { sendError(res, e, 400); }
+});
+
+// The account's passkeys, and removing one (with a check by an existing passkey,
+// from confirm-options; the last one can't be removed).
+app.get("/passkey/list", requireSession, async (_req, res) => {
+  try {
+    res.json({ passkeys: await listPasskeys(res.locals.wallet as string) });
+  } catch (e: any) { sendError(res, e); }
+});
+
+app.post("/passkey/remove", requireSession, async (req, res) => {
+  try {
+    const walletAddress = res.locals.wallet as string;
+    const { id, assertion } = req.body || {};
+    if (typeof id !== "string" || !id) { res.status(400).json({ error: "id required" }); return; }
+    await verifyOwner(walletAddress, assertion, desktopRp(req));
+    const removed = await removePasskey(walletAddress, id);
+    console.log(`[passkey] removed ${removed.label} passkey on ${removed.rpID} for ${walletAddress}`);
+    notifyPasskeyChange(walletAddress,
+      `🗑 A passkey was removed from your Orchestra account (${describePasskey(removed)}). It can no longer approve transactions.`).catch(() => {});
+    res.json({ status: "ok", passkeys: await listPasskeys(walletAddress) });
+  } catch (e: any) { sendError(res, e); }
 });
 
 // Passkey options for one pending approval. The challenge is derived from the
@@ -732,7 +856,7 @@ app.post("/passkey/approve", requireSession, async (req, res) => {
     if (!challenge) { res.status(400).json({ error: "Request passkey options for this approval first." }); return; }
 
     const ok = await verifyAuthentication(walletAddress, response, challenge, desktopRp(req));
-    if (!ok) { res.status(401).json({ error: "Passkey verification failed" }); return; }
+    if (!ok) { res.status(401).json({ error: "That passkey check didn't work. Please try again." }); return; }
 
     claim(a.id, walletAddress);
     console.log(`[passkey] ${a.id} approved by ${walletAddress} — executing via Safe`);
@@ -744,7 +868,7 @@ app.post("/passkey/approve", requireSession, async (req, res) => {
 // ─── Approval status (the frontend polls this while an approval is out on another channel) ───
 app.get("/approvals/:id", (req, res) => {
   const a = getApproval(req.params.id);
-  if (!a) { res.status(404).json({ error: "Unknown approval" }); return; }
+  if (!a) { res.status(404).json({ error: "I can't find that approval. It may have expired." }); return; }
   res.json(approvalView(a));
 });
 
@@ -774,13 +898,16 @@ function requirePhoneRp() {
   return rp;
 }
 
-app.post("/passkey/phone-setup", requireSession, async (_req, res) => {
+// Once the wallet has a passkey, asking for the link takes it too (see confirm-options):
+// relinking Telegram only needs the wallet, so Telegram alone doesn't prove the owner.
+app.post("/passkey/phone-setup", requireSession, async (req, res) => {
   try {
     const wallet = res.locals.wallet as string;
     const rp = requirePhoneRp();
     const link = telegramEnabled() ? await getLink(wallet) : null;
     if (!link) { res.status(400).json({ error: "Link Telegram first: the setup link is sent there." }); return; }
-    const token = createSetupToken(wallet);
+    const ownerChecked = await checkOwnerToAddPasskey(wallet, req);
+    const token = createSetupToken(wallet, { ownerChecked });
     await sendLinkMessage(
       link.chatId,
       "Set up a passkey on this phone for Orchestra. Once it's set up, risky transactions are confirmed here with it. Open the link on this phone (valid 10 minutes, one use).",
@@ -812,7 +939,7 @@ app.post("/phone/setup/verify", async (req, res) => {
     const entry = getSetup(token);
     if (!entry || !entry.challenge) { res.status(404).json({ error: "This setup link is invalid, used or expired. Ask for a new one in Orchestra." }); return; }
     consumeSetup(token); // single-use, pass or fail
-    await verifyRegistration(entry.wallet, response, { rp, challenge: entry.challenge, label: "phone" });
+    await verifyRegistration(entry.wallet, response, { rp, challenge: entry.challenge, ownerChecked: entry.ownerChecked, label: "phone" });
     console.log(`[passkey] phone passkey registered for ${entry.wallet}`);
     const link = await getLink(entry.wallet);
     if (link) sendText(link.chatId, "✅ Phone passkey set up. From now on, risky transactions are confirmed on this phone with it.").catch(() => {});
@@ -851,11 +978,11 @@ app.post("/phone/approvals/:id/approve", async (req, res) => {
     a.challenge = undefined; // single-use, pass or fail
     if (!challenge) { res.status(400).json({ error: "Start the passkey check for this approval first." }); return; }
     const ok = await verifyAuthentication(a.wallet, req.body?.response, challenge, rp);
-    if (!ok) { res.status(401).json({ error: "Passkey verification failed" }); return; }
+    if (!ok) { res.status(401).json({ error: "That passkey check didn't work. Please try again." }); return; }
 
     claim(a.id, a.wallet);
     console.log(`[passkey] ${a.id} approved with the phone passkey — executing via Safe`);
-    await refreshTelegramMessage(a); // "⏳ executing…"
+    await refreshTelegramMessage(a); // "⏳ doing it…"
     try {
       const result = await executeApproval(a);
       res.json({ status: "ok", ...result });
@@ -914,8 +1041,38 @@ app.post("/auth/login", (req, res) => {
   } catch (e: any) { res.status(e instanceof AuthError ? e.status : 400).json({ error: e.message }); }
 });
 
-app.get("/auth/session", requireSession, (_req, res) => {
-  res.json({ wallet: res.locals.wallet });
+// Privy sign-in (passkey/email with an embedded wallet, or an external wallet):
+// the identity token proves the user owns the wallet, so no second signature.
+// A Privy sign-in passkey also becomes the wallet's approval passkey.
+app.post("/auth/privy", async (req, res) => {
+  try {
+    const { walletAddress, identityToken } = req.body || {};
+    const user = await verifyPrivyUser(identityToken, walletAddress);
+    const emailWallet = await noteEmailSignIn(user, walletAddress); // before the passkey import: it checks the flag
+    const session = issueToken(walletAddress);
+    console.log(`[auth] session issued for ${session.wallet} (Privy${emailWallet ? ", email" : ""})`);
+    const rp = rpForOrigin(req.headers.origin);
+    if (rp) {
+      try {
+        const { held, added } = await importPrivyPasskeys(user, walletAddress, rp.rpID);
+        if (held) console.log(`[passkey] sign-in passkey ready for approvals on ${rp.rpID} (${session.wallet})`);
+        if (added) notifyNewPasskey(session.wallet, describePasskey({ label: "browser", rpID: rp.rpID, source: "privy" }));
+      } catch (e: any) {
+        console.warn(`[passkey] couldn't load the Privy passkey for ${session.wallet}: ${e.message}`);
+      }
+    }
+    res.json({ ...session, emailWallet });
+  } catch (e: any) { res.status(e instanceof AuthError ? e.status : 400).json({ error: e.message }); }
+});
+
+// Where the session's wallet stands for passkeys: the chat asks an email wallet without one to add it.
+app.get("/auth/session", requireSession, async (_req, res) => {
+  try {
+    const wallet = res.locals.wallet as string;
+    const [emailWallet, passkey] = await Promise.all([isEmailWallet(wallet), hasAnyPasskey(wallet)]);
+    // verifyWith: which account types can confirm the first passkey, so the chat offers the right step
+    res.json({ wallet, emailWallet, hasPasskey: passkey, emailVerified: emailWallet && hasEmailVerification(wallet), verifyWith: emailWallet ? await verificationAccountTypes(wallet) : [] });
+  } catch (e: any) { sendError(res, e); }
 });
 
 // ─── Policy config ───
@@ -974,91 +1131,30 @@ app.post("/policy", requireSession, async (req, res) => {
 });
 
 // ─── Safe onboarding ───
+// Called automatically at sign-in. Starts (or joins) the wallet's one deployment and returns at
+// once with the account address; the client polls /onboard/status. The body is ignored: the
+// wallet is the session's and policy values are the server's defaults.
 app.post("/onboard", requireSession, async (req, res) => {
   try {
-    const ledgerAddress = ethers.getAddress(res.locals.wallet);
+    const wallet = ethers.getAddress(res.locals.wallet);
     if (!sameWalletOrAbsent(req.body?.ledgerAddress, res)) return;
-    const { spendingLimitUSD = 100 } = req.body;
-
-    console.log(`[onboard] Checking Safe for ${ledgerAddress}...`);
-
-    // Check for existing Safe
-    const existing = await detectExistingSafe(ledgerAddress);
-    if (existing) {
-      const stored = await read(`safe:${ledgerAddress.toLowerCase()}`);
-      console.log(`[onboard] Returning user — Safe: ${existing}`);
-      res.json({
-        isNewUser: false,
-        safeAddress: existing,
-        spendingLimitUSD: (stored as any)?.spendingLimitUSD || 100,
-      });
-      return;
-    }
-
-    // New user — deploy Safe
-    console.log(`[onboard] New user — deploying Safe...`);
-    let agentWalletAddress: string;
-    try {
-      agentWalletAddress = getAgentAddress();
-    } catch {
-      res.status(500).json({ error: "Agent wallet not configured (AGENT_PRIVATE_KEY)" });
-      return;
-    }
-
-    const safeAddress = await deploySafe(ledgerAddress, agentWalletAddress, provider);
-
-    // Set spending limits (non-blocking — may fail on some Safe SDK versions)
-    const agentKey = process.env.AGENT_PRIVATE_KEY!;
-    try {
-      await setInitialSpendingLimits(safeAddress, agentWalletAddress, spendingLimitUSD, agentKey);
-    } catch (limitErr: any) {
-      console.warn(`[onboard] Spending limits setup deferred: ${limitErr.message}`);
-    }
-
-    // Register on OrchestraPolicy
-    let policyTxHash: string | undefined;
-    const policyAddress = process.env.ORCHESTRA_POLICY_ADDRESS;
-    if (policyAddress) {
-      const policyAbi = ['function registerSafe(address safeAddress, address agentWallet, uint256 spendingLimitUSD) external'];
-      const agentWallet = new ethers.Wallet(agentKey, provider);
-      const policy = new ethers.Contract(policyAddress, policyAbi, agentWallet);
-      const tx = await policy.registerSafe(safeAddress, agentWalletAddress, spendingLimitUSD * 100);
-      await tx.wait();
-      policyTxHash = tx.hash;
-      console.log(`[onboard] Policy registered: ${policyTxHash}`);
-    }
-
-    // Write to 0G Storage
-    await write(`safe:${ledgerAddress.toLowerCase()}`, {
-      safeAddress,
-      agentWallet: agentWalletAddress,
-      spendingLimitUSD,
-      deployedAt: new Date().toISOString(),
-    });
-
-    // Merge: keep any existing guardrail policy instead of wiping it.
-    const existingProfile = await readUserProfile(ledgerAddress);
-    await writeUserProfile(ledgerAddress, {
-      ...existingProfile,
-      address: ledgerAddress,
-      safeAddress,
-      riskTolerance: existingProfile.riskTolerance || "moderate",
-      autoApproveLimit: spendingLimitUSD,
-      preferredTokens: existingProfile.preferredTokens || ["USDC", "WETH", "ETH"],
-      createdAt: existingProfile.createdAt || new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    });
-
-    console.log(`[onboard] New user onboarded — Safe: ${safeAddress}`);
+    const result = await onboarding.start(wallet, req.ip || "unknown");
     res.json({
-      isNewUser: true,
-      safeAddress,
-      spendingLimitUSD,
-      policyTxHash,
+      ...result,
+      isNewUser: !!result.started && !result.resumed, // finishing an older account's setup is not a new user
+      spendingLimitUSD: await storedSpendingLimit(wallet),
     });
   } catch (err: any) {
-    console.error("[onboard] Error:", err.message);
-    res.status(500).json({ error: err.message });
+    if (!(err instanceof OnboardingError)) console.error("[onboard] Error:", err.message);
+    sendError(res, err);
+  }
+});
+
+app.get("/onboard/status", requireSession, async (_req, res) => {
+  try {
+    res.json(await onboarding.status(ethers.getAddress(res.locals.wallet)));
+  } catch (err: any) {
+    sendError(res, err);
   }
 });
 
@@ -1115,7 +1211,7 @@ app.post("/prepare-limit-update", requireSession, async (req, res) => {
 
     const stored = await read(`safe:${ledgerAddress.toLowerCase()}`);
     if (!stored) {
-      res.status(400).json({ error: "No Safe found. Complete onboarding first." });
+      res.status(400).json({ error: "Your account isn't set up yet. Sign in again to set it up." });
       return;
     }
     const safeAddress = (stored as any).safeAddress;
@@ -1146,7 +1242,7 @@ app.post("/finalize-limit-update", requireSession, async (req, res) => {
 
     const stored = await read(`safe:${ledgerAddress.toLowerCase()}`);
     if (!stored) {
-      res.status(400).json({ error: "No Safe found." });
+      res.status(400).json({ error: "Your account isn't set up yet." });
       return;
     }
 

@@ -1,0 +1,246 @@
+// ─── Auth — Privy sign-in tests (no network: tokens signed with a local key) ───
+// Run with `npm run test:privy`.
+
+import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import { ethers } from "ethers";
+import { generateKeyPair, SignJWT, type CryptoKey } from "jose";
+import { softPasskey, TEST_RP as RP } from "../integrations/passkey/softPasskey";
+
+process.env.STORAGE_BACKEND = "memory";
+const APP_ID = "test-privy-app";
+process.env.PRIVY_APP_ID = APP_ID;
+
+const embedded = ethers.Wallet.createRandom().address;
+const external = ethers.Wallet.createRandom().address;
+const stranger = ethers.Wallet.createRandom().address;
+
+let passed = 0;
+const tests: [string, () => void | Promise<void>][] = [];
+const test = (name: string, fn: () => void | Promise<void>) => tests.push([name, fn]);
+
+(async () => {
+  const auth = await import("./index");
+  const { privyLogin, verifyPrivyUser, importPrivyPasskeys, noteEmailSignIn, verifyEmailForPasskey, _setVerificationKey, _setUserFetcher } = await import("./privy");
+  const passkey = await import("../integrations/passkey");
+  const storage = await import("../integrations/zero-g/storage");
+  auth._setSecret("test-secret-test-secret-test-secret!");
+
+  const privy = await generateKeyPair("ES256");
+  const impostor = await generateKeyPair("ES256");
+  _setVerificationKey(privy.publicKey);
+
+  // The claims Privy puts in an identity token (linked_accounts is a JSON string).
+  const idToken = (opts: { key?: CryptoKey; aud?: string; exp?: string | number; accounts?: unknown[] } = {}) =>
+    new SignJWT({
+      cr: String(Math.floor(Date.now() / 1000)),
+      linked_accounts: JSON.stringify(opts.accounts ?? [
+        { type: "passkey", credential_id: "abc", lv: 1 },
+        { type: "wallet", address: embedded, chain_type: "ethereum", wallet_client_type: "privy", id: "w1", lv: 1 },
+        { type: "wallet", address: external, chain_type: "ethereum", wallet_client_type: "metamask", lv: 1 },
+      ]),
+    })
+      .setProtectedHeader({ alg: "ES256", typ: "JWT" })
+      .setIssuer("privy.io")
+      .setAudience(opts.aud ?? APP_ID)
+      .setSubject("did:privy:user1")
+      .setIssuedAt()
+      .setExpirationTime(opts.exp ?? "1h")
+      .sign(opts.key ?? privy.privateKey);
+
+  const status = async (fn: () => Promise<unknown>) => {
+    try { await fn(); } catch (e) { return e instanceof auth.AuthError ? e.status : -1; }
+    return 0;
+  };
+
+  test("the embedded wallet of a passkey user gets a session", async () => {
+    const s = await privyLogin(await idToken(), embedded);
+    assert.equal(s.wallet, embedded.toLowerCase());
+    assert.equal(auth.verifyToken(s.token), embedded.toLowerCase());
+  });
+
+  test("an external wallet linked through Privy gets a session (any letter case)", async () => {
+    const s = await privyLogin(await idToken(), external.toLowerCase());
+    assert.equal(auth.verifyToken(s.token), external.toLowerCase());
+  });
+
+  test("a wallet that isn't linked to the user is refused", async () => {
+    assert.equal(await status(async () => privyLogin(await idToken(), stranger)), 403);
+  });
+
+  test("a Solana account with the same address string doesn't count", async () => {
+    const token = await idToken({ accounts: [{ type: "wallet", address: stranger, chain_type: "solana", lv: 1 }] });
+    assert.equal(await status(() => privyLogin(token, stranger)), 403);
+  });
+
+  test("a token signed by another key is refused", async () => {
+    assert.equal(await status(async () => privyLogin(await idToken({ key: impostor.privateKey }), embedded)), 401);
+  });
+
+  test("a token issued for another Privy app is refused", async () => {
+    assert.equal(await status(async () => privyLogin(await idToken({ aud: "some-other-app" }), embedded)), 401);
+  });
+
+  test("an expired token is refused", async () => {
+    const past = Math.floor(Date.now() / 1000) - 60;
+    assert.equal(await status(async () => privyLogin(await idToken({ exp: past }), embedded)), 401);
+  });
+
+  test("bad input is a 400, and no PRIVY_APP_ID is a 501", async () => {
+    assert.equal(await status(() => privyLogin(undefined, embedded)), 400);
+    assert.equal(await status(async () => privyLogin(await idToken(), "not-an-address")), 400);
+    delete process.env.PRIVY_APP_ID;
+    try {
+      assert.equal(await status(async () => privyLogin(await idToken(), embedded)), 501);
+    } finally {
+      process.env.PRIVY_APP_ID = APP_ID;
+    }
+  });
+
+  // ── Sign-in passkey → approval passkey ──
+  const signInKey = softPasskey();
+  const passkeyUser = async () => verifyPrivyUser(await idToken({ accounts: [
+    { type: "passkey", credential_id: signInKey.id, lv: 1 },
+    { type: "wallet", address: embedded, chain_type: "ethereum", wallet_client_type: "privy", id: "w1", lv: 1 },
+  ] }), embedded);
+  // What Privy's API returns for the user: the passkey with its public key.
+  const privyApi = (publicKey = signInKey.publicKey) => {
+    const calls: string[] = [];
+    _setUserFetcher(async (id) => {
+      calls.push(id);
+      return { id, linked_accounts: [{ type: "passkey", credential_id: signInKey.id, public_key: publicKey }] } as any;
+    });
+    return calls;
+  };
+
+  test("the sign-in passkey approves: its assertion over an approval challenge verifies", async () => {
+    await storage.clear();
+    const calls = privyApi();
+    assert.deepEqual(await importPrivyPasskeys(await passkeyUser(), embedded, RP.rpID), { held: 1, added: 1 });
+    assert.deepEqual(calls, ["did:privy:user1"]);
+    assert.equal(await passkey.hasPasskey(embedded), true);
+
+    const challenge = Buffer.from(crypto.randomBytes(32)).toString("base64url"); // stands in for the payload-hash challenge
+    assert.equal(await passkey.verifyAuthentication(embedded, signInKey.assert(challenge), challenge, RP), true);
+  });
+
+  test("another key, another challenge or another domain doesn't pass", async () => {
+    const challenge = crypto.randomBytes(32).toString("base64url");
+    const other = softPasskey();
+    const forged = { ...other.assert(challenge), id: signInKey.id, rawId: signInKey.id }; // claims the sign-in passkey's id
+    await assert.rejects(async () => assert.equal(await passkey.verifyAuthentication(embedded, forged, challenge, RP), true));
+    await assert.rejects(passkey.verifyAuthentication(embedded, signInKey.assert("other-challenge"), challenge, RP));
+    await assert.rejects(passkey.verifyAuthentication(embedded, signInKey.assert(challenge, "https://evil.example", "evil.example"), challenge, RP));
+  });
+
+  test("signing in again keeps one credential and its counter", async () => {
+    privyApi();
+    assert.deepEqual(await importPrivyPasskeys(await passkeyUser(), embedded, RP.rpID), { held: 1, added: 0 });
+    const stored = (await storage.read(`passkey:${embedded.toLowerCase()}`)) as any;
+    assert.equal(stored.creds.length, 1);
+    assert.equal(stored.creds[0].source, "privy");
+  });
+
+  test("a passkey added to the Privy account later isn't imported for a wallet that has one", async () => {
+    await storage.clear();
+    privyApi();
+    assert.deepEqual(await importPrivyPasskeys(await passkeyUser(), embedded, RP.rpID), { held: 1, added: 1 });
+    // Someone with the user's email links their own passkey to the Privy account, then signs in.
+    const intruder = softPasskey();
+    _setUserFetcher(async (id) => ({ id, linked_accounts: [
+      { type: "passkey", credential_id: signInKey.id, public_key: signInKey.publicKey },
+      { type: "passkey", credential_id: intruder.id, public_key: intruder.publicKey },
+    ] }) as any);
+    assert.deepEqual(await importPrivyPasskeys(await passkeyUser(), embedded, RP.rpID), { held: 1, added: 0 });
+    const challenge = crypto.randomBytes(32).toString("base64url");
+    await assert.rejects(passkey.verifyAuthentication(embedded, intruder.assert(challenge), challenge, RP), /isn't registered/);
+  });
+
+  test("a public key that isn't a COSE key is refused (fails closed)", async () => {
+    await storage.clear();
+    privyApi(Buffer.from("not a key").toString("base64url"));
+    assert.deepEqual(await importPrivyPasskeys(await passkeyUser(), embedded, RP.rpID), { held: 0, added: 0 });
+    assert.equal(await passkey.hasPasskey(embedded), false);
+  });
+
+  test("no passkey on the account, or no app secret: nothing is imported", async () => {
+    await storage.clear();
+    const calls = privyApi();
+    const walletUser = await verifyPrivyUser(await idToken(), external); // the default accounts have a passkey…
+    const noPasskey = { ...walletUser, linked_accounts: walletUser.linked_accounts.filter((a) => a.type !== "passkey") };
+    assert.deepEqual(await importPrivyPasskeys(noPasskey, external, RP.rpID), { held: 0, added: 0 });
+    assert.equal(calls.length, 0, "Privy's API isn't called for users without a passkey");
+
+    _setUserFetcher(null);
+    delete process.env.PRIVY_APP_SECRET;
+    assert.deepEqual(await importPrivyPasskeys(await passkeyUser(), embedded, RP.rpID), { held: 0, added: 0 });
+    assert.equal(await passkey.hasPasskey(embedded), false);
+  });
+
+  // ── Email sign-in: flagged at sign-in, first passkey needs a fresh code in the token ──
+  const emailWallet = ethers.Wallet.createRandom().address;
+  const emailToken = (agoSec: number, extra: unknown[] = []) => idToken({ accounts: [
+    { type: "email", address: "a@b.c", lv: Math.floor(Date.now() / 1000) - agoSec },
+    { type: "wallet", address: emailWallet, chain_type: "ethereum", wallet_client_type: "privy", id: "w9", lv: 1 },
+    ...extra,
+  ] });
+  const gate = await import("../integrations/passkey/emailGate");
+  const kind = async (fn: () => Promise<unknown>) => { try { await fn(); } catch (e: any) { return e.status; } return 0; };
+
+  test("an email sign-in is flagged, a passkey or wallet sign-in is not, and the flag sticks", async () => {
+    await storage.clear();
+    assert.equal(await noteEmailSignIn(await verifyPrivyUser(await idToken(), embedded), embedded), false); // passkey user
+    assert.equal(await noteEmailSignIn(await verifyPrivyUser(await idToken(), external), external), false); // MetaMask via Privy
+    assert.equal(await noteEmailSignIn(await verifyPrivyUser(await emailToken(5), emailWallet), emailWallet), true);
+    // A later sign-in whose token no longer looks like an email one doesn't lift it.
+    const later = { id: "did:privy:user1", linked_accounts: [] } as any;
+    assert.equal(await noteEmailSignIn(later, emailWallet), true);
+  });
+
+  test("a fresh email code in the identity token becomes the wallet's one verification", async () => {
+    gate._resetEmailGate();
+    const { expiresAt } = await verifyEmailForPasskey(await emailToken(5), emailWallet);
+    assert.ok(Date.parse(expiresAt) > Date.now());
+    assert.equal(gate.hasEmailVerification(emailWallet), true);
+    assert.equal(await gate.consumeEmailVerification(emailWallet), true);
+    assert.equal(gate.hasEmailVerification(emailWallet), false);
+    assert.equal(await kind(async () => verifyEmailForPasskey(await emailToken(5), emailWallet)), 409); // same code again
+  });
+
+  test("ATTACK: an old identity token, a forged one, or another wallet's gets no verification", async () => {
+    gate._resetEmailGate();
+    assert.equal(await kind(async () => verifyEmailForPasskey(await emailToken(3600), emailWallet)), 403); // stale
+    assert.equal(await kind(async () => verifyEmailForPasskey(await idToken({ key: impostor.privateKey, accounts: [
+      { type: "email", address: "a@b.c", lv: Math.floor(Date.now() / 1000) },
+      { type: "wallet", address: emailWallet, chain_type: "ethereum", wallet_client_type: "privy", id: "w9", lv: 1 },
+    ] }), emailWallet)), 401); // forged
+    assert.equal(await kind(async () => verifyEmailForPasskey(await idToken(), embedded)), 400); // not an email wallet
+    assert.equal(gate.hasEmailVerification(emailWallet), false);
+    assert.equal(gate.hasEmailVerification(embedded), false);
+  });
+
+  test("a Google user: signing in again with the same account verifies; a Google account linked later gets 'not the account you signed up with'", async () => {
+    await storage.clear();
+    gate._resetEmailGate();
+    const w = ethers.Wallet.createRandom().address;
+    const now = Math.floor(Date.now() / 1000);
+    const token = (accounts: any[]) => idToken({ accounts: [...accounts, { type: "wallet", address: w, chain_type: "ethereum", wallet_client_type: "privy", id: "w10", lv: 1 }] });
+    const g = (subject: string, agoSec: number) => ({ type: "google_oauth", subject, email: "a@b.c", lv: now - agoSec });
+    assert.equal(await noteEmailSignIn(await verifyPrivyUser(await token([g("g-1", 5)]), w), w), true);
+    assert.equal(await kind(async () => verifyEmailForPasskey(await token([g("g-1", 3600), g("g-2", 5)]), w)), 403); // only the new account is fresh
+    assert.equal(gate.hasEmailVerification(w), false);
+    const { expiresAt } = await verifyEmailForPasskey(await token([g("g-1", 5), g("g-2", 3600)]), w);
+    assert.ok(Date.parse(expiresAt) > Date.now());
+  });
+
+  console.log("privy");
+  for (const [name, fn] of tests) {
+    await fn();
+    passed++;
+    console.log(`  ✓ ${name}`);
+  }
+  console.log(`\n${passed} passed`);
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
