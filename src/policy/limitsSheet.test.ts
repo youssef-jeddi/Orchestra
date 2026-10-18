@@ -27,7 +27,7 @@ test("habit line: one plain sentence, never the raw number of samples or a rule 
   assert.match(l.habitLine(null), /still learning/);
   assert.match(l.habitLine({ typicalMaxUsd: null }), /still learning/);
   const line = l.habitLine({ typicalMaxUsd: 12.5, sampleSize: 9 });
-  assert.equal(line, "You usually send around $12.5, so I'll ask before anything much bigger.");
+  assert.equal(line, "You usually send around $12.50, so I'll ask before anything much bigger.");
   assert.ok(!JARGON.test(line));
 });
 
@@ -47,7 +47,7 @@ test("form: only changed fields are sent; blank count removes the cap; 0 is a va
 test("form: bad entries get a plain sentence, with the highest limit $1,000", () => {
   for (const daily of ["", "abc", "-5", "1001", "1e3", "5.555"]) {
     const r = l.changesFrom({ daily, count: "" }, {});
-    assert.match(r.error, /Enter an amount from \$0 to \$1000/, daily);
+    assert.match(r.error, /Enter an amount from \$0 to \$1,000/, daily);
   }
   for (const count of ["-1", "1.5", "101", "x"]) {
     assert.match(l.changesFrom({ daily: "10", count }, {}).error, /whole number from 0 to 100/, count);

@@ -4,6 +4,8 @@
 // (src/policy/limits.ts); this file only turns the form into the changes to send, and the answers
 // into sentences. Pure, so it's tested without a browser (src/policy/limitsSheet.test.ts).
 
+import { formatUsd } from './money';
+
 export const MAX_DAILY = 1000;
 export const MAX_COUNT = 100;
 export const DEFAULT_DAILY = 100;
@@ -30,8 +32,7 @@ export const LIMITS_BUTTON_HINT = 'See and change how much I can do without aski
 /** One plain line on what the agent has learned about usual amounts (from /habit), no jargon. */
 export function habitLine(habit) {
   if (!habit || !habit.typicalMaxUsd) return "I'm still learning what you usually send.";
-  const usual = Math.round(habit.typicalMaxUsd * 100) / 100;
-  return `You usually send around $${usual}, so I'll ask before anything much bigger.`;
+  return `You usually send around ${formatUsd(habit.typicalMaxUsd)}, so I'll ask before anything much bigger.`;
 }
 
 /** What to say while the proof for raising a limit is being collected. */
@@ -62,7 +63,7 @@ export function changesFrom(form, policy) {
   const out = {};
   const daily = String(form.daily ?? '').trim();
   if (daily === '' || !/^\d+(\.\d{1,2})?$/.test(daily) || Number(daily) > MAX_DAILY) {
-    return { error: `Enter an amount from $0 to $${MAX_DAILY}.` };
+    return { error: `Enter an amount from $0 to ${formatUsd(MAX_DAILY)}.` };
   }
   if (Number(daily) !== (policy?.dailyLimitUsd ?? DEFAULT_DAILY)) out.dailyLimitUsd = Number(daily);
 

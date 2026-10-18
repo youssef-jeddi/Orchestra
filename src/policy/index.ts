@@ -11,6 +11,7 @@
 // velocity caps) that replaces — rather than patches — the Gatekeeper LLM verdict.
 
 import { estimateUsd, resolveValuationSymbol } from "./prices";
+import { formatUsd } from "./money";
 
 export type Verdict = "AUTO_EXECUTE" | "NEEDS_APPROVAL" | "BLOCKED" | "INFO";
 
@@ -282,7 +283,7 @@ export function decide(input: DecisionInput): PolicyDecision {
   } else if (spentToday + valueUsd > dailyLimitUsd) {
     escalations.push({
       rule: "daily-limit",
-      reason: `This would go over your $${dailyLimitUsd} daily limit for automatic actions ($${spentToday} used today), so it needs your OK.`,
+      reason: `This would go over your ${formatUsd(dailyLimitUsd)} daily limit for automatic actions (${formatUsd(spentToday)} used today), so it needs your OK.`,
       risk: 70,
     });
   }
@@ -329,7 +330,7 @@ export function decide(input: DecisionInput): PolicyDecision {
     if (profile.typicalMaxUsd != null && profile.typicalMaxUsd > 0 && valueUsd > profile.typicalMaxUsd * HABIT_ANOMALY_MULTIPLE) {
       escalations.push({
         rule: "habit-anomaly",
-        reason: `$${valueUsd} is bigger than you usually move (typically up to $${profile.typicalMaxUsd}), so it needs your OK.`,
+        reason: `${formatUsd(valueUsd)} is bigger than you usually move (typically up to ${formatUsd(profile.typicalMaxUsd)}), so it needs your OK.`,
         risk: 55,
       });
     }
@@ -350,7 +351,7 @@ export function decide(input: DecisionInput): PolicyDecision {
   return {
     verdict: "AUTO_EXECUTE",
     riskScore: 15,
-    reason: `$${valueUsd} is within your $${dailyLimitUsd} daily limit for automatic actions ($${spentToday} used today).`,
+    reason: `${formatUsd(valueUsd)} is within your ${formatUsd(dailyLimitUsd)} daily limit for automatic actions (${formatUsd(spentToday)} used today).`,
     requiresLedger: false,
     triggered: [],
     approvalMethod: "none",
@@ -401,6 +402,7 @@ export function computeHabitProfile(history: ActivityRecord[]): HabitProfile {
   };
 }
 
+export * from "./money";
 export * from "./prices";
 export * from "./priceFeed";
 export * from "./quoteCheck";

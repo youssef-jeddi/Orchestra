@@ -13,6 +13,7 @@ import { readUserProfile, updateUserProfile, recipientsOf, getRecentActivity } f
 import { hasAnyPasskey, authenticationOptions, verifyAuthentication, type RelyingParty } from "../integrations/passkey";
 import { isEmailWallet } from "../integrations/passkey/emailGate";
 import { canonicalJson } from "../approvals";
+import { formatUsd } from "./money";
 
 export const LIMIT_FIELDS = ["dailyLimitUsd", "maxAutoTxPerDay", "typicalMaxUsd"] as const;
 export type LimitField = (typeof LIMIT_FIELDS)[number];
@@ -49,7 +50,7 @@ export function parseChange(body: unknown): LimitChange {
       const field = k as LimitField;
       if (v === null) { set[field] = null; continue; }
       if (typeof v !== "number" || !Number.isFinite(v)) throw bad("Limits must be numbers.");
-      if (field === "dailyLimitUsd" && (v < 0 || v > MAX_DAILY_LIMIT)) throw bad(`The daily limit must be between $0 and $${MAX_DAILY_LIMIT}.`);
+      if (field === "dailyLimitUsd" && (v < 0 || v > MAX_DAILY_LIMIT)) throw bad(`The daily limit must be between $0 and ${formatUsd(MAX_DAILY_LIMIT)}.`);
       if (field === "maxAutoTxPerDay" && (!Number.isInteger(v) || v < 0 || v > MAX_AUTO_TX_PER_DAY)) throw bad(`The number of automatic payments must be a whole number from 0 to ${MAX_AUTO_TX_PER_DAY}.`);
       if (field === "typicalMaxUsd" && (v <= 0 || v > MAX_TYPICAL_USD)) throw bad("Your usual amount must be more than $0.");
       set[field] = v;
@@ -132,8 +133,8 @@ function sweep(now: number): void {
 
 const show = (field: LimitField, v: number | null | undefined) =>
   v === undefined ? "unchanged"
-    : v === null ? (field === "dailyLimitUsd" ? `$${DEFAULT_DAILY_LIMIT} (standard)` : "no limit")
-      : field === "maxAutoTxPerDay" ? String(v) : `$${v}`;
+    : v === null ? (field === "dailyLimitUsd" ? `${formatUsd(DEFAULT_DAILY_LIMIT)} (standard)` : "no limit")
+      : field === "maxAutoTxPerDay" ? String(v) : formatUsd(v);
 
 function limitTypedData(wallet: string, nonce: string, expiresAt: string, c: LimitChange) {
   return {
@@ -227,7 +228,7 @@ async function verifyConfirmation(wallet: string, change: LimitChange, proof: an
 export function describeLoosening(before: Record<string, unknown>, change: LimitChange, learnedTypicalUsd: number | null = null): string[] {
   const lines: string[] = [];
   const word = (n: number, field: LimitField) =>
-    !Number.isFinite(n) ? "no limit" : field === "maxAutoTxPerDay" ? String(n) : `$${n}`;
+    !Number.isFinite(n) ? "no limit" : field === "maxAutoTxPerDay" ? String(n) : formatUsd(n);
   const label: Record<LimitField, string> = { dailyLimitUsd: "Daily limit without asking", maxAutoTxPerDay: "Automatic payments per day", typicalMaxUsd: "Usual amount" };
   for (const f of LIMIT_FIELDS) {
     if (!(f in change.set)) continue;
