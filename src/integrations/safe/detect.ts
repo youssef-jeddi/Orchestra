@@ -2,8 +2,9 @@ import Safe from '@safe-global/protocol-kit';
 import { ethers } from 'ethers';
 import { read, write } from '../zero-g/storage';
 import { getAgentAddress } from './agentWallet';
+import { predictedSafeConfig } from './deploy';
 
-const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || 'https://eth-sepolia.g.alchemy.com/v2/demo';
+const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
 
 const ORCHESTRA_POLICY_ABI = [
   'function hasPolicy(address user) external view returns (bool)',
@@ -27,12 +28,7 @@ export async function detectExistingSafe(ledgerAddress: string): Promise<string 
     const safe = await Safe.init({
       provider: SEPOLIA_RPC,
       signer: process.env.AGENT_PRIVATE_KEY!,
-      predictedSafe: {
-        safeAccountConfig: {
-          owners: [agentAddress, ledgerAddress],
-          threshold: 1,
-        },
-      },
+      predictedSafe: predictedSafeConfig(ledgerAddress, agentAddress),
     });
 
     const predictedAddress = await safe.getAddress();

@@ -1,0 +1,79 @@
+// ─── Safe — account setup steps: which are done, which remain ───
+// Setting up an account is several transactions (deploy, enable the AllowanceModule, add the
+// agent as delegate, set allowances, register with OrchestraPolicy) plus our own records. Any of
+// them can fail after the earlier ones succeeded, so "ready" means every step is done, and a retry
+// runs only the steps still missing. Pure and injectable so it is tested without network.
+
+export const SETUP_STEPS = ["deploy", "module", "delegate", "allowances", "register", "record"] as const;
+export type SetupStep = (typeof SETUP_STEPS)[number];
+export type SetupSteps = Record<SetupStep, boolean>;
+
+/** What a status check found: the account's address and which steps are done. */
+export interface SetupInspection {
+  safeAddress: string;
+  steps: SetupSteps;
+}
+
+/** The steps still to do, in the order they must run. Later steps need the earlier ones. */
+export function remainingSteps(steps: SetupSteps): SetupStep[] {
+  return SETUP_STEPS.filter((s) => !steps[s]);
+}
+
+export const isSetupComplete = (steps: SetupSteps) => remainingSteps(steps).length === 0;
+
+/** Does the account itself need deploying? Only then does a run count as a new deployment. */
+export const needsDeployment = (steps: SetupSteps) => !steps.deploy;
+
+export const allStepsDone = (): SetupSteps => ({ deploy: true, module: true, delegate: true, allowances: true, register: true, record: true });
+
+/** What the chain and our records say about one account; `deriveSteps` turns it into the step states. */
+export interface SetupFacts {
+  /** Code exists at the predicted address. */
+  hasCode: boolean;
+  moduleEnabled: boolean;
+  agentIsDelegate: boolean;
+  /** How many of the agent's token allowances were never set. */
+  allowancesMissing: number;
+  /** OrchestraPolicy is configured for this server; without it there is nothing to register. */
+  policyConfigured: boolean;
+  /** Registered: our own flag, the policy contract pointing at this account, or an account from before step tracking. */
+  registered: boolean;
+  /** Our stored account record and profile are written. */
+  recorded: boolean;
+}
+
+/**
+ * Step states from facts. Nothing after "deploy" can be done on an account that has no code yet,
+ * whatever local flags say: the chain is the source of truth.
+ */
+export function deriveSteps(f: SetupFacts): SetupSteps {
+  if (!f.hasCode) return { deploy: false, module: false, delegate: false, allowances: false, register: false, record: false };
+  return {
+    deploy: true,
+    module: f.moduleEnabled,
+    delegate: f.agentIsDelegate,
+    allowances: f.allowancesMissing === 0,
+    register: !f.policyConfigured || f.registered,
+    record: f.recorded,
+  };
+}
+
+/**
+ * Finish the account: read what is done, then run only the missing steps in order. `isCancelled`
+ * is checked before each step so a timed-out run stops before its next transaction. Never deploys
+ * when the account already exists, and never touches the address.
+ */
+export async function finishSetup(
+  inspect: () => Promise<SetupInspection>,
+  run: Record<SetupStep, () => Promise<void>>,
+  isCancelled: () => boolean,
+): Promise<SetupStep[]> {
+  const { steps } = await inspect();
+  const ran: SetupStep[] = [];
+  for (const step of remainingSteps(steps)) {
+    if (isCancelled()) throw new Error("deployment timed out");
+    await run[step]();
+    ran.push(step);
+  }
+  return ran;
+}

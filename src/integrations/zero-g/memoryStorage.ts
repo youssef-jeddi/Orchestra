@@ -1,20 +1,30 @@
-// ─── In-Memory Storage ───
-// Drop-in replacement for 0G storage. Same API, no network calls.
-// Used when ZERO_G_PRIVATE_KEY is not set.
+// ─── Local storage ───
+// The default storage backend: same API as the 0G backend, no network calls.
+// Keeps everything in memory and, when given a file, mirrors it to disk after
+// every change (write to a temp file, then rename — a crash can't leave a
+// half-written file), so passkeys, Telegram links, policies and activity
+// survive restarts. Without a file it's memory-only (tests, the eval).
 
 import * as crypto from 'crypto';
+import * as fs from 'fs';
+import * as path from 'path';
 
-class MemoryStorage {
+export class LocalStorage {
   private store = new Map<string, unknown>();
 
+  constructor(private readonly file: string | null = null) {
+    if (file) this.load(file);
+  }
+
   async write(key: string, data: unknown): Promise<void> {
-    console.log(`[MemStorage] WRITE ${key}`);
+    console.log(`[LocalStorage] WRITE ${key}`);
     this.store.set(key, structuredClone(data));
+    this.persist();
   }
 
   async read(key: string): Promise<unknown | null> {
     const val = this.store.get(key) ?? null;
-    console.log(`[MemStorage] READ ${key} → ${val ? 'found' : 'null'}`);
+    console.log(`[LocalStorage] READ ${key} → ${val ? 'found' : 'null'}`);
     return val ? structuredClone(val) : null;
   }
 
@@ -43,20 +53,34 @@ class MemoryStorage {
 
   async delete(key: string): Promise<void> {
     this.store.delete(key);
+    this.persist();
   }
 
   async clear(): Promise<void> {
     this.store.clear();
+    this.persist();
+  }
+
+  private load(file: string): void {
+    try {
+      const entries = JSON.parse(fs.readFileSync(file, 'utf-8')) as [string, unknown][];
+      this.store = new Map(entries);
+      console.log(`[LocalStorage] loaded ${this.store.size} record(s) from ${file}`);
+    } catch (err: any) {
+      if (err?.code !== 'ENOENT') {
+        // Don't overwrite a file we couldn't parse: keep it for inspection.
+        const backup = `${file}.unreadable-${Date.now()}`;
+        try { fs.renameSync(file, backup); } catch { /* ignore */ }
+        console.warn(`[LocalStorage] couldn't read ${file} (${err.message}); moved it to ${backup} and started empty`);
+      }
+    }
+  }
+
+  private persist(): void {
+    if (!this.file) return;
+    fs.mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 });
+    const tmp = `${this.file}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(Array.from(this.store.entries())), { mode: 0o600 });
+    fs.renameSync(tmp, this.file);
   }
 }
-
-const storage = new MemoryStorage();
-
-export const write = storage.write.bind(storage);
-export const read = storage.read.bind(storage);
-export const readMany = storage.readMany.bind(storage);
-export const append = storage.append.bind(storage);
-export const deleteKey = storage.delete.bind(storage);
-export const clear = storage.clear.bind(storage);
-
-export default storage;

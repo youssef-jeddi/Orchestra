@@ -1,0 +1,408 @@
+// ─── Policy — Deterministic risk engine ───
+// The authoritative, side-effect-free layer that decides what happens to a plan.
+//
+// This is the "server-side safety net" extracted verbatim from the /intent
+// handler. It takes the AI's advisory verdict and the plan's value, and applies
+// deterministic rules that the AI can never override. Keep this pure and tested:
+// it is the last line of defense before funds move.
+//
+// STEP 1 (this file): behaviour-identical extraction of the existing logic.
+// Later steps will grow this into a full policy engine (limits, allow-lists,
+// velocity caps) that replaces — rather than patches — the Gatekeeper LLM verdict.
+
+import { estimateUsd, resolveValuationSymbol } from "./prices";
+import { formatUsd } from "./money";
+
+export type Verdict = "AUTO_EXECUTE" | "NEEDS_APPROVAL" | "BLOCKED" | "INFO";
+
+export type IntentType = "swap" | "send" | "add_liquidity" | "remove_liquidity" | "deposit" | "balance" | "unknown";
+
+export const DEFAULT_DAILY_LIMIT = 100;
+
+/** Above this USD value, approval must use hardware (Ledger); below it a passkey suffices. */
+export const DEFAULT_HARDWARE_THRESHOLD = 1000;
+
+/** The factor required to satisfy an approval. 'wallet': the user signs the tx in their own wallet. */
+export type ApprovalMethod = "none" | "passkey" | "ledger" | "wallet";
+
+// ─── Intent classification (from AI plan steps) ───
+export function detectIntentType(steps: any[]): IntentType {
+  if (!steps || steps.length === 0) return "unknown";
+  const action = steps[0]?.action;
+  if (action === "swap") return "swap";
+  if (action === "send") return "send";
+  if (action === "add_liquidity") return "add_liquidity";
+  if (action === "remove_liquidity") return "remove_liquidity";
+  if (action === "balance") return "balance";
+  return "unknown";
+}
+
+// ─── Daily limit resolution ───
+/** The highest daily limit a user can set (enforced when saving). */
+export const MAX_DAILY_LIMIT = 1000;
+
+// A configured limit of 0 is honoured ("always ask me"); only a missing or invalid value
+// (not a number, negative, NaN) falls back to the default.
+export function resolveDailyLimit(configured: unknown): number {
+  return typeof configured === "number" && Number.isFinite(configured) && configured >= 0
+    ? configured
+    : DEFAULT_DAILY_LIMIT;
+}
+
+export function resolveHardwareThreshold(configured: unknown): number {
+  return typeof configured === "number" && configured > 0
+    ? configured
+    : DEFAULT_HARDWARE_THRESHOLD;
+}
+
+/** Which factor an approval requires, given the value and the hardware threshold. */
+export function approvalMethodFor(valueUsd: number, hardwareThresholdUsd: number): ApprovalMethod {
+  return valueUsd > hardwareThresholdUsd ? "ledger" : "passkey";
+}
+
+// ─── Server-side USD valuation ───
+// The Planner does NOT compute USD — the server values every plan from its step
+// params using live prices. `fallbackUsd` is only used for intents we can't value
+// (currently just `unknown`); it should normally be 0.
+export function computePlanValueUsd(
+  intentType: IntentType,
+  params: Record<string, any>,
+  fallbackUsd = 0
+): number {
+  if (intentType === "swap") {
+    const sym = resolveValuationSymbol(params.tokenIn, params.symbolIn, "ETH");
+    return estimateUsd(sym, Number(params.amount || 0));
+  }
+  if (intentType === "send" || intentType === "deposit") {
+    const sym = resolveValuationSymbol(params.token, params.symbol, "ETH");
+    return estimateUsd(sym, Number(params.amount || 0));
+  }
+  if (intentType === "add_liquidity") {
+    const symA = resolveValuationSymbol(params.tokenA, params.symbolA, "WETH");
+    const symB = resolveValuationSymbol(params.tokenB, params.symbolB, "USDC");
+    return estimateUsd(symA, Number(params.amountA || 0)) + estimateUsd(symB, Number(params.amountB || 0));
+  }
+  if (intentType === "balance") return 0;
+  return fallbackUsd || 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Authoritative deterministic decision
+// ═══════════════════════════════════════════════════════════════════════
+// `decide` computes the verdict from scratch — no AI verdict as input. This is
+// what lets the /intent pipeline drop the second (Gatekeeper) LLM call entirely:
+// interpretation stays with the Planner LLM, the verdict is pure code.
+//
+// The single spending control is a DAILY limit: the sum of auto-approved value in
+// a rolling 24h must stay within it. There is no per-transaction limit — a daily
+// cap already covers both one large tx and many small ones.
+
+/** Denylisted token addresses (lowercased). Hook for a future threat feed. */
+export const DENYLISTED_TOKENS = new Set<string>([]);
+
+export interface PlanShape {
+  summary?: unknown;
+  steps?: any[];
+}
+
+export interface DecisionInput {
+  intentType: IntentType;
+  valueUsd: number;
+  /** The rolling-24h auto-approve limit (already resolved with a default). */
+  dailyLimitUsd: number;
+  /** Above this USD value an approval must use a Ledger; below it a passkey suffices. */
+  hardwareThresholdUsd?: number;
+  plan: PlanShape;
+  /** Optional per-user policy for the extended deterministic rules. */
+  profile?: PolicyProfile;
+  /** Recent auto-approved/executed activity, for velocity + habit rules. */
+  history?: ActivityRecord[];
+  /** Injectable clock (ms) for deterministic velocity tests. Defaults to Date.now(). */
+  now?: number;
+}
+
+/**
+ * Per-user deterministic policy. Every field is optional — an absent field
+ * disables its rule, so a bare profile (or no profile) reproduces the original
+ * amount-vs-limit behaviour exactly.
+ */
+export interface PolicyProfile {
+  /**
+   * Recipients the user has sent to before (any case; compared lowercased). Filled by the
+   * server from its own record, never from the user's stored policy. Missing or empty → every
+   * send to an address asks, so a profile that couldn't be read fails closed.
+   */
+  knownAddresses?: string[];
+  /** Token allow-list. If non-empty, any token NOT listed forces approval. */
+  verifiedTokens?: string[];
+  /**
+   * The user's daily auto-approve limit (rolling 24h USD). This is the stored
+   * source; the caller resolves it into DecisionInput.dailyLimitUsd (with a
+   * default) — `decide` reads the resolved value, not this field.
+   */
+  dailyLimitUsd?: number;
+  /** Above this USD value, approval must use a Ledger (not a passkey). */
+  hardwareThresholdUsd?: number;
+  /** Rolling 24h cap on number of auto-approvals. Reaching it forces approval. */
+  maxAutoTxPerDay?: number;
+  /** Habit baseline: the user's typical max single-tx USD. */
+  typicalMaxUsd?: number;
+}
+
+/** One past auto-approved/executed action, used by velocity + habit rules. */
+export interface ActivityRecord {
+  valueUsd: number;
+  /** ISO timestamp. */
+  at: string;
+  to?: string;
+  token?: string;
+}
+
+export interface PolicyDecision {
+  verdict: Verdict;
+  riskScore: number;
+  /** Deterministic, human-readable explanation of the rule(s) that fired. */
+  reason: string;
+  requiresLedger: boolean;
+  /** Machine-readable slugs of every rule that pushed toward approval. */
+  triggered: string[];
+  /** Which factor the approval needs: 'none' (auto/blocked/info), 'passkey', or 'ledger'. */
+  approvalMethod: ApprovalMethod;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** A tx this many times the user's typical max is flagged as anomalous. */
+const HABIT_ANOMALY_MULTIPLE = 10;
+
+interface Escalation {
+  rule: string;
+  reason: string;
+  risk: number;
+}
+
+/** 0x1234…abcd, so reasons shown in the chat stay readable. */
+function shortAddr(a: string): string {
+  return /^0x[0-9a-fA-F]{40}$/.test(a) ? `${a.slice(0, 6)}…${a.slice(-4)}` : a;
+}
+
+/** Scan plan steps for any token address on the denylist. Returns it, or null. */
+function findDenylistedToken(steps: any[]): string | null {
+  for (const step of steps) {
+    const p = step?.params || {};
+    for (const addr of [p.tokenIn, p.tokenOut, p.token, p.tokenA, p.tokenB]) {
+      if (typeof addr === "string" && DENYLISTED_TOKENS.has(addr.toLowerCase())) {
+        return addr;
+      }
+    }
+  }
+  return null;
+}
+
+/** First token in the plan not present in the verified allow-list, or null. */
+function findUnverifiedToken(steps: any[], verified: string[]): string | null {
+  const allow = new Set(verified.map((a) => a.toLowerCase()));
+  for (const step of steps) {
+    const p = step?.params || {};
+    for (const addr of [p.tokenIn, p.tokenOut, p.token, p.tokenA, p.tokenB]) {
+      if (typeof addr === "string" && !allow.has(addr.toLowerCase())) {
+        return addr;
+      }
+    }
+  }
+  return null;
+}
+
+/** Recipient address of a `send` plan, or null. */
+function sendRecipient(steps: any[]): string | null {
+  const to = steps?.[0]?.params?.to;
+  return typeof to === "string" && to ? to : null;
+}
+
+/**
+ * The authoritative verdict. Deterministic, explainable, fail-closed.
+ *
+ * Order:
+ *   1. balance                 → INFO (read-only)
+ *   2. malformed plan          → BLOCKED
+ *   3. denylisted token        → BLOCKED
+ *   4. unrecognized action     → NEEDS_APPROVAL (fail closed)
+ *   5. escalation rules        → each can force NEEDS_APPROVAL, none can weaken:
+ *        · daily limit             (dailyLimitUsd — rolling 24h spend, always on)
+ *        · unverified token        (profile.verifiedTokens)
+ *        · unknown recipient       (profile.knownAddresses, send only, always on)
+ *        · daily count velocity    (profile.maxAutoTxPerDay + history)
+ *        · habit anomaly           (profile.typicalMaxUsd)
+ *   6. otherwise               → AUTO_EXECUTE
+ */
+export function decide(input: DecisionInput): PolicyDecision {
+  const { intentType, valueUsd, dailyLimitUsd, plan, profile, history, now } = input;
+  const hardwareThresholdUsd = resolveHardwareThreshold(input.hardwareThresholdUsd);
+  const approvalMethod: ApprovalMethod = approvalMethodFor(valueUsd, hardwareThresholdUsd);
+
+  // 1. Read-only query.
+  if (intentType === "balance") {
+    return { verdict: "INFO", riskScore: 0, reason: "Just a lookup — no money moves.", requiresLedger: false, triggered: [], approvalMethod: "none" };
+  }
+
+  // 2. Malformed plan.
+  if (!plan || typeof plan.summary !== "string" || plan.summary.trim() === "") {
+    return { verdict: "BLOCKED", riskScore: 100, reason: "I couldn't make sense of this request, so nothing was done.", requiresLedger: false, triggered: ["malformed"], approvalMethod: "none" };
+  }
+  const steps = Array.isArray(plan.steps) ? plan.steps : [];
+  if (intentType !== "unknown" && steps.length === 0) {
+    return { verdict: "BLOCKED", riskScore: 100, reason: "I couldn't make sense of this request, so nothing was done.", requiresLedger: false, triggered: ["malformed"], approvalMethod: "none" };
+  }
+
+  // 3. Denylisted token.
+  const denied = findDenylistedToken(steps);
+  if (denied) {
+    return { verdict: "BLOCKED", riskScore: 100, reason: `The token ${shortAddr(denied)} is on the list of tokens that are never allowed.`, requiresLedger: false, triggered: ["denylist"], approvalMethod: "none" };
+  }
+
+  // 4. Unrecognized action — fail closed.
+  if (intentType === "unknown") {
+    return { verdict: "NEEDS_APPROVAL", riskScore: 60, reason: "I don't recognise this kind of action, so it needs your OK.", requiresLedger: approvalMethod === "ledger", triggered: ["unknown-intent"], approvalMethod };
+  }
+
+  // 5. Value-bearing intents (swap / send / add_liquidity): accumulate escalations.
+  const escalations: Escalation[] = [];
+
+  // Rolling-24h spend so far (drives the daily limit + the count rule).
+  const cutoff = (now ?? Date.now()) - DAY_MS;
+  const recent = (history || []).filter((h) => {
+    const t = Date.parse(h.at);
+    return !Number.isNaN(t) && t >= cutoff;
+  });
+  const spentToday = recent.reduce((s, h) => s + (h.valueUsd || 0), 0);
+
+  // 5a. Daily limit (always applies). A single tx over the limit, or cumulative
+  // spend crossing it, requires approval.
+  if (dailyLimitUsd <= 0) {
+    // 0 means "always ask me": even an action that can't be priced needs an OK.
+    escalations.push({ rule: "daily-limit", reason: "You asked me to check with you before every payment, so this needs your OK.", risk: 70 });
+  } else if (spentToday + valueUsd > dailyLimitUsd) {
+    escalations.push({
+      rule: "daily-limit",
+      reason: `This would go over your ${formatUsd(dailyLimitUsd)} daily limit for automatic actions (${formatUsd(spentToday)} used today), so it needs your OK.`,
+      risk: 70,
+    });
+  }
+
+  // 5c. First send to an address (send only; always on). The known list comes from the server's
+  // own record — an empty or missing list means nobody is known yet, so the send asks.
+  if (intentType === "send") {
+    const to = sendRecipient(steps);
+    const known = new Set((profile?.knownAddresses ?? []).filter((a) => typeof a === "string").map((a) => a.toLowerCase()));
+    if (!to || !known.has(to.toLowerCase())) {
+      escalations.push({
+        rule: "unknown-recipient",
+        reason: to
+          ? "You haven't sent to this address before, so it needs your OK."
+          : "I couldn't tell who this goes to, so it needs your OK.",
+        risk: 60,
+      });
+    }
+  }
+
+  if (profile) {
+    // 5b. Token allow-list.
+    if (profile.verifiedTokens && profile.verifiedTokens.length > 0) {
+      const unverified = findUnverifiedToken(steps, profile.verifiedTokens);
+      if (unverified) {
+        escalations.push({
+          rule: "unverified-token",
+          reason: `The token ${shortAddr(unverified)} isn't on your list of checked tokens, so it needs your OK.`,
+          risk: 65,
+        });
+      }
+    }
+
+    // 5d. Daily count velocity — reached the max auto-approvals in 24h.
+    if (profile.maxAutoTxPerDay != null && recent.length >= profile.maxAutoTxPerDay) {
+      escalations.push({
+        rule: "daily-count-velocity",
+        reason: `You've reached your limit of ${profile.maxAutoTxPerDay} automatic actions per day, so this needs your OK.`,
+        risk: 60,
+      });
+    }
+
+    // 5f. Habit anomaly — unusually large vs the user's typical tx size.
+    if (profile.typicalMaxUsd != null && profile.typicalMaxUsd > 0 && valueUsd > profile.typicalMaxUsd * HABIT_ANOMALY_MULTIPLE) {
+      escalations.push({
+        rule: "habit-anomaly",
+        reason: `${formatUsd(valueUsd)} is bigger than you usually move (typically up to ${formatUsd(profile.typicalMaxUsd)}), so it needs your OK.`,
+        risk: 55,
+      });
+    }
+  }
+
+  // 6. Verdict.
+  if (escalations.length > 0) {
+    return {
+      verdict: "NEEDS_APPROVAL",
+      riskScore: Math.max(...escalations.map((e) => e.risk)),
+      reason: escalations.map((e) => e.reason).join(" "),
+      requiresLedger: approvalMethod === "ledger",
+      triggered: escalations.map((e) => e.rule),
+      approvalMethod,
+    };
+  }
+
+  return {
+    verdict: "AUTO_EXECUTE",
+    riskScore: 15,
+    reason: `${formatUsd(valueUsd)} is within your ${formatUsd(dailyLimitUsd)} daily limit for automatic actions (${formatUsd(spentToday)} used today).`,
+    requiresLedger: false,
+    triggered: [],
+    approvalMethod: "none",
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Habit profile — derive a baseline from recorded activity ("learns habits")
+// ═══════════════════════════════════════════════════════════════════════
+// Boring statistics, deliberately: no ML, no training. The median of recent
+// tx sizes is a robust "typical" value; the habit-anomaly rule then flags
+// anything HABIT_ANOMALY_MULTIPLE× above it. Because that rule only escalates,
+// an auto-derived baseline is always safe (fail-closed).
+
+/** Minimum samples before we trust a derived baseline (avoids overfitting). */
+export const HABIT_MIN_SAMPLES = 5;
+
+export interface HabitProfile {
+  sampleSize: number;
+  medianUsd: number | null;
+  meanUsd: number | null;
+  maxUsd: number | null;
+  /** Baseline for the habit-anomaly rule; null until there's enough data. */
+  typicalMaxUsd: number | null;
+}
+
+export function computeHabitProfile(history: ActivityRecord[]): HabitProfile {
+  const vals = (history || [])
+    .map((h) => h.valueUsd)
+    .filter((v) => typeof v === "number" && v > 0)
+    .sort((a, b) => a - b);
+
+  const n = vals.length;
+  if (n === 0) {
+    return { sampleSize: 0, medianUsd: null, meanUsd: null, maxUsd: null, typicalMaxUsd: null };
+  }
+
+  const median = n % 2 ? vals[(n - 1) / 2] : (vals[n / 2 - 1] + vals[n / 2]) / 2;
+  const mean = vals.reduce((s, v) => s + v, 0) / n;
+  const max = vals[n - 1];
+
+  return {
+    sampleSize: n,
+    medianUsd: median,
+    meanUsd: mean,
+    maxUsd: max,
+    typicalMaxUsd: n >= HABIT_MIN_SAMPLES ? median : null,
+  };
+}
+
+export * from "./money";
+export * from "./prices";
+export * from "./priceFeed";
+export * from "./quoteCheck";

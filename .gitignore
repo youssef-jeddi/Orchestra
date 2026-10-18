@@ -10,3 +10,7 @@ frontend/.next/
 contracts/out/
 contracts/cache/
 storage-index.json
+STATUS.md
+
+# Auto-generated server secrets (session signing key)
+.orchestra/

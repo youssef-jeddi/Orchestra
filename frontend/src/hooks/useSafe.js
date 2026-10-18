@@ -1,13 +1,21 @@
 'use client';
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import * as api from '@/lib/bridge';
+import { depositToSafe } from '@/lib/signing';
+import { ONBOARDING_POLL_MS, safeStatusFor, shouldPoll, pollAction, onboardingErrorMessage, firstCheck } from '@/lib/onboarding';
 
-export function useSafe(ledger) {
+// The user's account (a Safe) is created automatically once they are signed in: the server
+// deploys it with the agent paying gas, and we only show the address and wait for it.
+export function useSafe(ledger, session) {
   const [safeAddress, setSafeAddress] = useState(null);
   const [spendingLimit, setSpendingLimit] = useState(100);
   const [balances, setBalances] = useState({ eth: 0, usdc: 0, weth: 0 });
-  const [safeStatus, setSafeStatus] = useState('unknown'); // unknown|checking|deployed|not_deployed|error
+  const [safeStatus, setSafeStatus] = useState('unknown'); // unknown|checking|deploying|deployed|error
+  const [setupError, setSetupError] = useState(null);
+  const [finishing, setFinishing] = useState(false); // the account exists; the server is completing the rest
+  const [attempt, setAttempt] = useState(0); // bumped by retry()
+  const sessionReady = !!session?.ready;
 
   const refreshBalances = useCallback(async (addr) => {
     const a = addr || safeAddress;
@@ -18,102 +26,93 @@ export function useSafe(ledger) {
     } catch { /* ignore */ }
   }, [safeAddress]);
 
-  // Auto-check Safe when wallet connects
+  // Look up the account when a wallet connects; once signed in, create it if it doesn't exist yet.
   useEffect(() => {
     if (!ledger.walletAddress) {
       setSafeAddress(null);
       setSafeStatus('unknown');
+      setSetupError(null);
+      setFinishing(false);
       return;
     }
 
     let cancelled = false;
-    setSafeStatus('checking');
+    let timer;
+    setSetupError(null);
 
-    api.checkSafe(ledger.walletAddress).then((data) => {
-      if (cancelled) return;
-      if (data.hasSafe) {
-        setSafeAddress(data.safeAddress);
-        setSpendingLimit(data.spendingLimitUSD || 100);
-        setSafeStatus('deployed');
+    const apply = (data) => {
+      setSafeAddress(data.safeAddress);
+      setSafeStatus(safeStatusFor(data.status));
+      setFinishing(!!data.resumed);
+      if (data.spendingLimitUSD) setSpendingLimit(data.spendingLimitUSD);
+      if (data.status === 'ready') {
         refreshBalances(data.safeAddress);
-        ledger.log(`Safe detected: ${data.safeAddress}`);
-      } else {
-        setSafeStatus('not_deployed');
-        ledger.log('No Safe account — needs onboarding');
+        ledger.log(`Account ready: ${data.safeAddress}`);
       }
-    }).catch((err) => {
-      if (!cancelled) {
+      if (data.status === 'failed') setSetupError(onboardingErrorMessage({ code: data.errorCode, message: data.error }));
+    };
+
+    const poll = async () => {
+      try {
+        let data = await api.getOnboardingStatus();
+        if (cancelled) return;
+        if (pollAction(data.status) === 'restart') data = await api.startOnboarding(); // idempotent
+        if (cancelled) return;
+        apply(data);
+        if (shouldPoll(data.status)) timer = setTimeout(poll, ONBOARDING_POLL_MS);
+      } catch (err) {
+        if (cancelled) return;
         setSafeStatus('error');
-        ledger.log(`Safe check error: ${err.message}`);
+        setSetupError(onboardingErrorMessage(err));
       }
-    });
+    };
 
-    return () => { cancelled = true; };
-  }, [ledger.walletAddress, ledger.log, refreshBalances]);
+    const run = async () => {
+      setSafeStatus('checking');
+      try {
+        // Signed in: the server's setup status is the only word on "ready" (a deployed account can
+        // still be missing steps). The address lookup is only for showing it before sign-in.
+        if (firstCheck(sessionReady) === 'lookup') {
+          const found = await api.checkSafe(ledger.walletAddress);
+          if (cancelled) return;
+          if (found.hasSafe) {
+            apply({ status: 'ready', safeAddress: found.safeAddress, spendingLimitUSD: found.spendingLimitUSD });
+          } else {
+            setSafeStatus('unknown'); // waits for sign-in
+          }
+          return;
+        }
+        const data = await api.startOnboarding();
+        if (cancelled) return;
+        apply(data);
+        if (shouldPoll(data.status)) timer = setTimeout(poll, ONBOARDING_POLL_MS);
+      } catch (err) {
+        if (cancelled) return;
+        setSafeStatus('error');
+        setSetupError(onboardingErrorMessage(err));
+        ledger.log(`Account setup error: ${err.message}`);
+      }
+    };
+    run();
 
-  const deploy = useCallback(async (limitUsd = 100) => {
-    if (!ledger.walletAddress) throw new Error('Connect Ledger first');
-    ledger.log(`Deploying Safe with $${limitUsd} limit...`);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [ledger.walletAddress, ledger.log, refreshBalances, sessionReady, attempt]);
 
-    const data = await api.deploySafe(ledger.walletAddress, limitUsd);
-    setSafeAddress(data.safeAddress);
-    setSpendingLimit(limitUsd);
-    setSafeStatus('deployed');
-    refreshBalances(data.safeAddress);
-    ledger.log(`Safe deployed: ${data.safeAddress}`);
-    return data.safeAddress;
-  }, [ledger, refreshBalances]);
+  /** Try the setup again after an error. */
+  const retry = useCallback(() => setAttempt((n) => n + 1), []);
 
   const deposit = useCallback(async (token, amount) => {
-    if (!ledger.walletAddress || !safeAddress) throw new Error('Connect Ledger and deploy Safe first');
-
-    const { ethers } = await import('ethers');
-    const nonceData = await api.getNonce(ledger.walletAddress);
-    const maxFeePerGas = BigInt(nonceData.maxFeePerGas);
-    const maxPriorityFeePerGas = BigInt(nonceData.maxPriorityFeePerGas);
-
-    let tx;
-    if (token === 'eth') {
-      tx = ethers.Transaction.from({
-        to: safeAddress,
-        value: ethers.parseEther(amount),
-        nonce: nonceData.nonce,
-        maxFeePerGas, maxPriorityFeePerGas,
-        gasLimit: 21000, chainId: 11155111, type: 2,
-      });
-    } else {
-      const USDC = '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238';
-      const WETH = '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14';
-      const tokenAddr = token === 'usdc' ? USDC : WETH;
-      const decimals = token === 'usdc' ? 6 : 18;
-      const iface = new ethers.Interface(['function transfer(address to, uint256 amount)']);
-      const data = iface.encodeFunctionData('transfer', [safeAddress, ethers.parseUnits(amount, decimals)]);
-
-      tx = ethers.Transaction.from({
-        to: tokenAddr, value: 0n, data,
-        nonce: nonceData.nonce,
-        maxFeePerGas, maxPriorityFeePerGas,
-        gasLimit: 80000, chainId: 11155111, type: 2,
-      });
-    }
-
-    ledger.log(`Depositing ${amount} ${token.toUpperCase()} to Safe...`);
-    const sig = await ledger.sign(tx.unsignedSerialized);
-    const { ethers: e2 } = await import('ethers');
-    const signedTx = tx.clone();
-    signedTx.signature = e2.Signature.from(sig);
-
-    const result = await api.broadcast(signedTx.serialized);
+    if (!ledger.walletAddress || !safeAddress) throw new Error('Connect a wallet first: your account is set up when you sign in.');
+    ledger.log(`Depositing ${amount} ${String(token).toUpperCase()} to your account...`);
+    const result = await depositToSafe(ledger, safeAddress, token, amount, { emailWallet: session?.emailWallet, hasPasskey: session?.hasPasskey });
     ledger.log(`Deposit broadcast: ${result.txHash}`);
-
-    // Refresh balances after delay
     setTimeout(() => refreshBalances(), 5000);
     return result;
-  }, [ledger, safeAddress, refreshBalances]);
+  }, [ledger, safeAddress, refreshBalances, session?.emailWallet, session?.hasPasskey]);
 
   return {
-    safeAddress, spendingLimit, balances, safeStatus,
-    deploy, deposit, refreshBalances,
+    safeAddress, spendingLimit, balances, safeStatus, setupError, finishing,
+    retry, deposit, refreshBalances,
     setSpendingLimit,
   };
 }

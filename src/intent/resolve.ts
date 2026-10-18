@@ -1,0 +1,412 @@
+// ─── Intent — server-side resolution ───
+// Turns validated planner steps into concrete, executable steps: symbols →
+// registry addresses, ENS → address, "all" / "50%" / "$20" → exact token
+// amounts. Anything that can't be resolved becomes a clarifying question or an
+// "unsupported" answer rather than a guess. Summaries are generated here from
+// the resolved values, so what the user approves is exactly what executes.
+
+import { ethers } from "ethers";
+import type { Balances } from "../executor/adapters";
+import { computePlanValueUsd, getPriceUsd, formatTokenAmount, type IntentType } from "../policy";
+import { lookupToken, SUPPORTED_SYMBOLS, type TokenDef } from "./tokens";
+import { planRemove, type Position } from "../integrations/uniswap/liquidity";
+import type { StepT } from "./schema";
+
+export interface ResolveContext {
+  /** A wallet is connected (relative amounts and balances need one). */
+  connected: boolean;
+  /** Balances of the account actions spend from: the Safe if there is one, else the wallet. */
+  getBalances(): Promise<Balances | null>;
+  /** Balances of the connected wallet itself — the source of a deposit into the Safe. */
+  getWalletBalances?(): Promise<Balances | null>;
+  /** The Safe's Uniswap liquidity positions ([] without a Safe, null if they couldn't be read). */
+  getPositions?(): Promise<Position[] | null>;
+  resolveEns(name: string): Promise<string | null>;
+}
+
+/** Legacy plan-step shape consumed by the policy engine and the executor adapters. */
+export interface PlanStep {
+  protocol: string;
+  action: IntentType;
+  params: Record<string, any>;
+  estimatedGasWei: string;
+  order: number;
+}
+
+export interface ResolvedStep {
+  action: "swap" | "send" | "add_liquidity" | "remove_liquidity" | "deposit" | "balance" | "price" | "positions" | "address";
+  summary: string;
+  plan: PlanStep;
+  valueUsd: number;
+  /** For price steps. */
+  price?: { symbol: string; usd: number };
+  /** For balance steps: the token asked about, if any. */
+  token?: string;
+}
+
+export type ResolveResult =
+  | { kind: "ok"; steps: ResolvedStep[] }
+  | { kind: "clarify"; question: string }
+  | { kind: "unsupported"; reason: string };
+
+class Stop extends Error {
+  constructor(public result: Exclude<ResolveResult, { kind: "ok" }>) {
+    super(result.kind);
+  }
+}
+const clarify = (question: string) => new Stop({ kind: "clarify", question });
+const unsupported = (reason: string) => new Stop({ kind: "unsupported", reason });
+
+/** Keep a little native ETH for gas when the user sends or swaps "all" of it. */
+export const ETH_GAS_RESERVE = 0.002;
+const ENS_NAME = /^[a-z0-9-]+(\.[a-z0-9-]+)*\.eth$/i;
+
+export async function resolveSteps(steps: StepT[], ctx: ResolveContext): Promise<ResolveResult> {
+  try {
+    const out: ResolvedStep[] = [];
+    for (const [i, step] of steps.entries()) out.push(await resolveStep(step, i, ctx));
+    return { kind: "ok", steps: out };
+  } catch (err) {
+    if (err instanceof Stop) return err.result;
+    throw err;
+  }
+}
+
+async function resolveStep(step: StepT, order: number, ctx: ResolveContext): Promise<ResolvedStep> {
+  switch (step.action) {
+    case "price": {
+      const token = requireToken(step.token);
+      const usd = getPriceUsd(token.symbol);
+      return {
+        action: "price",
+        summary: `${token.symbol} is $${formatUsd(usd)}`,
+        plan: planStep("native", "balance", {}, order),
+        valueUsd: 0,
+        price: { symbol: token.symbol, usd },
+      };
+    }
+
+    case "balance": {
+      const token = step.token ? requireToken(step.token) : null;
+      if (!ctx.connected) throw clarify("Connect your wallet first so I can check your balance.");
+      return {
+        action: "balance",
+        summary: token ? `Your ${token.symbol} balance` : "Your balances",
+        plan: planStep("native", "balance", {}, order),
+        valueUsd: 0,
+        token: token?.symbol,
+      };
+    }
+
+    case "address": {
+      if (!ctx.connected) throw clarify("Sign in first so I can show your address.");
+      return {
+        action: "address",
+        summary: "Your addresses",
+        plan: planStep("native", "balance", {}, order),
+        valueUsd: 0,
+      };
+    }
+
+    case "swap": {
+      const from = requireToken(step.from);
+      const to = requireToken(step.to);
+      if (from.symbol === to.symbol) throw clarify(`You asked to swap ${from.symbol} for ${to.symbol}. Which token do you want to receive?`);
+      if (from.address === to.address) throw unsupported("Swapping between ETH and WETH (the same coin in a wrapped form) isn't supported yet.");
+
+      let amountIn: string;
+      let summary: string;
+      if (step.side === "out") {
+        if (!/^\d*\.?\d+$/.test(step.amount)) throw clarify(`How much ${from.symbol} do you want to spend?`);
+        const amountOut = await resolveAmount(step.amount, step.unit, to, ctx, "receive");
+        const pIn = getPriceUsd(from.symbol);
+        const pOut = getPriceUsd(to.symbol);
+        if (!(pIn > 0 && pOut > 0)) throw clarify(`How much ${from.symbol} do you want to spend?`);
+        amountIn = formatAmount((Number(amountOut) * pOut) / pIn, from);
+        summary = `Swap ~${amountIn} ${from.symbol} for ~${amountOut} ${to.symbol}`;
+      } else {
+        amountIn = await resolveAmount(step.amount, step.unit, from, ctx, "swap");
+        summary = `Swap ${amountIn} ${from.symbol} for ${to.symbol}`;
+      }
+      await requireBalance(amountIn, from, ctx, "swap");
+
+      const params = {
+        tokenIn: from.address, tokenOut: to.address, amount: amountIn,
+        symbolIn: from.symbol, symbolOut: to.symbol,
+      };
+      const valueUsd = computePlanValueUsd("swap", params);
+      return { action: "swap", summary: withUsd(summary, valueUsd, from), plan: planStep("uniswap", "swap", params, order, "300000"), valueUsd };
+    }
+
+    case "send": {
+      const token = requireToken(step.token);
+      const { address, label } = await resolveRecipient(step.to, ctx);
+      const amount = await resolveAmount(step.amount, step.unit, token, ctx, "send");
+      await requireBalance(amount, token, ctx, "send");
+      const params = { token: token.address, to: address, amount, symbol: token.symbol };
+      const valueUsd = computePlanValueUsd("send", params);
+      const who = label ? `${label} (${address})` : address;
+      return {
+        action: "send",
+        summary: withUsd(`Send ${amount} ${token.symbol} to ${who}`, valueUsd, token),
+        plan: planStep("native", "send", params, order, "21000"),
+        valueUsd,
+      };
+    }
+
+    case "deposit": {
+      const token = requireToken(step.token);
+      if (!ctx.connected) throw clarify("Connect your wallet first so I can move funds from it into your account.");
+      // The wallet funds the deposit and pays its network fee, so amounts come from the wallet, not the account.
+      const fromWallet = () => (ctx.getWalletBalances ? ctx.getWalletBalances() : Promise.resolve(null));
+      const amount = await resolveAmount(step.amount, step.unit, token, ctx, "deposit", fromWallet);
+      await requireBalance(amount, token, ctx, "deposit", { getBalances: fromWallet, gasReserve: token.native ? ETH_GAS_RESERVE : 0 });
+      const params = { token: token.address, amount, symbol: token.symbol };
+      const valueUsd = computePlanValueUsd("deposit", params);
+      return {
+        action: "deposit",
+        summary: withUsd(`Move ${amount} ${token.symbol} from your wallet into your account`, valueUsd, token),
+        plan: planStep("native", "deposit", params, order, token.native ? "21000" : "80000"),
+        valueUsd,
+      };
+    }
+
+    case "positions": {
+      if (!ctx.connected) throw clarify("Connect your wallet first so I can look up your liquidity positions.");
+      const positions = await loadPositions(ctx);
+      return { action: "positions", summary: describePositions(positions), plan: planStep("uniswap", "balance", {}, order), valueUsd: 0 };
+    }
+
+    case "remove_liquidity": {
+      if (!ctx.connected) throw clarify("Connect your wallet first so I can find your liquidity positions.");
+      const percent = sharePercent(step.amount);
+      const positions = await loadPositions(ctx);
+      const open = positions.filter((p) => p.liquidity > 0n);
+      const a = step.tokenA ? requireToken(step.tokenA) : null;
+      const b = step.tokenB ? requireToken(step.tokenB) : null;
+
+      let candidates: Position[];
+      if (step.positionId) {
+        candidates = open.filter((p) => p.tokenId === step.positionId);
+        if (candidates.length === 0) {
+          throw clarify(`I couldn't find an open position #${step.positionId} in your account. ${describePositions(positions)}`);
+        }
+      } else {
+        const holds = (p: Position, t: TokenDef) =>
+          [p.token0.address, p.token1.address].some((x) => x.toLowerCase() === t.address.toLowerCase());
+        candidates = open.filter((p) => (!a || holds(p, a)) && (!b || holds(p, b)));
+      }
+      if (candidates.length === 0) {
+        if (open.length === 0) throw unsupported("You don't have any liquidity positions in your account to remove.");
+        throw clarify(`None of your positions hold ${[a?.symbol, b?.symbol].filter(Boolean).join(" and ")}. ${describePositions(positions)}`);
+      }
+      if (candidates.length > 1) {
+        throw clarify(`Which position? ${candidates.map((p) => `\n${positionLine(p)}`).join("")}\nTell me its number, e.g. "remove liquidity from #${candidates[0].tokenId}".`);
+      }
+
+      const p = candidates[0];
+      const plan = planRemove(p, percent);
+      const back0 = Number(plan.expected0) / 10 ** p.token0.decimals;
+      const back1 = Number(plan.expected1) / 10 ** p.token1.decimals;
+      const valueUsd = back0 * getPriceUsd(p.token0.symbol) + back1 * getPriceUsd(p.token1.symbol);
+      const params = {
+        tokenId: p.tokenId, percent,
+        token0: p.token0.address, token1: p.token1.address,
+        symbol0: p.token0.symbol, symbol1: p.token1.symbol, fee: p.fee,
+      };
+      const share = percent === 100 ? "all" : `${percent}%`;
+      return {
+        action: "remove_liquidity",
+        summary: `Take out ${share} of liquidity position #${p.tokenId} (${pairName(p)}): ≈${formatTokenAmount(back0, shown(p.token0.symbol))} ${shown(p.token0.symbol)} + ≈${formatTokenAmount(back1, shown(p.token1.symbol))} ${shown(p.token1.symbol)} back to your account, plus the fees earned`,
+        plan: planStep("uniswap", "remove_liquidity", params, order, "400000"),
+        valueUsd,
+      };
+    }
+
+    case "add_liquidity": {
+      const a = requireToken(step.tokenA);
+      const b = requireToken(step.tokenB);
+      if (a.address === b.address) throw clarify("Liquidity needs two different tokens. Which pair do you want?");
+      const amountA = await resolveAmount(step.amountA, "token", a, ctx, "deposit");
+      const amountB = await resolveAmount(step.amountB, "token", b, ctx, "deposit");
+      await requireBalance(amountA, a, ctx, "deposit");
+      await requireBalance(amountB, b, ctx, "deposit");
+      const params = {
+        tokenA: a.address, tokenB: b.address, amountA, amountB,
+        symbolA: a.symbol, symbolB: b.symbol, feeTier: 3000,
+      };
+      const valueUsd = computePlanValueUsd("add_liquidity", params);
+      return {
+        action: "add_liquidity",
+        summary: `Add liquidity (lend to a trading pool to earn fees): ${amountA} ${a.symbol} + ${amountB} ${b.symbol} (~$${formatUsd(valueUsd)})`,
+        plan: planStep("uniswap", "add_liquidity", params, order, "500000"),
+        valueUsd,
+      };
+    }
+  }
+}
+
+// ── Liquidity positions ──
+
+/** WETH comes back from a position as native ETH, so it's shown as ETH. */
+const shown = (symbol: string) => (symbol === "WETH" ? "ETH" : symbol);
+const pairName = (p: Position) => `${shown(p.token0.symbol)}/${shown(p.token1.symbol)} ${p.fee / 10000}%`;
+
+function positionLine(p: Position): string {
+  const a0 = Number(p.amount0) / 10 ** p.token0.decimals;
+  const a1 = Number(p.amount1) / 10 ** p.token1.decimals;
+  const range = p.fullRange ? "full range" : "custom range";
+  const fees = p.owed0 > 0n || p.owed1 > 0n ? ", plus fees earned" : "";
+  return `#${p.tokenId} ${pairName(p)} (${range}): ≈${formatTokenAmount(a0, shown(p.token0.symbol))} ${shown(p.token0.symbol)} + ≈${formatTokenAmount(a1, shown(p.token1.symbol))} ${shown(p.token1.symbol)}${fees}`;
+}
+
+function describePositions(positions: Position[]): string {
+  if (positions.length === 0) return "You don't have any liquidity positions in your account.";
+  const n = positions.length;
+  return `You have ${n} liquidity position${n === 1 ? "" : "s"}:${positions.map((p) => `\n${positionLine(p)}`).join("")}`;
+}
+
+async function loadPositions(ctx: ResolveContext): Promise<Position[]> {
+  const positions = ctx.getPositions ? await ctx.getPositions() : null;
+  if (!positions) throw clarify("I couldn't read your liquidity positions right now. Try again in a moment.");
+  return positions;
+}
+
+/** "all" / "max" → 100, "50%" → 50. A token amount isn't a share: ask. */
+function sharePercent(raw: string): number {
+  if (raw === "all" || raw === "max") return 100;
+  if (raw.endsWith("%")) {
+    const n = Number(raw.slice(0, -1));
+    if (n > 0 && n <= 100) return n;
+    throw clarify(`${raw} isn't a valid share. What percentage of the position should I remove?`);
+  }
+  throw clarify("What share of the position should I remove? Say \"all\" or a percentage like 50%.");
+}
+
+function requireToken(raw: string): TokenDef {
+  const token = lookupToken(raw);
+  if (!token) {
+    throw unsupported(`I only support ${SUPPORTED_SYMBOLS.join(", ")} on this test network right now, and "${raw}" isn't one of them.`);
+  }
+  return token;
+}
+
+async function resolveRecipient(raw: string, ctx: ResolveContext): Promise<{ address: string; label?: string }> {
+  const to = raw.trim();
+  if (/^0x/i.test(to)) {
+    if (!ethers.isAddress(to)) {
+      throw clarify(`"${to}" isn't a valid wallet address (it looks mistyped). Can you double-check it?`);
+    }
+    const address = ethers.getAddress(to);
+    if (address === ethers.ZeroAddress) throw unsupported("I won't send to the zero address. Funds sent there are lost.");
+    return { address };
+  }
+  if (ENS_NAME.test(to)) {
+    const address = await ctx.resolveEns(to.toLowerCase());
+    if (!address) throw clarify(`I couldn't find an address for ${to}. Can you give me the full address (starting with 0x) instead?`);
+    return { address: ethers.getAddress(address), label: to.toLowerCase() };
+  }
+  throw clarify(`Who should I send it to? I need a wallet address (starting with 0x) or a name like alice.eth, not "${to}".`);
+}
+
+type Purpose = "swap" | "send" | "deposit" | "receive";
+
+async function resolveAmount(
+  raw: string,
+  unit: "token" | "usd",
+  token: TokenDef,
+  ctx: ResolveContext,
+  purpose: Purpose,
+  getBalances: () => Promise<Balances | null> = () => ctx.getBalances()
+): Promise<string> {
+  const relative = raw === "all" || raw === "max" || raw.endsWith("%");
+
+  if (relative) {
+    if (purpose === "receive") throw clarify(`How much ${token.symbol} do you want to receive?`);
+    const fraction = raw.endsWith("%") ? Number(raw.slice(0, -1)) / 100 : 1;
+    if (!(fraction > 0 && fraction <= 1)) throw clarify(`${raw} isn't a valid share of your balance. What percentage did you mean?`);
+    if (!ctx.connected) throw clarify(`Connect your wallet so I can work out ${raw} of your ${token.symbol}, or give me an exact amount.`);
+
+    const balances = await getBalances();
+    if (!balances) throw clarify(`I couldn't read your ${token.symbol} balance right now. Can you give me an exact amount?`);
+    const held = heldBalance(balances, token);
+    const spendable = token.native ? Math.max(0, held - ETH_GAS_RESERVE) : held;
+    const amount = spendable * fraction;
+    if (!(amount > 0)) throw clarify(`You don't have any ${token.symbol} to ${purpose}${token.native ? " after keeping a little for network fees" : ""}.`);
+    return formatAmount(amount, token);
+  }
+
+  let value = Number(raw);
+  if (unit === "usd") {
+    const price = getPriceUsd(token.symbol);
+    if (!(price > 0)) throw clarify(`How much ${token.symbol} is that in tokens?`);
+    value = value / price;
+  }
+  if (!(value > 0)) throw clarify(`How much ${token.symbol} do you want to ${purpose}?`);
+  return unit === "usd" ? formatAmount(value, token) : trimDecimals(raw.startsWith(".") ? `0${raw}` : raw, token.decimals);
+}
+
+function heldBalance(balances: Balances, token: TokenDef): number {
+  return token.symbol === "ETH" ? balances.eth : token.symbol === "WETH" ? balances.weth : balances.usdc;
+}
+
+/**
+ * Refuse an amount the account doesn't hold, before any quote or transaction is
+ * built — otherwise the tx reverts on-chain and still burns gas. Skipped when no
+ * wallet is connected or the balance can't be read (the RPC timed out).
+ */
+async function requireBalance(
+  amount: string,
+  token: TokenDef,
+  ctx: ResolveContext,
+  purpose: Purpose,
+  opts: { getBalances?: () => Promise<Balances | null>; gasReserve?: number } = {}
+): Promise<void> {
+  if (!ctx.connected) return;
+  const balances = await (opts.getBalances ?? (() => ctx.getBalances()))();
+  if (!balances) return;
+  const held = heldBalance(balances, token);
+  const reserve = opts.gasReserve ?? 0;
+  if (Number(amount) + reserve > held) {
+    const have = held > 0 ? `${formatAmount(held, token)} ${token.symbol}` : `no ${token.symbol}`;
+    const gas = reserve > 0 ? ` plus ~${reserve} ${token.symbol} for network fees` : "";
+    throw unsupported(`Not enough ${token.symbol}: you have ${have}, but this ${purpose} needs ${amount} ${token.symbol}${gas}.`);
+  }
+}
+
+// ── Formatting ──
+
+/** Round DOWN to the token's display precision (never exceeds what the user has). */
+function formatAmount(value: number, token: TokenDef): string {
+  const factor = 10 ** token.displayDecimals;
+  const floored = Math.floor(value * factor) / factor;
+  const precise = floored > 0 ? floored : Number(value.toPrecision(2));
+  return stripZeros(precise.toFixed(Math.max(token.displayDecimals, decimalsOf(precise))));
+}
+
+function decimalsOf(n: number): number {
+  const s = n.toString();
+  if (s.includes("e-")) return Number(s.split("e-")[1]) + 2;
+  return s.includes(".") ? s.split(".")[1].length : 0;
+}
+
+function trimDecimals(amount: string, decimals: number): string {
+  const [whole, frac = ""] = amount.split(".");
+  return stripZeros(frac ? `${whole}.${frac.slice(0, decimals)}` : whole);
+}
+
+function stripZeros(s: string): string {
+  return s.includes(".") ? s.replace(/0+$/, "").replace(/\.$/, "") : s;
+}
+
+export function formatUsd(v: number): string {
+  return v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function withUsd(summary: string, valueUsd: number, token: TokenDef): string {
+  return token.symbol === "USDC" || !(valueUsd > 0) ? summary : `${summary} (~$${formatUsd(valueUsd)})`;
+}
+
+function planStep(protocol: string, action: IntentType, params: Record<string, any>, order: number, gas = "0"): PlanStep {
+  return { protocol, action, params, estimatedGasWei: gas, order };
+}

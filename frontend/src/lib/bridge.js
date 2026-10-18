@@ -5,14 +5,66 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 export const BRIDGE_HTTP = API_URL;
 export const BRIDGE_WS = API_URL.replace(/^http/, 'ws') + '/ws';
 
+// ── Wallet session ──
+// Set by useSession after the wallet signs in; sent on every request so the
+// server can act for that wallet. A 401 `session_required` clears it.
+let sessionToken = null;
+const sessionInvalidListeners = new Set();
+
+export function setSessionToken(token) {
+  sessionToken = token || null;
+}
+
+/** Subscribe to "the server rejected our session". Returns an unsubscribe function. */
+export function onSessionInvalid(fn) {
+  sessionInvalidListeners.add(fn);
+  return () => sessionInvalidListeners.delete(fn);
+}
+
 export async function bridgeFetch(path, options = {}) {
   const res = await fetch(`${BRIDGE_HTTP}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
     ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+      ...options.headers,
+    },
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  if (!res.ok) {
+    if (res.status === 401 && data.code === 'session_required') {
+      sessionToken = null;
+      sessionInvalidListeners.forEach((fn) => fn());
+    }
+    const err = new Error(data.error || `HTTP ${res.status}`);
+    err.status = res.status;
+    err.code = data.code; // e.g. 'session_required', so callers can sign in and retry
+    throw err;
+  }
   return data;
+}
+
+export async function authLoginRequest(walletAddress) {
+  return bridgeFetch('/auth/login-request', { method: 'POST', body: JSON.stringify({ walletAddress }) });
+}
+
+export async function authLogin(walletAddress, nonce, signature) {
+  return bridgeFetch('/auth/login', { method: 'POST', body: JSON.stringify({ walletAddress, nonce, signature }) });
+}
+
+// Privy sign-in: the identity token proves the wallet is the user's, no signature needed.
+export async function authPrivy(walletAddress, identityToken) {
+  return bridgeFetch('/auth/privy', { method: 'POST', body: JSON.stringify({ walletAddress, identityToken }) });
+}
+
+// An email user's fresh email code, as Privy's new identity token: the server keeps it as the
+// single-use proof for their first passkey (and decides if it's fresh enough).
+export async function emailVerify(identityToken) {
+  return bridgeFetch('/passkey/email-verify', { method: 'POST', body: JSON.stringify({ identityToken }) });
+}
+
+export async function getSession() {
+  return bridgeFetch('/auth/session');
 }
 
 // ── Specific API calls ──
@@ -53,11 +105,13 @@ export async function checkSafe(address) {
   return bridgeFetch(`/check-safe?address=${address}`);
 }
 
-export async function deploySafe(ledgerAddress, spendingLimitUSD) {
-  return bridgeFetch('/onboard', {
-    method: 'POST',
-    body: JSON.stringify({ ledgerAddress, spendingLimitUSD }),
-  });
+/** Starts (or joins) the signed-in wallet's account setup; the server decides every value. */
+export async function startOnboarding() {
+  return bridgeFetch('/onboard', { method: 'POST', body: JSON.stringify({}) });
+}
+
+export async function getOnboardingStatus() {
+  return bridgeFetch('/onboard/status');
 }
 
 export async function getSafeBalances(address) {
@@ -97,4 +151,121 @@ export async function setComputeProvider(provider) {
 
 export async function getComputeProvider() {
   return bridgeFetch('/compute-provider');
+}
+
+// ── Policy config + learned habit profile ──
+
+export async function getPolicy() {
+  return bridgeFetch('/policy');
+}
+
+// patch: { dailyLimitUsd, maxAutoTxPerDay, typicalMaxUsd, ... }; null clears a field.
+export async function setPolicy(policy) {
+  return bridgeFetch('/policy', {
+    method: 'POST',
+    body: JSON.stringify({ policy }),
+  });
+}
+
+/**
+ * Step 1 of raising a limit: { required: false } if the change can go straight through, or the
+ * passkey options / wallet typed data to answer (the change is the same body POST /policy takes).
+ */
+export async function limitsConfirmOptions(change) {
+  return bridgeFetch('/policy/confirm-options', { method: 'POST', body: JSON.stringify(change) });
+}
+
+/** Save a limit change ({ policy?, removeAddress?, confirmation? }). Resolves with the saved limits. */
+export async function saveLimitChange(change) {
+  return bridgeFetch('/policy', { method: 'POST', body: JSON.stringify(change) });
+}
+
+export async function getHabit(walletAddress) {
+  return bridgeFetch(`/habit?wallet=${walletAddress}`);
+}
+
+export async function getPrices() {
+  return bridgeFetch('/prices');
+}
+
+// ── Passkey (WebAuthn) ──
+
+export async function getPasskeyStatus(walletAddress) {
+  return bridgeFetch(`/passkey/status?wallet=${walletAddress}`);
+}
+
+/** A check with the wallet's existing passkey ({ required, options }), needed to add another. */
+export async function passkeyConfirmOptions() {
+  return bridgeFetch('/passkey/confirm-options', { method: 'POST', body: '{}' });
+}
+
+export async function passkeyRegisterOptions(walletAddress, assertion) {
+  return bridgeFetch('/passkey/register-options', {
+    method: 'POST', body: JSON.stringify({ walletAddress, assertion }),
+  });
+}
+
+export async function passkeyRegister(walletAddress, response) {
+  return bridgeFetch('/passkey/register', {
+    method: 'POST', body: JSON.stringify({ walletAddress, response }),
+  });
+}
+
+/** The account's passkeys (no keys): { passkeys: [{ id, rpID, label, source, createdAt }] }. */
+export async function listPasskeys() {
+  return bridgeFetch('/passkey/list');
+}
+
+/** Remove a passkey; `assertion` is the check with an existing passkey. */
+export async function passkeyRemove(id, assertion) {
+  return bridgeFetch('/passkey/remove', { method: 'POST', body: JSON.stringify({ id, assertion }) });
+}
+
+export async function passkeyAuthOptions(walletAddress, approvalId) {
+  return bridgeFetch('/passkey/auth-options', {
+    method: 'POST', body: JSON.stringify({ walletAddress, approvalId }),
+  });
+}
+
+export async function passkeyApprove(walletAddress, approvalId, response) {
+  return bridgeFetch('/passkey/approve', {
+    method: 'POST', body: JSON.stringify({ walletAddress, approvalId, response }),
+  });
+}
+
+// ── Server-held approvals ──
+
+export async function getApproval(approvalId) {
+  return bridgeFetch(`/approvals/${approvalId}`);
+}
+
+/** Say no to one of your own pending approvals (final). Resolves with its new state; 404 = expired, 409 = already settled. */
+export async function rejectApproval(approvalId) {
+  return bridgeFetch(`/approvals/${encodeURIComponent(approvalId)}/reject`, { method: 'POST', body: '{}' });
+}
+
+// ── Telegram approvals ──
+
+export async function getTelegramStatus(walletAddress) {
+  return bridgeFetch(`/telegram/status?wallet=${walletAddress}`);
+}
+
+export async function telegramLinkRequest(walletAddress) {
+  return bridgeFetch('/telegram/link-request', {
+    method: 'POST', body: JSON.stringify({ walletAddress }),
+  });
+}
+
+/**
+ * Send a one-time phone passkey setup link to the linked Telegram (needs a
+ * session, and `assertion` from an existing passkey once the wallet has one).
+ */
+export async function requestPhoneSetup(assertion) {
+  return bridgeFetch('/passkey/phone-setup', { method: 'POST', body: JSON.stringify({ assertion }) });
+}
+
+export async function telegramLink(walletAddress, code, signature) {
+  return bridgeFetch('/telegram/link', {
+    method: 'POST', body: JSON.stringify({ walletAddress, code, signature }),
+  });
 }

@@ -36,6 +36,10 @@ export default function CustomCursor() {
   useEffect(() => {
     if (isTouch) return;
 
+    // Hide the system cursor only while this one is shown, so pages without it
+    // (like /simple) and overlays like the sign-in window keep a normal cursor.
+    document.body.classList.add('custom-cursor');
+
     const onMove = (e) => {
       rawX.set(e.clientX);
       rawY.set(e.clientY);
@@ -58,7 +62,10 @@ export default function CustomCursor() {
     };
 
     window.addEventListener('mousemove', onMove);
-    return () => window.removeEventListener('mousemove', onMove);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      document.body.classList.remove('custom-cursor');
+    };
   }, [isTouch, rawX, rawY]);
 
   if (isTouch) return null;

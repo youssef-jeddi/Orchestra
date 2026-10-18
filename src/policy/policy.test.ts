@@ -1,0 +1,419 @@
+// ─── Policy — behaviour-pinning tests ───
+// Zero-config: run with `npm run test:policy` (executes via tsx, uses node:assert).
+// The single spending control is a DAILY limit — there is no per-transaction limit.
+
+import assert from "node:assert/strict";
+import {
+  detectIntentType,
+  resolveDailyLimit,
+  computePlanValueUsd,
+  decide,
+  computeHabitProfile,
+  estimateUsd,
+  symbolFromAddress,
+  toTokenWei,
+  DEFAULT_DAILY_LIMIT,
+  getPriceUsd,
+  setPrices,
+  checkSwapQuote,
+  resolveMaxSwapShortfall,
+  formatTokenAmount,
+  DEFAULT_MAX_SWAP_SHORTFALL,
+} from "./index";
+import { WETH_SEPOLIA, USDC_SEPOLIA } from "../integrations/uniswap/types";
+
+let passed = 0;
+function test(name: string, fn: () => void) {
+  fn();
+  passed++;
+  console.log(`  ✓ ${name}`);
+}
+
+console.log("policy");
+
+// ── detectIntentType ──
+test("detectIntentType: empty/unknown", () => {
+  assert.equal(detectIntentType([]), "unknown");
+  assert.equal(detectIntentType(undefined as any), "unknown");
+  assert.equal(detectIntentType([{ action: "frobnicate" }]), "unknown");
+});
+test("detectIntentType: known actions", () => {
+  assert.equal(detectIntentType([{ action: "swap" }]), "swap");
+  assert.equal(detectIntentType([{ action: "send" }]), "send");
+  assert.equal(detectIntentType([{ action: "add_liquidity" }]), "add_liquidity");
+  assert.equal(detectIntentType([{ action: "balance" }]), "balance");
+});
+
+// ── resolveDailyLimit ──
+test("resolveDailyLimit: positive number honoured", () => {
+  assert.equal(resolveDailyLimit(5), 5);
+  assert.equal(resolveDailyLimit(2500), 2500);
+});
+test("resolveDailyLimit: 0 is honoured (\"always ask me\"); only missing or invalid → default", () => {
+  assert.equal(resolveDailyLimit(0), 0);
+  assert.equal(resolveDailyLimit(NaN), DEFAULT_DAILY_LIMIT);
+  assert.equal(resolveDailyLimit(Infinity), DEFAULT_DAILY_LIMIT);
+  assert.equal(resolveDailyLimit(-1), DEFAULT_DAILY_LIMIT);
+  assert.equal(resolveDailyLimit(undefined), DEFAULT_DAILY_LIMIT);
+  assert.equal(resolveDailyLimit("50"), DEFAULT_DAILY_LIMIT);
+});
+
+// ── price feed / estimateUsd ──
+test("getPriceUsd: stub defaults before any refresh", () => {
+  assert.equal(getPriceUsd("USDC"), 1);
+  assert.equal(getPriceUsd("ETH"), 2500);
+  assert.equal(getPriceUsd("WETH"), 2500);
+  assert.equal(getPriceUsd("MYSTERY"), 0); // unknown → 0
+});
+test("estimateUsd: uses cache, $1 fallback for unknown", () => {
+  assert.equal(estimateUsd("USDC", 100), 100);
+  assert.equal(estimateUsd("usdt", 5), 5);
+  assert.equal(estimateUsd("ETH", 0.01), 25);
+  assert.equal(estimateUsd("WETH", 1), 2500);
+  assert.equal(estimateUsd("MYSTERY", 7), 7); // price 0 → treated as $1
+});
+test("estimateUsd: reflects a live price update", () => {
+  setPrices({ ETH: 4000, WETH: 4000 });
+  assert.equal(estimateUsd("ETH", 1), 4000);
+  assert.equal(estimateUsd("ETH", 0.01), 40);
+  setPrices({ ETH: 2500, WETH: 2500 }); // restore for other tests
+  assert.equal(estimateUsd("ETH", 1), 2500);
+});
+test("symbolFromAddress: known + fallback", () => {
+  assert.equal(symbolFromAddress(WETH_SEPOLIA), "ETH");
+  assert.equal(symbolFromAddress(USDC_SEPOLIA), "USDC");
+  assert.equal(symbolFromAddress("0xdead", "ETH"), "ETH");
+});
+test("toTokenWei: decimals per token", () => {
+  assert.equal(toTokenWei("1", USDC_SEPOLIA).toString(), "1000000");
+  assert.equal(toTokenWei("1", WETH_SEPOLIA).toString(), "1000000000000000000");
+  assert.equal(toTokenWei("1", "0xunknown").toString(), "1000000000000000000");
+});
+
+// ── computePlanValueUsd ──
+test("computePlanValueUsd: swap uses input token", () => {
+  assert.equal(computePlanValueUsd("swap", { symbolIn: "USDC", amount: "2" }, 9999), 2);
+  assert.equal(computePlanValueUsd("swap", { symbolIn: "ETH", amount: "0.01" }, 9999), 25);
+  assert.equal(computePlanValueUsd("swap", { tokenIn: WETH_SEPOLIA, amount: "1" }, 0), 2500);
+});
+test("computePlanValueUsd: send", () => {
+  assert.equal(computePlanValueUsd("send", { symbol: "USDC", amount: "5" }, 0), 5);
+  assert.equal(computePlanValueUsd("send", { amount: "1" }, 0), 2500);
+});
+test("computePlanValueUsd: add_liquidity sums both legs (server-valued)", () => {
+  // 0.01 WETH ($25) + 25 USDC ($25) = $50
+  assert.equal(
+    computePlanValueUsd("add_liquidity", { symbolA: "WETH", amountA: "0.01", symbolB: "USDC", amountB: "25" }, 0),
+    50
+  );
+  assert.equal(computePlanValueUsd("add_liquidity", {}, 42), 0); // no params → $0, not the fallback
+});
+test("computePlanValueUsd: known address wins over a lying claimed symbol", () => {
+  // A WETH swap labeled "USDC" must still be priced as WETH ($2500), not $1.
+  assert.equal(computePlanValueUsd("swap", { tokenIn: WETH_SEPOLIA, symbolIn: "USDC", amount: "2" }, 0), 5000);
+  assert.equal(computePlanValueUsd("send", { token: USDC_SEPOLIA, symbol: "SHIB", amount: "90" }, 0), 90);
+  assert.equal(
+    computePlanValueUsd("add_liquidity", { tokenA: WETH_SEPOLIA, symbolA: "USDC", amountA: "1", tokenB: USDC_SEPOLIA, symbolB: "WETH", amountB: "10" }, 0),
+    2510
+  );
+});
+test("computePlanValueUsd: balance is always 0; unknown uses fallback", () => {
+  assert.equal(computePlanValueUsd("balance", {}, 999), 0);
+  assert.equal(computePlanValueUsd("unknown", {}, 0), 0);
+});
+
+// ── decide — core (single daily limit) ──
+const okPlan = { summary: "Swap 0.01 WETH for USDC", steps: [{ action: "swap", params: {} }] };
+const swapPlan = (tokenIn: string, tokenOut: string) => ({
+  summary: "swap",
+  steps: [{ action: "swap", params: { tokenIn, tokenOut } }],
+});
+const KNOWN = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045";
+const sendPlan = (to: string) => ({ summary: "send", steps: [{ action: "send", params: { to } }] });
+
+test("decide: balance → INFO", () => {
+  const d = decide({ intentType: "balance", valueUsd: 0, dailyLimitUsd: 100, plan: { summary: "Portfolio", steps: [] } });
+  assert.equal(d.verdict, "INFO");
+  assert.equal(d.riskScore, 0);
+  assert.equal(d.requiresLedger, false);
+});
+test("decide: within daily limit → AUTO_EXECUTE", () => {
+  const d = decide({ intentType: "swap", valueUsd: 25, dailyLimitUsd: 100, plan: okPlan });
+  assert.equal(d.verdict, "AUTO_EXECUTE");
+  assert.equal(d.riskScore, 15);
+  assert.deepEqual(d.triggered, []);
+});
+test("decide: over daily limit → NEEDS_APPROVAL (passkey tier under $1000)", () => {
+  const d = decide({ intentType: "swap", valueUsd: 500, dailyLimitUsd: 5, plan: okPlan });
+  assert.equal(d.verdict, "NEEDS_APPROVAL");
+  assert.equal(d.riskScore, 70);
+  assert.equal(d.approvalMethod, "passkey"); // $500 < $1000 hardware threshold
+  assert.deepEqual(d.triggered, ["daily-limit"]);
+});
+test("decide: boundary — value equal to limit auto-executes", () => {
+  const d = decide({ intentType: "send", valueUsd: 100, dailyLimitUsd: 100, plan: sendPlan(KNOWN), profile: { knownAddresses: [KNOWN] } });
+  assert.equal(d.verdict, "AUTO_EXECUTE");
+});
+test("decide: missing summary → BLOCKED", () => {
+  const d = decide({ intentType: "swap", valueUsd: 10, dailyLimitUsd: 100, plan: { steps: [{ action: "swap" }] } });
+  assert.equal(d.verdict, "BLOCKED");
+  assert.equal(d.riskScore, 100);
+});
+test("decide: value-bearing intent with no steps → BLOCKED", () => {
+  const d = decide({ intentType: "swap", valueUsd: 10, dailyLimitUsd: 100, plan: { summary: "swap", steps: [] } });
+  assert.equal(d.verdict, "BLOCKED");
+  assert.match(d.reason, /couldn't make sense of this request/);
+});
+test("decide: unknown intent → fail closed NEEDS_APPROVAL", () => {
+  const d = decide({ intentType: "unknown", valueUsd: 0, dailyLimitUsd: 100, plan: { summary: "???", steps: [] } });
+  assert.equal(d.verdict, "NEEDS_APPROVAL");
+  assert.notEqual(d.approvalMethod, "none");
+});
+
+// ── decide — approval tier (passkey vs ledger) ──
+test("decide: auto-execute → approvalMethod none", () => {
+  const d = decide({ intentType: "swap", valueUsd: 25, dailyLimitUsd: 100, plan: okPlan });
+  assert.equal(d.approvalMethod, "none");
+});
+test("decide: over limit but under hardware threshold → passkey", () => {
+  const d = decide({ intentType: "swap", valueUsd: 300, dailyLimitUsd: 100, hardwareThresholdUsd: 1000, plan: okPlan });
+  assert.equal(d.verdict, "NEEDS_APPROVAL");
+  assert.equal(d.approvalMethod, "passkey");
+  assert.equal(d.requiresLedger, false);
+});
+test("decide: above hardware threshold → ledger", () => {
+  const d = decide({ intentType: "swap", valueUsd: 5000, dailyLimitUsd: 100, hardwareThresholdUsd: 1000, plan: okPlan });
+  assert.equal(d.approvalMethod, "ledger");
+  assert.equal(d.requiresLedger, true);
+});
+test("decide: hardware threshold defaults to $1000", () => {
+  const under = decide({ intentType: "swap", valueUsd: 900, dailyLimitUsd: 100, plan: okPlan });
+  assert.equal(under.approvalMethod, "passkey");
+  const over = decide({ intentType: "swap", valueUsd: 1500, dailyLimitUsd: 100, plan: okPlan });
+  assert.equal(over.approvalMethod, "ledger");
+});
+test("decide: blocked/info → approvalMethod none", () => {
+  assert.equal(decide({ intentType: "balance", valueUsd: 0, dailyLimitUsd: 100, plan: { summary: "x", steps: [] } }).approvalMethod, "none");
+  assert.equal(decide({ intentType: "swap", valueUsd: 10, dailyLimitUsd: 100, plan: { steps: [] } }).approvalMethod, "none");
+});
+
+// ── decide — daily limit uses rolling-24h spend ──
+test("decide: cumulative spend crosses the daily limit", () => {
+  const now = Date.parse("2026-07-20T12:00:00Z");
+  const history = [
+    { valueUsd: 40, at: "2026-07-20T09:00:00Z" },
+    { valueUsd: 40, at: "2026-07-20T10:00:00Z" },
+  ];
+  const d = decide({ intentType: "swap", valueUsd: 30, dailyLimitUsd: 100, plan: okPlan, history, now });
+  assert.equal(d.verdict, "NEEDS_APPROVAL"); // 80 + 30 > 100
+  assert.deepEqual(d.triggered, ["daily-limit"]);
+});
+test("decide: daily limit fires on the FIRST tx (empty history)", () => {
+  const d = decide({ intentType: "swap", valueUsd: 150, dailyLimitUsd: 10, plan: okPlan, history: [] });
+  assert.equal(d.verdict, "NEEDS_APPROVAL");
+  assert.deepEqual(d.triggered, ["daily-limit"]);
+});
+test("decide: daily limit fires with no history array at all", () => {
+  const d = decide({ intentType: "swap", valueUsd: 150, dailyLimitUsd: 10, plan: okPlan });
+  assert.equal(d.verdict, "NEEDS_APPROVAL");
+});
+test("decide: daily limit ignores spend older than 24h", () => {
+  const now = Date.parse("2026-07-20T12:00:00Z");
+  const history = [{ valueUsd: 500, at: "2026-07-18T12:00:00Z" }]; // 2 days old
+  const d = decide({ intentType: "swap", valueUsd: 30, dailyLimitUsd: 100, plan: okPlan, history, now });
+  assert.equal(d.verdict, "AUTO_EXECUTE");
+});
+
+// ── decide — extended rules ──
+test("decide: unverified token → escalates", () => {
+  const d = decide({
+    intentType: "swap", valueUsd: 10, dailyLimitUsd: 100,
+    plan: swapPlan(WETH_SEPOLIA, "0xBADtoken"),
+    profile: { verifiedTokens: [WETH_SEPOLIA, USDC_SEPOLIA] },
+  });
+  assert.equal(d.verdict, "NEEDS_APPROVAL");
+  assert.deepEqual(d.triggered, ["unverified-token"]);
+});
+test("decide: verified token within limit → AUTO_EXECUTE", () => {
+  const d = decide({
+    intentType: "swap", valueUsd: 10, dailyLimitUsd: 100,
+    plan: swapPlan(WETH_SEPOLIA, USDC_SEPOLIA),
+    profile: { verifiedTokens: [WETH_SEPOLIA, USDC_SEPOLIA] },
+  });
+  assert.equal(d.verdict, "AUTO_EXECUTE");
+});
+test("decide: unknown recipient → escalates (send)", () => {
+  const known = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045";
+  const d = decide({
+    intentType: "send", valueUsd: 5, dailyLimitUsd: 100,
+    plan: sendPlan("0xStranger"), profile: { knownAddresses: [known] },
+  });
+  assert.equal(d.verdict, "NEEDS_APPROVAL");
+  assert.deepEqual(d.triggered, ["unknown-recipient"]);
+});
+test("decide: known recipient (case-insensitive) → AUTO_EXECUTE", () => {
+  const known = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045";
+  const d = decide({
+    intentType: "send", valueUsd: 5, dailyLimitUsd: 100,
+    plan: sendPlan(known.toLowerCase()), profile: { knownAddresses: [known] },
+  });
+  assert.equal(d.verdict, "AUTO_EXECUTE");
+});
+// ORC-68: the first send to an address always asks (the rule can't be switched off by an empty list)
+test("decide: unknown recipient with an empty or missing known list → NEEDS_APPROVAL (fails closed)", () => {
+  for (const profile of [undefined, {}, { knownAddresses: [] }]) {
+    const d = decide({ intentType: "send", valueUsd: 5, dailyLimitUsd: 100, plan: sendPlan(KNOWN), profile });
+    assert.equal(d.verdict, "NEEDS_APPROVAL");
+    assert.deepEqual(d.triggered, ["unknown-recipient"]);
+    assert.equal(d.reason, "You haven't sent to this address before, so it needs your OK.");
+  }
+});
+test("decide: known recipient under the limit → AUTO_EXECUTE; own wallet/account are known when injected", () => {
+  const own = "0x00000000000000000000000000000000000000A1";
+  const d = decide({ intentType: "send", valueUsd: 5, dailyLimitUsd: 100, plan: sendPlan(own), profile: { knownAddresses: [own.toLowerCase()] } });
+  assert.equal(d.verdict, "AUTO_EXECUTE");
+});
+test("decide: a send with no readable recipient asks, and the rule is send-only (swaps unchanged)", () => {
+  const d = decide({ intentType: "send", valueUsd: 5, dailyLimitUsd: 100, plan: { summary: "send", steps: [{ action: "send", params: {} }] }, profile: { knownAddresses: [KNOWN] } });
+  assert.deepEqual(d.triggered, ["unknown-recipient"]);
+  const swap = decide({ intentType: "swap", valueUsd: 5, dailyLimitUsd: 100, plan: okPlan });
+  assert.equal(swap.verdict, "AUTO_EXECUTE");
+});
+test("decide: daily limit 0 means always ask — even for a tiny or unpriced action", () => {
+  for (const valueUsd of [0, 0.01, 50]) {
+    const d = decide({ intentType: "swap", valueUsd, dailyLimitUsd: resolveDailyLimit(0), plan: okPlan });
+    assert.equal(d.verdict, "NEEDS_APPROVAL", String(valueUsd));
+    assert.deepEqual(d.triggered, ["daily-limit"]);
+  }
+  const send = decide({ intentType: "send", valueUsd: 1, dailyLimitUsd: 0, plan: sendPlan(KNOWN), profile: { knownAddresses: [KNOWN] } });
+  assert.equal(send.verdict, "NEEDS_APPROVAL");
+});
+test("decide: daily count velocity cap → escalates", () => {
+  const now = Date.parse("2026-07-20T12:00:00Z");
+  const history = [
+    { valueUsd: 1, at: "2026-07-20T09:00:00Z" },
+    { valueUsd: 1, at: "2026-07-20T10:00:00Z" },
+    { valueUsd: 1, at: "2026-07-20T11:00:00Z" },
+  ];
+  const d = decide({
+    intentType: "swap", valueUsd: 1, dailyLimitUsd: 100, plan: okPlan,
+    profile: { maxAutoTxPerDay: 3 }, history, now,
+  });
+  assert.equal(d.verdict, "NEEDS_APPROVAL");
+  assert.deepEqual(d.triggered, ["daily-count-velocity"]);
+});
+test("decide: habit anomaly → escalates", () => {
+  const d = decide({
+    intentType: "swap", valueUsd: 600, dailyLimitUsd: 1000, plan: okPlan,
+    profile: { typicalMaxUsd: 50 }, // 600 > 50*10
+  });
+  assert.equal(d.verdict, "NEEDS_APPROVAL");
+  assert.deepEqual(d.triggered, ["habit-anomaly"]);
+});
+test("decide: within habit range → AUTO_EXECUTE", () => {
+  const d = decide({
+    intentType: "swap", valueUsd: 400, dailyLimitUsd: 1000, plan: okPlan,
+    profile: { typicalMaxUsd: 50 }, // 400 < 50*10
+  });
+  assert.equal(d.verdict, "AUTO_EXECUTE");
+});
+test("decide: multiple escalations combine, max risk + all rules", () => {
+  const d = decide({
+    intentType: "send", valueUsd: 5000, dailyLimitUsd: 100,
+    plan: sendPlan("0xStranger"),
+    profile: { knownAddresses: ["0xknown"], typicalMaxUsd: 10 },
+  });
+  assert.equal(d.verdict, "NEEDS_APPROVAL");
+  assert.equal(d.riskScore, 70); // max(daily-limit 70, unknown-recipient 60, habit 55)
+  assert.ok(d.triggered.includes("daily-limit"));
+  assert.ok(d.triggered.includes("unknown-recipient"));
+  assert.ok(d.triggered.includes("habit-anomaly"));
+});
+test("decide: empty verifiedTokens disables the token rule", () => {
+  const d = decide({
+    intentType: "swap", valueUsd: 1, dailyLimitUsd: 100,
+    plan: okPlan, profile: { verifiedTokens: [] },
+  });
+  assert.equal(d.verdict, "AUTO_EXECUTE");
+});
+
+// ── computeHabitProfile ──
+const rec = (valueUsd: number) => ({ valueUsd, at: new Date().toISOString() });
+
+test("computeHabitProfile: empty history → all null", () => {
+  const h = computeHabitProfile([]);
+  assert.equal(h.sampleSize, 0);
+  assert.equal(h.typicalMaxUsd, null);
+});
+test("computeHabitProfile: below min samples → no baseline", () => {
+  const h = computeHabitProfile([rec(10), rec(20)]);
+  assert.equal(h.sampleSize, 2);
+  assert.equal(h.medianUsd, 15);
+  assert.equal(h.typicalMaxUsd, null);
+});
+test("computeHabitProfile: median (odd), enough samples → baseline set", () => {
+  const h = computeHabitProfile([rec(10), rec(10), rec(10), rec(10), rec(10)]);
+  assert.equal(h.sampleSize, 5);
+  assert.equal(h.medianUsd, 10);
+  assert.equal(h.maxUsd, 10);
+  assert.equal(h.typicalMaxUsd, 10);
+});
+test("computeHabitProfile: median (even) averages middle two", () => {
+  const h = computeHabitProfile([rec(10), rec(20), rec(30), rec(40), rec(50), rec(60)]);
+  assert.equal(h.medianUsd, 35);
+  assert.equal(h.meanUsd, 35);
+  assert.equal(h.maxUsd, 60);
+});
+test("computeHabitProfile: ignores non-positive/invalid values", () => {
+  const h = computeHabitProfile([rec(10), rec(0), rec(-5), rec(10), rec(10), rec(10), rec(10)]);
+  assert.equal(h.sampleSize, 5);
+  assert.equal(h.typicalMaxUsd, 10);
+});
+test("computeHabitProfile: derived baseline feeds the anomaly rule", () => {
+  const habit = computeHabitProfile([rec(10), rec(10), rec(10), rec(10), rec(10)]);
+  const d = decide({
+    intentType: "swap", valueUsd: 150, dailyLimitUsd: 1000, plan: okPlan,
+    profile: { typicalMaxUsd: habit.typicalMaxUsd ?? undefined },
+  });
+  assert.equal(d.verdict, "NEEDS_APPROVAL");
+  assert.deepEqual(d.triggered, ["habit-anomaly"]);
+});
+
+// ── checkSwapQuote ──
+test("checkSwapQuote: fair quote (fee + small slippage) passes", () => {
+  setPrices({ ETH: 2500, USDC: 1 });
+  const c = checkSwapQuote({ symbolIn: "USDC", amountIn: 10, symbolOut: "ETH", amountOut: 0.00398, maxShortfall: 0.05 })!;
+  assert.equal(c.ok, true);
+  assert.equal(c.marketOut, 0.004);
+  assert.ok(Math.abs(c.shortfall - 0.005) < 1e-9);
+});
+test("checkSwapQuote: mispriced pool (the 0x5973… Sepolia swap) is refused", () => {
+  setPrices({ ETH: 2500, USDC: 1 });
+  const c = checkSwapQuote({ symbolIn: "USDC", amountIn: 10, symbolOut: "ETH", amountOut: 0.000318, maxShortfall: 0.05 })!;
+  assert.equal(c.ok, false);
+  assert.match(c.reason!, /~0\.000318 ETH for 10 USDC, 92% less than the ~0\.004 ETH/);
+});
+test("checkSwapQuote: a quote better than market is never refused", () => {
+  setPrices({ ETH: 2500, USDC: 1 });
+  const c = checkSwapQuote({ symbolIn: "ETH", amountIn: 0.01, symbolOut: "USDC", amountOut: 300, maxShortfall: 0.05 })!;
+  assert.equal(c.ok, true);
+  assert.ok(c.shortfall < 0);
+});
+test("checkSwapQuote: boundary is inclusive; unknown price → null", () => {
+  setPrices({ ETH: 2500, USDC: 1 });
+  assert.equal(checkSwapQuote({ symbolIn: "USDC", amountIn: 100, symbolOut: "ETH", amountOut: 0.038, maxShortfall: 0.05 })!.ok, true);
+  assert.equal(checkSwapQuote({ symbolIn: "USDC", amountIn: 100, symbolOut: "ETH", amountOut: 0.0379, maxShortfall: 0.05 })!.ok, false);
+  assert.equal(checkSwapQuote({ symbolIn: "PEPE", amountIn: 1, symbolOut: "ETH", amountOut: 1 }), null);
+});
+test("resolveMaxSwapShortfall: env string, default, and bad values", () => {
+  assert.equal(resolveMaxSwapShortfall("0.1"), 0.1);
+  assert.equal(resolveMaxSwapShortfall(undefined), DEFAULT_MAX_SWAP_SHORTFALL);
+  for (const bad of ["abc", "0", "1.5", -0.2]) assert.equal(resolveMaxSwapShortfall(bad), DEFAULT_MAX_SWAP_SHORTFALL);
+});
+test("formatTokenAmount: stablecoin cents, 4 significant digits otherwise", () => {
+  assert.equal(formatTokenAmount(1234.567, "USDC"), "1,234.57");
+  assert.equal(formatTokenAmount(0.000318234, "ETH"), "0.0003182");
+  assert.equal(formatTokenAmount(1.23456789, "ETH"), "1.2346");
+});
+
+console.log(`\n${passed} passed`);
