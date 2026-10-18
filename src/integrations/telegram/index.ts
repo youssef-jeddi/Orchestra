@@ -155,7 +155,7 @@ function linkTypedData(wallet: string, code: string) {
     message: {
       wallet: ethers.getAddress(wallet),
       code,
-      purpose: "Send my Orchestra transaction approvals to the Telegram chat that opens this code.",
+      purpose: "Send my Orchestra approval requests to the Telegram chat that opens this code.",
     },
   };
 }
@@ -271,7 +271,7 @@ async function handleUpdate(update: any, onDecision: DecisionHandler): Promise<v
       await call("sendMessage", {
         chat_id: chatId,
         text: wallet
-          ? `✅ Linked to wallet ${wallet}.\nRisky Orchestra transactions will now ask for your approval here. Send /unlink to stop.`
+          ? `✅ Linked to wallet ${wallet}.\nOrchestra will now ask for your OK here before it does anything risky. Send /unlink to stop.`
           : "Open Orchestra, connect your wallet and press \"Link Telegram\" to get a link for this chat.",
       });
       return;

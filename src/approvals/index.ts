@@ -111,7 +111,7 @@ export function getApproval(id: string, now = Date.now()): PendingApproval | nul
 /** A pending approval owned by `wallet`, or an Error explaining why not. */
 export function requirePending(id: unknown, wallet: unknown, now = Date.now()): PendingApproval {
   const a = typeof id === "string" ? getApproval(id, now) : null;
-  if (!a) throw new ApprovalError(404, "Unknown approval — it may have expired or the server restarted. Ask again.");
+  if (!a) throw new ApprovalError(404, "I can't find that approval — it may have expired or the server restarted. Ask again.");
   if (typeof wallet !== "string" || a.wallet !== wallet.toLowerCase()) throw new ApprovalError(403, "This approval belongs to another wallet.");
   if (a.status !== "pending") throw new ApprovalError(409, `This approval is already ${a.status}.`);
   return a;

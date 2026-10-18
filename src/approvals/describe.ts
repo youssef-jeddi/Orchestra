@@ -13,12 +13,12 @@ const NATIVE_ETH = "0x0000000000000000000000000000000000000000";
 const ERC20 = new ethers.Interface(["function transfer(address to, uint256 amount)"]);
 
 const RULE_LABELS: Record<string, string> = {
-  "daily-limit": "over your daily auto-approve limit",
-  "daily-count-velocity": "too many transactions today",
-  "unverified-token": "token not in your verified list",
-  "unknown-recipient": "recipient you haven't approved before",
-  "habit-anomaly": "unusually large for you",
-  "unknown-intent": "unrecognized action",
+  "daily-limit": "it's over your daily limit for automatic actions",
+  "daily-count-velocity": "you've already done a lot today",
+  "unverified-token": "it involves a token you haven't checked",
+  "unknown-recipient": "it goes to someone you haven't sent to before",
+  "habit-anomaly": "it's bigger than you usually move",
+  "unknown-intent": "I don't recognise this kind of action",
 };
 
 /** One decoded fact about the action. `mono` values are addresses: show them in full, monospaced. */
@@ -81,14 +81,14 @@ function decode(a: PendingApproval): { title: string; details: ReviewDetail[] } 
     const spend = Number(ethers.formatUnits(BigInt(q.amount || 0), tIn.decimals));
     const pct = Math.round(resolveMaxSwapShortfall() * 100);
     const receive = typeof q.expectedOut === "number" && q.expectedOut > 0
-      ? `≈ ${amount(q.expectedOut, tOut.symbol)} (refused if more than ${pct}% below market)`
-      : `${tOut.symbol} at the live quote (refused if more than ${pct}% below market)`;
+      ? `≈ ${amount(q.expectedOut, tOut.symbol)} (I won't go ahead if that's more than ${pct}% below the market price)`
+      : `${tOut.symbol} at today's price (I won't go ahead if that's more than ${pct}% below the market price)`;
     return {
       title: `Swap ${amount(spend, tIn.symbol)} → ${tOut.symbol}`,
       details: [
         { label: "You spend exactly", value: amount(spend, tIn.symbol) },
         { label: "You receive", value: receive },
-        { label: "Output goes to", value: "your Safe" },
+        { label: "It goes to", value: "your account" },
       ],
     };
   }
@@ -104,16 +104,17 @@ function decode(a: PendingApproval): { title: string; details: ReviewDetail[] } 
     const maxA = Number(ethers.formatUnits(BigInt(d.amountA || 0), tA.decimals));
     const maxB = Number(ethers.formatUnits(BigInt(d.amountB || 0), tB.decimals));
     const details: ReviewDetail[] = [
-      { label: "You deposit at most", value: `${amount(maxA, tA.symbol)} + ${amount(maxB, tB.symbol)}` },
+      { label: "What this is", value: "you lend these to a trading pool and earn a share of its fees" },
+      { label: "You put in at most", value: `${amount(maxA, tA.symbol)} + ${amount(maxB, tB.symbol)}` },
     ];
     if (typeof d.usedA === "number" && typeof d.usedB === "number") {
-      details.push({ label: "At the pool's current price, about", value: `${amount(d.usedA, tA.symbol)} + ${amount(d.usedB, tB.symbol)} (the rest stays in your Safe)` });
+      details.push({ label: "At today's price, about", value: `${amount(d.usedA, tA.symbol)} + ${amount(d.usedB, tB.symbol)} (the rest stays in your account)` });
     }
     details.push(
-      { label: "Price range", value: "full range (refused if the pool's price is far from market)" },
-      { label: "Position goes to", value: "your Safe" },
+      { label: "Price range", value: "all prices (I won't go ahead if the pool's price is far from the market price)" },
+      { label: "It goes to", value: "your account" },
     );
-    return { title: `Add liquidity: ${tA.symbol}/${tB.symbol} ${fee / 10000}%`, details };
+    return { title: `Add liquidity: ${tA.symbol}/${tB.symbol} (${fee / 10000}% pool)`, details };
   }
 
   if (a.intentType === "remove_liquidity") {
@@ -124,12 +125,12 @@ function decode(a: PendingApproval): { title: string; details: ReviewDetail[] } 
     if (!t0 || !t1 || !/^\d+$/.test(String(d.tokenId)) || !(percent > 0 && percent <= 100)) return null;
     const shown = (t: TokenDef) => (t.symbol === "WETH" ? "ETH" : t.symbol); // unwrapped on the way out
     return {
-      title: `Remove liquidity: ${shown(t0)}/${shown(t1)} ${Number(d.fee) / 10000}%`,
+      title: `Take out liquidity: ${shown(t0)}/${shown(t1)} (${Number(d.fee) / 10000}% pool)`,
       details: [
         { label: "Position", value: `#${d.tokenId}` },
-        { label: "Share removed", value: percent === 100 ? "all of it (the empty position is closed)" : `${percent}%` },
-        { label: "You get back", value: `${shown(t0)} and ${shown(t1)} at the pool's current price, plus the fees earned` },
-        { label: "Goes to", value: "your Safe" },
+        { label: "Share taken out", value: percent === 100 ? "all of it (the empty position is closed)" : `${percent}%` },
+        { label: "You get back", value: `${shown(t0)} and ${shown(t1)} at today's price, plus the fees earned` },
+        { label: "It goes to", value: "your account" },
       ],
     };
   }
@@ -141,11 +142,11 @@ export function reviewOf(a: PendingApproval): ApprovalReview {
   const why = a.triggered.map((t) => RULE_LABELS[t]).filter(Boolean);
   return {
     decoded: !!decoded,
-    title: decoded?.title ?? "⛔ I couldn't decode this transaction",
+    title: decoded?.title ?? "⛔ I couldn't work out what this would do",
     details: decoded?.details ?? [{ label: "Don't approve it", value: "unless you know exactly what it is." }],
     why: why.length ? why.join(", ") : a.reason,
     safeAddress: a.safeAddress,
-    network: "Sepolia",
+    network: "test network (Sepolia)",
     expiresAt: new Date(a.expiresAt).toISOString(),
     ref: a.hash.slice(2, 10),
     status: a.status,
@@ -165,14 +166,14 @@ const short = (addr: string) => `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 export function describeApproval(a: PendingApproval, opts: { phonePasskey?: boolean } = {}): string {
   const r = reviewOf(a);
   return [
-    "⚠️ <b>Orchestra: approval needed</b>",
+    "⚠️ <b>Orchestra needs your OK</b>",
     "",
     `<b>${esc(r.title)}</b>`,
     ...r.details.map((d) => `${esc(d.label)} ${d.mono ? `<code>${esc(d.value)}</code>` : esc(d.value)}`),
-    `from your Safe <code>${esc(short(r.safeAddress))}</code> · ${r.network}`,
+    `from your account <code>${esc(short(r.safeAddress))}</code> · ${r.network}`,
     "",
-    `<b>Why you're asked:</b> ${esc(r.why)}`,
-    ...(opts.phonePasskey ? ["", "Open the review page and confirm with your phone's passkey."] : []),
+    `<b>Why I'm asking:</b> ${esc(r.why)}`,
+    ...(opts.phonePasskey ? ["", "Open the review page and confirm with your phone's passkey (fingerprint or face)."] : []),
     "",
     `<i>Expires ${r.expiresAt.slice(11, 16)} UTC · ref ${r.ref}</i>`,
   ].join("\n");
@@ -180,9 +181,9 @@ export function describeApproval(a: PendingApproval, opts: { phonePasskey?: bool
 
 /** One-line outcome that replaces the buttons once the approval is settled. */
 export function describeOutcome(a: PendingApproval): string {
-  if (a.status === "executed" && a.result) return `✅ <b>Approved and executed</b>\n<a href="${esc(a.result.explorerUrl)}">View on Etherscan</a>`;
-  if (a.status === "failed") return `❌ <b>Approved, but execution failed</b>\n${esc(a.error || "unknown error")}`;
-  if (a.status === "rejected") return "🚫 <b>Rejected.</b> Nothing was executed.";
-  if (a.status === "expired") return "⌛ <b>Expired.</b> Nothing was executed.";
+  if (a.status === "executed" && a.result) return `✅ <b>Approved and done</b>\n<a href="${esc(a.result.explorerUrl)}">View receipt ↗</a>`;
+  if (a.status === "failed") return `❌ <b>Approved, but it didn't go through</b>\n${esc(a.error || "something went wrong")}`;
+  if (a.status === "rejected") return "🚫 <b>You said no.</b> Nothing was done.";
+  if (a.status === "expired") return "⌛ <b>Expired.</b> Nothing was done.";
   return `⏳ ${a.status}…`;
 }
