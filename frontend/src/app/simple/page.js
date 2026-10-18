@@ -94,13 +94,13 @@ function SimpleChat() {
   const verifyStep = verifyStepFor(session.verifyWith); // email code, or sign in again with the same social account
   const [returning, setReturning] = useState(false); // back from the provider's sign-in page, to be confirmed
 
-  // Check passkey registration when a wallet connects, and again once signed in:
+  // Check passkey registration once signed in (the bridge answers only for the signed-in wallet):
   // a Privy sign-in passkey becomes the approval passkey during sign-in.
   const refreshPasskeyStatus = useCallback(() => {
-    if (!ledger.walletAddress) { setPasskeyReg(false); return; }
+    if (!ledger.walletAddress || !session.ready) { setPasskeyReg(false); return; }
     getPasskeyStatus(ledger.walletAddress).then((d) => setPasskeyReg(!!d.registered)).catch(() => {});
-  }, [ledger.walletAddress]);
-  useEffect(() => { refreshPasskeyStatus(); }, [refreshPasskeyStatus, session.ready]);
+  }, [ledger.walletAddress, session.ready]);
+  useEffect(() => { refreshPasskeyStatus(); }, [refreshPasskeyStatus]);
 
   // Live price ticker — refresh every 60s.
   useEffect(() => {
