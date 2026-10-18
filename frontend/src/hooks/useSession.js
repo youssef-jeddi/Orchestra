@@ -53,7 +53,7 @@ export function useSession(ledger) {
   const [expiresAt, setExpiresAt] = useState(null);
   // What the server knows about the wallet's passkeys. Until it answers an email user must not look like a
   // wallet user, so the session only turns 'ready' once this is loaded.
-  const [account, setAccount] = useState({ emailWallet: false, hasPasskey: false });
+  const [account, setAccount] = useState({ emailWallet: false, hasPasskey: false, verifyWith: [] });
   const autoTried = useRef(null); // wallet we already auto-prompted for
 
   // A different wallet starts signed out; the effect below then restores or asks.
@@ -61,7 +61,7 @@ export function useSession(ledger) {
   if (wallet !== prevWallet) {
     setPrevWallet(wallet);
     setStatus('none');
-    setAccount({ emailWallet: false, hasPasskey: false });
+    setAccount({ emailWallet: false, hasPasskey: false, verifyWith: [] });
   }
 
   /** Ask the wallet to sign in. Resolves true once a session is active. */
@@ -137,6 +137,6 @@ export function useSession(ledger) {
 
   return {
     status, error, signIn, ensure, ready: status === 'ready',
-    emailWallet: account.emailWallet, hasPasskey: account.hasPasskey, refreshAccount,
+    emailWallet: account.emailWallet, hasPasskey: account.hasPasskey, verifyWith: account.verifyWith, refreshAccount,
   };
 }

@@ -15,8 +15,9 @@ import { executeSwap, executeSend } from '@/lib/signing';
 import { registerPasskey, approveWithPasskey, setUpPhonePasskey, removePasskey } from '@/lib/passkey';
 import { PRIVY_APP_ID } from '@/lib/privy';
 import { shortAddress } from '@/lib/onboarding';
-import { PASSKEY_PROMPT, isPasskeyRequired, shouldOfferPasskey, userMaySign, pendingRequest } from '@/lib/emailPasskey';
+import { PASSKEY_PROMPT, isPasskeyRequired, shouldOfferPasskey, userMaySign, pendingRequest, verifyStepFor, passkeyDraft, SOCIAL_NONE, SOCIAL_WRONG_ACCOUNT } from '@/lib/emailPasskey';
 import EmailPasskeySetup from '@/components/EmailPasskeySetup';
+import SocialPasskeySetup from '@/components/SocialPasskeySetup';
 import { verdictLabel, ruleLabel, EXAMPLES, WELCOME, showWelcome, RECEIPT_LABEL, balanceTiles, ADD_PASSKEY_HINT } from '@/lib/plainLanguage';
 
 const ACCENT = '#C084FC';
@@ -77,6 +78,8 @@ function SimpleChat() {
   const offered = useRef(null); // wallet we already offered the passkey to
   const emailWallet = !!session.emailWallet;
   const needsFirstPasskey = emailWallet && !session.hasPasskey;
+  const verifyStep = verifyStepFor(session.verifyWith); // email code, or sign in again with the same social account
+  const [returning, setReturning] = useState(false); // back from the provider's sign-in page, to be confirmed
 
   // Check passkey registration when a wallet connects, and again once signed in:
   // a Privy sign-in passkey becomes the approval passkey during sign-in.
@@ -195,6 +198,8 @@ function SimpleChat() {
   // The email user's first passkey is saved: carry on with what they asked for, if anything.
   const passkeyAdded = useCallback(() => {
     setSetupOpen(false);
+    setReturning(false);
+    passkeyDraft(window.sessionStorage).clear();
     setPasskeyReg(true);
     session.refreshAccount();
     const request = held.current.take();
@@ -205,6 +210,25 @@ function SimpleChat() {
       setMessages((m) => [...m, { role: 'system', text: 'Passkey added. You can now confirm transactions with it.' }]);
     }
   }, [session, ask]);
+
+  // Back from a provider's sign-in page: put the held request back and open the passkey steps, which
+  // confirm the new sign-in by themselves. A draft for another wallet means a different account was
+  // used, so it is dropped (the server refuses that confirmation as well).
+  useEffect(() => {
+    if (!session.ready || !ledger.walletAddress || typeof window === 'undefined') return;
+    const store = passkeyDraft(window.sessionStorage);
+    const draft = store.peek(ledger.walletAddress);
+    if (!draft) return;
+    if (!draft.mine) {
+      store.clear();
+      showError(SOCIAL_WRONG_ACCOUNT);
+      return;
+    }
+    if (!needsFirstPasskey) { store.clear(); return; }
+    if (draft.text) held.current.hold(draft.text, draft.history);
+    setReturning(true);
+    setSetupOpen(true);
+  }, [session.ready, ledger.walletAddress, needsFirstPasskey, showError]);
 
   // Right after an email user's account is ready, offer the passkey in the chat, once per sign-in.
   const accountReady = safe.safeStatus === 'deployed';
@@ -267,8 +291,15 @@ function SimpleChat() {
       </header>
 
       {connected && session.ready && needsFirstPasskey && setupOpen && (
-        <EmailPasskeySetup wallet={ledger.walletAddress} onDone={passkeyAdded} onClose={() => setSetupOpen(false)}
-          style={{ button: approveBtn(false) }} />
+        verifyStep.kind === 'email'
+          ? <EmailPasskeySetup wallet={ledger.walletAddress} onDone={passkeyAdded} onClose={() => setSetupOpen(false)}
+              style={{ button: approveBtn(false) }} />
+          : verifyStep.kind === 'social'
+            ? <SocialPasskeySetup wallet={ledger.walletAddress} provider={verifyStep} returning={returning}
+                getHeld={() => held.current.peek()} onDone={passkeyAdded}
+                onClose={() => { setSetupOpen(false); setReturning(false); passkeyDraft(window.sessionStorage).clear(); }}
+                style={{ button: approveBtn(false) }} />
+            : <p style={{ fontSize: 13, color: '#B9B5AE' }}>{SOCIAL_NONE}</p>
       )}
       {connected && session.ready && showPasskeys && (
         <PasskeyPanel onAdd={registerPk} onChange={refreshPasskeyStatus} onClose={() => setShowPasskeys(false)} onError={showError} />

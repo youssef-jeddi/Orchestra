@@ -8,6 +8,7 @@ import { useSafe } from '@/hooks/useSafe';
 import { useSession } from '@/hooks/useSession';
 import { PRIVY_APP_ID, privyConfig } from '@/lib/privy';
 import PrivyWalletSync from '@/components/PrivyWalletSync';
+import OAuthReturn from '@/components/OAuthReturn';
 
 const OrchestraContext = createContext(null);
 
@@ -32,6 +33,7 @@ function OrchestraState({ children }) {
   return (
     <OrchestraContext.Provider value={{ ledger, bridge, safe, session }}>
       {PRIVY_APP_ID && <PrivyWalletSync ledger={ledger} />}
+      {PRIVY_APP_ID && <OAuthReturn />}
       {children}
     </OrchestraContext.Provider>
   );

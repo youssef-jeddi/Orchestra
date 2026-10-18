@@ -78,6 +78,56 @@ const test = (name: string, fn: () => void | Promise<void>) => tests.push([name,
     assert.equal(sent.length, 2, "nothing else reached the wallet");
   });
 
+  const JARGON = /oauth|identity token|\btokens?\b|re-?authenticat|wallet|signer|multisig|\bJWT\b|\bSSO\b|provider/i;
+  const noJargon = (text: string) => assert.ok(!JARGON.test(text) && !/\bSafe\b/.test(text), text);
+
+  test("UI: a social user is asked to confirm with their provider, named in plain words; email users keep the code", () => {
+    assert.deepEqual(ui.verifyStepFor(["email"]), { kind: "email" });
+    assert.deepEqual(ui.verifyStepFor(["email", "google_oauth"]), { kind: "email" }, "a user with an email keeps the email code");
+    assert.deepEqual(ui.verifyStepFor([]), { kind: "email" }, "older accounts keep the email code");
+    assert.deepEqual(ui.verifyStepFor(["google_oauth"]), { kind: "social", type: "google_oauth", id: "google", name: "Google" });
+    const names: Record<string, string> = { apple_oauth: "Apple", twitter_oauth: "X", discord_oauth: "Discord", github_oauth: "GitHub" };
+    for (const [type, name] of Object.entries(names)) {
+      const step = ui.verifyStepFor([type]);
+      assert.equal(step.kind, "social");
+      assert.equal(step.name, name);
+      assert.equal(ui.socialConfirmLabel(name), `Confirm it's you with ${name}`);
+      assert.ok(ui.socialConfirmHelp(name).includes(name));
+    }
+    assert.equal(ui.verifyStepFor(["phone"]).kind, "none", "nothing we can offer for a phone-only account yet");
+  });
+
+  test("UI: the social wording has no jargon", () => {
+    for (const name of ["Google", "Apple", "X", "Discord", "GitHub"]) {
+      for (const text of [ui.socialConfirmLabel(name), ui.socialConfirmHelp(name)]) noJargon(text);
+    }
+    for (const text of [ui.SOCIAL_NONE, ui.SOCIAL_WRONG_ACCOUNT, ui.PASSKEY_PROMPT]) noJargon(text);
+  });
+
+  test("UI: the held-back request survives the trip to the provider and is forgotten after use", () => {
+    const store = new Map<string, string>();
+    const fake = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v), removeItem: (k: string) => void store.delete(k) };
+    const wallet = addr();
+    const draft = ui.passkeyDraft(fake);
+    assert.equal(draft.peek(wallet), null);
+    const t0 = 1_000_000;
+    draft.save({ wallet, text: "send 5 USDC to vitalik.eth", history: [{ role: "user", content: "hi" }] }, t0);
+    const back = draft.peek(wallet.toLowerCase(), t0 + 60_000);
+    assert.equal(back.mine, true);
+    assert.equal(back.text, "send 5 USDC to vitalik.eth");
+    assert.deepEqual(back.history, [{ role: "user", content: "hi" }]);
+    assert.equal(draft.peek(addr(), t0 + 60_000).mine, false, "another wallet's sign-in doesn't get it");
+    assert.equal(draft.peek(wallet, t0 + ui.DRAFT_TTL_MS + 1), null, "too old");
+    assert.deepEqual(Object.keys(JSON.parse([...store.values()][0])).sort(), ["history", "savedAt", "text", "wallet"], "only the request and the wallet address are kept");
+    draft.clear();
+    assert.equal(draft.peek(wallet, t0 + 1), null);
+    const held = ui.pendingRequest();
+    held.hold("hello", []);
+    assert.deepEqual(held.peek(), { text: "hello", history: [] });
+    assert.deepEqual(held.take(), { text: "hello", history: [] });
+    assert.equal(held.peek(), null);
+  });
+
   test("UI: the held-back request is sent once after the passkey is added, then forgotten", () => {
     const held = ui.pendingRequest();
     assert.equal(held.take(), null);
@@ -87,9 +137,10 @@ const test = (name: string, fn: () => void | Promise<void>) => tests.push([name,
   });
 
   test("UI: account state falls back to the sign-in answer, and errors are plain sentences", () => {
-    assert.deepEqual(ui.accountFrom({ emailWallet: true, hasPasskey: false }), { emailWallet: true, hasPasskey: false });
-    assert.deepEqual(ui.accountFrom(null, { emailWallet: true }), { emailWallet: true, hasPasskey: false });
-    assert.deepEqual(ui.accountFrom(null, {}), { emailWallet: false, hasPasskey: false });
+    assert.deepEqual(ui.accountFrom({ emailWallet: true, hasPasskey: false }), { emailWallet: true, hasPasskey: false, verifyWith: [] });
+    assert.deepEqual(ui.accountFrom(null, { emailWallet: true }), { emailWallet: true, hasPasskey: false, verifyWith: [] });
+    assert.deepEqual(ui.accountFrom(null, {}), { emailWallet: false, hasPasskey: false, verifyWith: [] });
+    assert.deepEqual(ui.accountFrom({ emailWallet: true, verifyWith: ["google_oauth"] }).verifyWith, ["google_oauth"]);
     assert.match(ui.emailStepError(new Error("raw"), "email"), /code/);
     assert.match(ui.emailStepError(Object.assign(new Error("x"), { code: "email_verification_failed" }), "email"), /x/);
     assert.ok(!/HTTP|undefined|Error/.test(ui.emailStepError(new Error("HTTP 500"), "passkey")));
