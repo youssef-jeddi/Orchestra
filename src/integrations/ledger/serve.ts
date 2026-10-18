@@ -49,6 +49,7 @@ import {
   settle,
   getApproval,
   approvalView,
+  declineApproval,
   reject,
   issueReviewToken,
   approvalForReview,
@@ -56,6 +57,7 @@ import {
   type PendingApproval,
 } from "../../approvals";
 import { describeApproval, describeOutcome, reviewOf } from "../../approvals/describe";
+import { approveWithPasskeyFlow, telegramDecisionFlow } from "../../approvals/flows";
 import {
   telegramEnabled,
   getLink,
@@ -645,37 +647,16 @@ async function refreshTelegramMessage(a: PendingApproval): Promise<void> {
   if (a.telegram) await settleApprovalMessage(a.telegram.chatId, a.telegram.messageId, describeApproval(a), describeOutcome(a));
 }
 
-// Approve / Reject pressed in Telegram. Answers fast; execution runs in the
-// background and the message is edited with the outcome.
-const onTelegramDecision: DecisionHandler = async ({ wallet, approvalId, approve }) => {
-  const a = getApproval(approvalId);
-  if (!a || a.channel !== "telegram") return "I can't find that approval. It may have expired.";
-  if (a.wallet !== wallet) return "This approval belongs to another wallet.";
-  if (a.status !== "pending") {
-    await refreshTelegramMessage(a);
-    return `Already ${a.status}.`;
-  }
-  if (!approve) {
-    reject(a.id, wallet);
-    console.log(`[telegram] ${a.id} rejected`);
-    await refreshTelegramMessage(a);
-    return "You said no. Nothing was done.";
-  }
-  // Phone-passkey approvals can't be approved with a chat button (there is none,
-  // but a crafted callback must not skip the passkey either).
-  if (a.factor === "phone-passkey") return "Open “Review & approve” and confirm with your phone's passkey.";
-  try {
-    await requirePasskeyToMoveFunds(wallet);
-  } catch (e: any) {
-    if (e instanceof PasskeyError) return "Add a passkey in Orchestra first. Nothing was done.";
-    throw e;
-  }
-  claim(a.id, wallet);
-  console.log(`[telegram] ${a.id} approved — executing via Safe`);
-  await refreshTelegramMessage(a); // "⏳ doing it…"
-  executeApproval(a).catch(() => {}).finally(() => refreshTelegramMessage(a));
-  return "Approved. Doing it now…";
-};
+// Approve / Reject pressed in Telegram (see telegramDecisionFlow).
+const onTelegramDecision: DecisionHandler = telegramDecisionFlow({
+  requirePasskey: requirePasskeyToMoveFunds,
+  isPasskeyError: (e) => e instanceof PasskeyError,
+  refresh: refreshTelegramMessage,
+  execute: (a) => {
+    console.log(`[telegram] ${a.id} approved — executing via Safe`);
+    return executeApproval(a);
+  },
+});
 
 /** A wallet in the body must match the session (catches a stale session after switching accounts). */
 function sameWalletOrAbsent(bodyWallet: unknown, res: express.Response): boolean {
@@ -849,18 +830,14 @@ app.post("/passkey/approve", requireSession, async (req, res) => {
     const walletAddress = res.locals.wallet as string;
     const { approvalId, response } = req.body;
     if (!response) { res.status(400).json({ error: "response required" }); return; }
-    const a = requirePending(approvalId, walletAddress);
-    requirePasskeyChannel(a);
-    const challenge = a.challenge;
-    a.challenge = undefined; // single-use, pass or fail
-    if (!challenge) { res.status(400).json({ error: "Request passkey options for this approval first." }); return; }
-
-    const ok = await verifyAuthentication(walletAddress, response, challenge, desktopRp(req));
-    if (!ok) { res.status(401).json({ error: "That passkey check didn't work. Please try again." }); return; }
-
-    claim(a.id, walletAddress);
-    console.log(`[passkey] ${a.id} approved by ${walletAddress} — executing via Safe`);
-    const result = await executeApproval(a);
+    const rp = desktopRp(req);
+    const { a, result } = await approveWithPasskeyFlow(walletAddress, approvalId, {
+      verify: (challenge) => verifyAuthentication(walletAddress, response, challenge, rp),
+      execute: (a) => {
+        console.log(`[passkey] ${a.id} approved by ${walletAddress} — executing via Safe`);
+        return executeApproval(a);
+      },
+    });
     res.json({ status: "ok", approvalId: a.id, ...result });
   } catch (e: any) { sendError(res, e); }
 });
@@ -870,6 +847,16 @@ app.get("/approvals/:id", (req, res) => {
   const a = getApproval(req.params.id);
   if (!a) { res.status(404).json({ error: "I can't find that approval. It may have expired." }); return; }
   res.json(approvalView(a));
+});
+
+// The user says no from the app. Works whichever channel the approval went out on, and
+// closes the matching Telegram message. Final: the approval can't be approved afterwards.
+app.post("/approvals/:id/reject", requireSession, async (req, res) => {
+  try {
+    const a = await declineApproval(req.params.id, res.locals.wallet, refreshTelegramMessage);
+    console.log(`[approval] ${a.id} declined by ${a.wallet} in the app`);
+    res.json(approvalView(a));
+  } catch (e: any) { sendError(res, e); }
 });
 
 // ─── Telegram linking ───
