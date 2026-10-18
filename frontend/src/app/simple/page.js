@@ -14,6 +14,7 @@ import {
 import { executeSwap, executeSend } from '@/lib/signing';
 import { registerPasskey, approveWithPasskey, setUpPhonePasskey, removePasskey } from '@/lib/passkey';
 import { PRIVY_APP_ID } from '@/lib/privy';
+import { shortAddress } from '@/lib/onboarding';
 
 const ACCENT = '#C084FC';
 
@@ -690,14 +691,7 @@ function PhoneSetupButton({ session, onDone, onError }) {
 }
 
 function SafeSetup({ safe, ledger, onError }) {
-  const [busy, setBusy] = useState(null); // 'deploy' | 'eth' | 'usdc' | null
-
-  const deploy = async () => {
-    setBusy('deploy');
-    try { await safe.deploy(100); }
-    catch (err) { onError(err.message); }
-    finally { setBusy(null); }
-  };
+  const [busy, setBusy] = useState(null); // 'eth' | 'usdc' | null
 
   const fund = async (token, amount) => {
     setBusy(token);
@@ -708,23 +702,30 @@ function SafeSetup({ safe, ledger, onError }) {
     finally { setBusy(null); }
   };
 
-  if (safe.safeStatus === 'checking' || safe.safeStatus === 'unknown') {
-    return <p style={{ fontSize: 12, color: '#555', margin: '10px 0 0' }}>Looking for a Safe…</p>;
-  }
-
-  if (safe.safeStatus !== 'deployed') {
+  if (safe.safeStatus === 'error') {
     return (
       <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
         marginTop: 12, padding: '10px 12px', border: '1px solid #2a2a30', borderRadius: 12, background: '#141418',
       }}>
         <p style={{ margin: 0, fontSize: 13, color: '#999', lineHeight: 1.4 }}>
-          Auto-execute needs a Safe. Create one (agent wallet pays gas), then fund it from MetaMask.
+          {safe.setupError || "We couldn't set up your account. Please try again."}
         </p>
-        <button onClick={deploy} disabled={!!busy} style={pill(true)}>
-          {busy === 'deploy' ? 'Creating…' : 'Create Safe'}
-        </button>
+        <button onClick={safe.retry} style={pill(true)}>Try again</button>
       </div>
+    );
+  }
+
+  if (safe.safeStatus !== 'deployed') {
+    return (
+      <p style={{ fontSize: 12, color: '#555', margin: '10px 0 0' }}>
+        Setting up your account…
+        {safe.safeAddress && (
+          <span title="Your account address. You can send funds to it now." style={{ marginLeft: 8, color: '#777' }}>
+            {shortAddress(safe.safeAddress)}
+          </span>
+        )}
+      </p>
     );
   }
 
@@ -736,7 +737,7 @@ function SafeSetup({ safe, ledger, onError }) {
     }}>
       <a href={`https://sepolia.etherscan.io/address/${safe.safeAddress}`} target="_blank" rel="noreferrer"
         style={{ fontSize: 12, color: '#999', textDecoration: 'none' }}>
-        Safe {safe.safeAddress.slice(0, 6)}…{safe.safeAddress.slice(-4)} ↗
+        Your account {shortAddress(safe.safeAddress)} ↗
       </a>
       <span style={{ fontSize: 12, color: '#777' }}>
         {(b.eth || 0).toFixed(4)} ETH · {(b.usdc || 0).toFixed(2)} USDC

@@ -26,8 +26,8 @@ export function OrchestraProvider({ children }) {
 function OrchestraState({ children }) {
   const ledger = useLedger();
   const bridge = useBridge();
-  const safe = useSafe(ledger);
   const session = useSession(ledger);
+  const safe = useSafe(ledger, session);
 
   return (
     <OrchestraContext.Provider value={{ ledger, bridge, safe, session }}>

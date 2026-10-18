@@ -98,11 +98,13 @@ export async function checkSafe(address) {
   return bridgeFetch(`/check-safe?address=${address}`);
 }
 
-export async function deploySafe(ledgerAddress, spendingLimitUSD) {
-  return bridgeFetch('/onboard', {
-    method: 'POST',
-    body: JSON.stringify({ ledgerAddress, spendingLimitUSD }),
-  });
+/** Starts (or joins) the signed-in wallet's account setup; the server decides every value. */
+export async function startOnboarding() {
+  return bridgeFetch('/onboard', { method: 'POST', body: JSON.stringify({}) });
+}
+
+export async function getOnboardingStatus() {
+  return bridgeFetch('/onboard/status');
 }
 
 export async function getSafeBalances(address) {
