@@ -3,11 +3,13 @@
 // until they add one (and asks for a fresh email code first); this file only decides what the
 // chat shows. Pure, so it's tested without a browser (src/integrations/passkey/emailGate.test.ts).
 
+import { PASSKEY_MEANS } from './plainLanguage';
+
 /** Shown in the chat (and by the server as the reason): plain words, "your account", no jargon. */
 export const PASSKEY_PROMPT =
   "To keep your money safe, confirm transactions with a passkey (Face ID, fingerprint or your device PIN). First we'll check it's really you.";
 
-export const SIGN_REFUSED = 'Approve this with a passkey or on Telegram instead.';
+export const SIGN_REFUSED = `Approve this with a passkey or on Telegram instead. A passkey confirms with ${PASSKEY_MEANS}.`;
 
 /** The server's answer to a value-moving request from an email user who has no passkey yet. */
 export const isPasskeyRequired = (data) => data?.status === 'passkey_required';

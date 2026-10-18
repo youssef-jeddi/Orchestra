@@ -22,8 +22,8 @@ export default function PrivyWalletSync({ ledger }) {
   const { attachWallet, detachWallet, setPrivy } = ledger;
 
   useEffect(() => {
-    setPrivy({ ready, login, logout, identityToken });
-  }, [setPrivy, ready, login, logout, identityToken]);
+    setPrivy({ ready, authenticated, login, logout, identityToken });
+  }, [setPrivy, ready, authenticated, login, logout, identityToken]);
 
   const wallet = authenticated && walletsReady ? pickWallet(wallets) : null;
   const address = wallet?.address;

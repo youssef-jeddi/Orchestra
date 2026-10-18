@@ -60,7 +60,7 @@ test("ORC-75: no passkey and not on Telegram → add a passkey or link Telegram;
     const c = card.approvalControls({ intentType, approval: { id: "a" }, passkeyReg: false });
     assert.equal(c.mode, "need-passkey", intentType);
     assert.notEqual(c.mode, "wallet");
-    assert.match(c.text, /add a passkey/);
+    assert.match(c.text, /Add passkey/);
     assert.match(c.text, /Telegram/);
     assert.match(c.text, /ask again/);
     assert.equal(c.canDecline, true);

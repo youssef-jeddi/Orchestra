@@ -59,6 +59,9 @@ export function balanceTiles(balances) {
   return tiles;
 }
 
+/** What a passkey is, in one phrase: the way a beginner confirms an action. Reused wherever the UI asks for one. */
+export const PASSKEY_MEANS = "Face ID, your fingerprint or your device's screen lock";
+
 /** Tooltip on the header "Add passkey" button for people who signed in with a wallet. */
 export const ADD_PASSKEY_HINT = 'Approve bigger actions with Face ID or your fingerprint instead of your wallet';
 

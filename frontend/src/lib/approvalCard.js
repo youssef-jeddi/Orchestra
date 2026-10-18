@@ -4,6 +4,8 @@
 // never offers the personal wallet as a way to pay for something the account holds. Pure, so it's
 // tested without a browser (src/approvals/approvalCard.test.ts).
 
+import { PASSKEY_MEANS } from './plainLanguage';
+
 /** One short sentence per rule slug, shown as a tooltip on the rule chip. */
 export const RULE_HINTS = {
   'daily-limit': 'This would go over the amount you let me send on my own in a day.',
@@ -47,7 +49,17 @@ export const expiredText = (intentType) => `This request expired. ${nothingDone(
 export const ALREADY_SETTLED = 'This request was already handled, so it can no longer be declined.';
 
 export const NEEDS_PASSKEY_TEXT =
-  'To approve this, add a passkey (button at the top) or link Telegram, then ask again.';
+  `To approve this, set up a passkey: a quick way to confirm with ${PASSKEY_MEANS}. Tap “🔑 Add passkey” at the top, then ask again. Or connect Telegram and approve from your phone.`;
+
+/**
+ * The dollar value after a summary — only when the summary doesn't already show one, so a card
+ * never says "(~$0.24) — $0.24". Any kind of action.
+ */
+export function valueSuffix(summary, valueUsd) {
+  const usd = Number(valueUsd);
+  if (!(usd > 0) || /\$\s?\d/.test(String(summary ?? ''))) return '';
+  return ` — $${usd.toFixed(2)}`;
+}
 export const NOT_READY_TEXT = 'Your account is still being set up. Try again in a moment.';
 
 /**

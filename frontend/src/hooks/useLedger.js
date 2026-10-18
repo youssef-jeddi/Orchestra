@@ -148,7 +148,13 @@ export function useLedger() {
     setDeviceStatus('disconnected');
   }, []);
 
-  const setPrivy = useCallback((actions) => { privyRef.current = actions; }, []);
+  // Whether the sign-in service has started, and whether it says the user is signed in: the header waits for these.
+  const [privyFlags, setPrivyFlags] = useState({ ready: false, authenticated: false });
+  const setPrivy = useCallback((actions) => {
+    privyRef.current = actions;
+    const next = { ready: !!actions.ready, authenticated: !!actions.authenticated };
+    setPrivyFlags((p) => (p.ready === next.ready && p.authenticated === next.authenticated ? p : next));
+  }, []);
   const privyLogin = useCallback(() => privyRef.current?.login(), []);
   const getIdentityToken = useCallback(() => privyRef.current?.identityToken || null, []);
   const getProvider = useCallback(() => providerRef.current, []);
@@ -243,6 +249,8 @@ export function useLedger() {
     attachWallet,
     detachWallet,
     setPrivy,
+    privyReady: privyFlags.ready,
+    privyAuthenticated: privyFlags.authenticated,
     privyLogin,
     getIdentityToken,
     getProvider,
