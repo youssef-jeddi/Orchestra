@@ -40,7 +40,7 @@ export const shortAddress = (a) => (a ? `${a.slice(0, 6)}…${a.slice(-4)}` : ''
 
 /**
  * Where the account check starts. Signed in: ask the server to start or join the setup (it answers
- * "ready" at once for a finished account). Not signed in: only look the address up, which can't
- * tell a finished account from one missing steps.
+ * "ready" at once for a finished account). Not signed in: wait. The account and its balances are
+ * only looked up for a signed-in user, so nothing about an address is asked of the server before.
  */
-export const firstCheck = (signedIn) => (signedIn ? 'setup' : 'lookup');
+export const firstCheck = (signedIn) => (signedIn ? 'setup' : 'wait');

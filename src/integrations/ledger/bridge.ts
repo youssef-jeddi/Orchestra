@@ -17,9 +17,16 @@ export class BridgeServer {
   private pending = new Map<string, PendingApproval>();
   private approvalTimeoutMs: number;
 
-  constructor(server: HTTPServer, opts?: { path?: string; timeoutMs?: number }) {
+  constructor(server: HTTPServer, opts?: { path?: string; timeoutMs?: number; verifyOrigin?: (origin: string | undefined) => boolean }) {
     this.approvalTimeoutMs = opts?.timeoutMs ?? 300_000; // 5 min default
-    this.wss = new WebSocketServer({ server, path: opts?.path ?? "/ws" });
+    const verifyOrigin = opts?.verifyOrigin;
+    this.wss = new WebSocketServer({
+      server,
+      path: opts?.path ?? "/ws",
+      // Browsers always send Origin on a WebSocket upgrade: refuse the upgrade for sites that aren't allowed.
+      ...(verifyOrigin ? { verifyClient: (info: { origin: string }, done: (ok: boolean, code?: number, message?: string) => void) =>
+          verifyOrigin(info.origin || undefined) ? done(true) : done(false, 403, "Origin not allowed") } : {}),
+    });
 
     this.wss.on("connection", (ws) => {
       this.clients.add(ws);
