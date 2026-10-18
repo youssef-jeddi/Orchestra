@@ -90,6 +90,8 @@ Once a wallet links Telegram, its risky transactions can only be approved there 
 ## Security model
 
 - **Wallet sessions** (`src/auth/`): after connecting, your wallet signs an EIP-712 login once (MetaMask or Ledger, no gas). The server returns an 8-hour HMAC-signed token sent as `Authorization: Bearer`. Every endpoint that acts for a wallet — `/intent`, passkey registration, policy, Safe onboarding, limit updates — takes the wallet **from the session**, never from the request body. The signing secret is generated on first start and kept in `.orchestra/session-secret` (git-ignored); set `SESSION_SECRET` only to share sessions across instances.
+- **Account and market routes need a session too**: `/quote`, `/swap`, `/broadcast`, `/nonce`, `/check-safe` and `/safe-balances` refuse a visitor without one (401), and an address in the request must be the session's wallet or that wallet's own account (403 otherwise). `/check-safe` reports the same setup state as `/onboard/status`; an unfinished account is never "ready". `/health` stays public.
+- **Allowed websites** (`ALLOWED_ORIGINS`, `src/integrations/ledger/origins.ts`): the bridge answers browsers only from the production site (`https://getorchestra.xyz` and its subdomains), `localhost` / `127.0.0.1` on any port, this project's Vercel previews and the origin of `PUBLIC_APP_URL`. A request or WebSocket upgrade from any other site gets 403; requests with no `Origin` (curl, servers) are not affected, sessions still gate the routes. `/mock-trade` (a fake approval for local demos) is off unless `ENABLE_MOCK_TRADE=1`, and never on when `NODE_ENV=production`.
 - **Telegram linking** requires an EIP-712 signature from the wallet, so nobody can route your approvals to their chat.
 - **Phone passkey setup** needs both your signed-in desktop session and your linked Telegram chat: the one-time setup link (10 minutes, single use) is sent there.
 - **Spending-limit updates** are only recorded after the chain shows the owner's exact limit-update transaction succeeded.
@@ -162,6 +164,8 @@ cp .env.example .env
 | `PRIVY_APP_SECRET` | Lets passkey users approve with their sign-in passkey (server only) |
 | `SWAP_MAX_SHORTFALL` | Quote guard threshold (default `0.05`) |
 | `LP_MAX_PRICE_DEVIATION` | Liquidity price guard (default `0.05`; `off` for testnet demos, where pools are far from market) |
+| `ALLOWED_ORIGINS` | Websites that may call the bridge (HTTP and WebSocket), comma-separated; `*` works in a host (`https://*.example.com`) or a port (`http://localhost:*`). Setting it replaces the default: `https://getorchestra.xyz,https://*.getorchestra.xyz,http://localhost:*,http://127.0.0.1:*,https://orchestra-*-youssefs-projects-822ed3d0.vercel.app` (`PUBLIC_APP_URL`'s origin is always allowed too) |
+| `ENABLE_MOCK_TRADE=1` | Local dev only: enables `POST /mock-trade`. Off by default and ignored when `NODE_ENV=production` |
 | `SESSION_SECRET`, `SESSION_TTL_HOURS` | Only to share sessions across instances / change the 8h lifetime |
 
 ### Run

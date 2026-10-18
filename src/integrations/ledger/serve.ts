@@ -8,6 +8,8 @@ import http from "http";
 import crypto from "crypto";
 import { ethers } from "ethers";
 import { BridgeServer } from "./bridge";
+import { originGuard, originPermitted, mockTradeEnabled } from "./origins";
+import { requireOwnAddress } from "./access";
 import type { ApprovalRequest, ProposedTrade } from "./types";
 import { assessRisk } from "./riskEngine";
 import { checkApproval, getQuote } from "../uniswap/api";
@@ -16,9 +18,9 @@ import { executeSwap } from "../uniswap/execution";
 import { WETH_SEPOLIA, USDC_SEPOLIA, CHAIN_ID } from "../uniswap/types";
 import { write, read, append } from "../zero-g/storage";
 import { setComputeProvider, getComputeProvider } from "../zero-g/compute";
+import { detectExistingSafe } from "../safe/detect";
 import { onboarding, storedSpendingLimit, isAccountReady } from "../safe/onboard";
 import { OnboardingError, ACCOUNT_NOT_READY_REASON } from "../safe/onboarding";
-import { detectExistingSafe } from "../safe/detect";
 import { setInitialSpendingLimits, updateSpendingLimit, buildLimitUpdateTx } from "../safe/spendingLimit";
 import { getAgentAddress } from "../safe/agentWallet";
 import { limitTxProblem } from "../safe/verifyLimitTx";
@@ -99,24 +101,20 @@ const PORT = Number(process.env.PORT) || Number(process.env.LEDGER_BRIDGE_PORT) 
 const app = express();
 app.use(express.json());
 
-// CORS — allow cross-origin requests from Vercel frontend
-app.use((_req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  if (_req.method === "OPTIONS") {
-    res.sendStatus(204);
-    return;
-  }
-  next();
-});
+// Only the sites on the allowlist (origins.ts) may call the bridge from a browser; others get 403.
+app.use(originGuard);
 
 const server = http.createServer(app);
-const bridge = new BridgeServer(server);
+const bridge = new BridgeServer(server, { verifyOrigin: originPermitted });
 
 // ─── POST /mock-trade ───
-// Inject a test approval request (from curl, Postman, or the UI button)
+// Inject a test approval request (from curl, Postman, or the UI button). Local dev only:
+// absent (404) unless ENABLE_MOCK_TRADE=1 and not in production mode.
 app.post("/mock-trade", async (req, res) => {
+  if (!mockTradeEnabled()) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
   // Build a realistic unsigned transaction to the Uniswap Universal Router
   const tx = ethers.Transaction.from({
     to: "0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD",
@@ -156,9 +154,15 @@ app.post("/mock-trade", async (req, res) => {
   res.json({ ok: true, tradeId: request.tradeId });
 });
 
+/** The Safe recorded for a wallet, for the "is this address yours" check. */
+async function storedSafeOf(wallet: string): Promise<string | null> {
+  const stored = await read(`safe:${wallet.toLowerCase()}`);
+  return (stored as any)?.safeAddress ?? null;
+}
+
 // ─── POST /quote ───
 // Get a real Uniswap quote, run risk assessment, return everything the UI needs.
-app.post("/quote", async (req, res) => {
+app.post("/quote", requireSession, async (req, res) => {
   try {
     const { tokenIn, tokenOut, amount, walletAddress } = req.body;
 
@@ -166,6 +170,7 @@ app.post("/quote", async (req, res) => {
       res.status(400).json({ error: "walletAddress and amount are required" });
       return;
     }
+    if (!(await requireOwnAddress(res, walletAddress, storedSafeOf))) return;
 
     const tokenInAddr = tokenIn || WETH_SEPOLIA;
     const tokenOutAddr = tokenOut || USDC_SEPOLIA;
@@ -228,7 +233,7 @@ app.post("/quote", async (req, res) => {
 
 // ─── POST /swap ───
 // Send permit2 signature to Uniswap /swap API → returns unsigned tx to sign on Ledger.
-app.post("/swap", async (req, res) => {
+app.post("/swap", requireSession, async (req, res) => {
   try {
     const { quote, permitData, signature, routing } = req.body;
 
@@ -270,7 +275,7 @@ app.post("/swap", async (req, res) => {
 
 // ─── POST /broadcast ───
 // Broadcast a fully signed raw transaction to Sepolia.
-app.post("/broadcast", async (req, res) => {
+app.post("/broadcast", requireSession, async (req, res) => {
   try {
     const { signedTx } = req.body;
 
@@ -298,9 +303,10 @@ app.post("/broadcast", async (req, res) => {
 
 // ─── POST /nonce ───
 // Get the current nonce for a wallet address (needed for tx signing).
-app.get("/nonce/:address", async (req, res) => {
+app.get("/nonce/:address", requireSession, async (req, res) => {
   try {
-    const nonce = await provider.getTransactionCount(req.params.address, "pending");
+    if (!(await requireOwnAddress(res, req.params.address, storedSafeOf))) return;
+    const nonce = await provider.getTransactionCount(String(req.params.address), "pending");
     const feeData = await provider.getFeeData();
 
     // Fallback to 20 gwei / 2 gwei if the RPC doesn't return EIP-1559 fields
@@ -1152,29 +1158,32 @@ app.get("/onboard/status", requireSession, async (_req, res) => {
   }
 });
 
-app.get("/check-safe", async (req, res) => {
-  const address = req.query.address as string;
-  if (!address) {
-    res.status(400).json({ error: "address query param required" });
-    return;
-  }
-  const existing = await detectExistingSafe(address);
-  if (existing) {
-    const stored = await read(`safe:${address.toLowerCase()}`);
-    res.json({ hasSafe: true, safeAddress: existing, spendingLimitUSD: (stored as any)?.spendingLimitUSD || 100 });
-  } else {
-    res.json({ hasSafe: false });
+// The signed-in user's own account only. Answers with the same setup state as /onboard/status:
+// `hasSafe` is true only when every setup step is done, so an unfinished account is never "ready".
+app.get("/check-safe", requireSession, async (req, res) => {
+  try {
+    const wallet = ethers.getAddress(res.locals.wallet);
+    if (req.query.address !== undefined && !(await requireOwnAddress(res, req.query.address, storedSafeOf))) return;
+    const status = await onboarding.status(wallet);
+    if (status.status === "ready") {
+      res.json({ ...status, hasSafe: true, spendingLimitUSD: await storedSpendingLimit(wallet) });
+    } else {
+      res.json({ ...status, hasSafe: false });
+    }
+  } catch (err: any) {
+    sendError(res, err);
   }
 });
 
-app.get("/safe-balances", async (req, res) => {
-  const address = req.query.address as string;
-  if (!address) {
-    res.status(400).json({ error: "address query param required" });
-    return;
-  }
+app.get("/safe-balances", requireSession, async (req, res) => {
   try {
-    const ethBalance = await provider.getBalance(address);
+    const address = req.query.address ?? (await storedSafeOf(res.locals.wallet));
+    if (!address) {
+      res.status(400).json({ error: "Your account isn't set up yet." });
+      return;
+    }
+    if (!(await requireOwnAddress(res, address, storedSafeOf))) return;
+    const ethBalance = await provider.getBalance(address as string);
     const erc20Abi = ["function balanceOf(address) view returns (uint256)"];
     const usdcContract = new ethers.Contract(USDC_SEPOLIA, erc20Abi, provider);
     const wethContract = new ethers.Contract(WETH_SEPOLIA, erc20Abi, provider);
@@ -1306,7 +1315,7 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(`  Bound:  ${JSON.stringify(addr)}`);
   console.log(`  HTTP:  http://0.0.0.0:${PORT}`);
   console.log(`  WS:    ws://0.0.0.0:${PORT}/ws`);
-  console.log(`  Mock:  curl -X POST http://localhost:${PORT}/mock-trade -H "Content-Type: application/json" -d '{"summary":"Swap 1 ETH → USDC"}'`);
+  if (mockTradeEnabled()) console.log(`  Mock:  curl -X POST http://localhost:${PORT}/mock-trade -H "Content-Type: application/json" -d '{"summary":"Swap 1 ETH → USDC"}'`);
   console.log();
   // Warm the price cache at startup.
   refreshPrices().catch(() => {});
