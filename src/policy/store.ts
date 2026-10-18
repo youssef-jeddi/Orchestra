@@ -44,9 +44,60 @@ export async function writeUserProfile(wallet: string, profile: Record<string, a
   profileCache.delete(wallet.toLowerCase());
 }
 
+/** Per-wallet queue, so two read-modify-write updates of one profile can't overwrite each other. */
+const profileLocks = new Map<string, Promise<unknown>>();
+
 /**
- * A wallet's extended policy config (`policy` of its profile). No wallet or no
- * config → `{}` → every extended rule stays off (base behaviour).
+ * Read a wallet's profile, change it and save it, one update at a time. Without the queue a
+ * recorded recipient and a limit change racing each other could drop one of the two writes.
+ */
+export async function updateUserProfile(wallet: string, change: (profile: Record<string, any>) => Record<string, any>): Promise<Record<string, any>> {
+  const key = wallet.toLowerCase();
+  const run = (profileLocks.get(key) ?? Promise.resolve()).catch(() => {}).then(async () => {
+    const next = change(await readUserProfile(key));
+    await writeUserProfile(key, next);
+    return next;
+  });
+  profileLocks.set(key, run);
+  return run;
+}
+
+// ── Known recipients: addresses the account has actually sent to ──
+// Written only by the server, in a field of its own (`knownRecipients`), never under `policy`:
+// `policy` can be patched through the API, so an address list kept there could be filled in by
+// a session. The unknown-recipient rule asks before the first send to anything not in this list.
+
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+
+/** The recipients saved for a wallet (lowercased), from its profile object. */
+export function recipientsOf(profile: Record<string, any>): string[] {
+  const list = Array.isArray(profile.knownRecipients) ? profile.knownRecipients : [];
+  return [...new Set(list.filter((a: unknown): a is string => typeof a === "string" && ADDRESS.test(a)).map((a: string) => a.toLowerCase()))];
+}
+
+export async function getKnownRecipients(wallet: string): Promise<string[]> {
+  return recipientsOf(await readUserProfile(wallet));
+}
+
+/** Remember an address after a send to it actually went through. */
+export async function recordKnownRecipient(wallet: string, address: string): Promise<void> {
+  if (!ADDRESS.test(address)) return;
+  await updateUserProfile(wallet, (p) => {
+    const known = recipientsOf(p);
+    const lower = address.toLowerCase();
+    return known.includes(lower) ? p : { ...p, knownRecipients: [...known, lower] };
+  });
+}
+
+/** Forget an address: the next send to it asks again. Returns the remaining list. */
+export async function removeKnownRecipient(wallet: string, address: string): Promise<string[]> {
+  const next = await updateUserProfile(wallet, (p) => ({ ...p, knownRecipients: recipientsOf(p).filter((a) => a !== String(address).toLowerCase()) }));
+  return recipientsOf(next);
+}
+
+/**
+ * A wallet's extended policy config (`policy` of its profile) plus the recipients the server
+ * recorded. No wallet → `{}`; with none recorded, every send to a new address asks.
  */
 export async function getPolicyProfile(wallet?: string): Promise<PolicyProfile> {
   if (!wallet) return {};
@@ -56,7 +107,10 @@ export async function getPolicyProfile(wallet?: string): Promise<PolicyProfile> 
   if (hit && hit.expires > now) return hit.value;
 
   const p = await readUserProfile(key);
-  const value = p.policy && typeof p.policy === "object" ? (p.policy as PolicyProfile) : {};
+  const stored = p.policy && typeof p.policy === "object" ? (p.policy as PolicyProfile) : {};
+  // `policy.knownAddresses` may have been written through the API (older versions accepted any
+  // field): ignore it and use only what the server recorded itself.
+  const value: PolicyProfile = { ...stored, knownAddresses: recipientsOf(p) };
   profileCache.set(key, { value, expires: now + PROFILE_TTL_MS });
   return value;
 }

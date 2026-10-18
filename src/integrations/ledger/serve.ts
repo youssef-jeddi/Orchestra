@@ -57,7 +57,7 @@ import {
   type PendingApproval,
 } from "../../approvals";
 import { describeApproval, describeOutcome, reviewOf } from "../../approvals/describe";
-import { approveWithPasskeyFlow, telegramDecisionFlow } from "../../approvals/flows";
+import { approveWithPasskeyFlow, telegramDecisionFlow, executeApprovalFlow, rememberSentRecipient } from "../../approvals/flows";
 import {
   telegramEnabled,
   getLink,
@@ -447,7 +447,13 @@ app.post("/intent", async (req, res) => {
     }
     const emailWallet = !!wallet && (await isEmailWallet(wallet));
 
-    const [profile, activity] = await Promise.all([profileP, activityP]);
+    const [storedProfile, activity] = await Promise.all([profileP, activityP]);
+    // The user's own wallet and own account are never "new recipients"; every other address
+    // is known only once a send to it has gone through (the server's own record).
+    const profile: PolicyProfile = {
+      ...storedProfile,
+      knownAddresses: [...(storedProfile.knownAddresses ?? []), ...[wallet, safeAddress].filter((a): a is string => !!a)],
+    };
     const decision = assessAction(action, { profile, history: activity });
     const { verdict, riskScore } = decision;
     if (decision.typicalMaxUsd != null) console.log(`[intent] Habit baseline: typicalMaxUsd=$${decision.typicalMaxUsd}`);
@@ -515,6 +521,8 @@ app.post("/intent", async (req, res) => {
               to: action.params.to,
               token: action.params.tokenIn || action.params.token,
             }).catch(() => {});
+            // The address now counts as one the user has sent to (it was already known, or they approved it).
+            if (intentType === "send") rememberSentRecipient(wallet, intentType, approvalExecution(intentType, result.payload) ?? undefined).catch(() => {});
           }
           res.json({
             status: "ok", intentType, autoExecuted: true,
@@ -619,20 +627,18 @@ function approvalExecution(intentType: string, payload: Record<string, unknown> 
 /** Execute a claimed approval's stored payload through the Safe and record the outcome. */
 async function executeApproval(a: PendingApproval): Promise<{ txHash: string; explorerUrl: string }> {
   try {
-    const adapter = getAdapter(a.intentType);
-    if (!adapter?.execute) throw new Error(`This ${a.intentType.replace(/_/g, " ")} can't be run from your account`);
-    const ctx = {
-      walletAddress: a.wallet, safeAddress: a.safeAddress, balanceAddress: a.safeAddress, provider,
-      params: {}, planSummary: a.summary, planSteps: [], totalEstimatedValueUsd: a.valueUsd, balances: null,
-    };
-    const exec = await adapter.execute(ctx, { payload: a.execution });
-    if (!exec) throw new Error("It ran but gave no result, so I can't confirm it went through");
-    const result = { txHash: exec.txHash, explorerUrl: exec.explorerUrl };
-    settle(a, { result });
-    console.log(`[approval] ${a.id} executed: ${exec.txHash}`);
+    const result = await executeApprovalFlow(a, async (a) => {
+      const adapter = getAdapter(a.intentType);
+      if (!adapter?.execute) throw new Error(`This ${a.intentType.replace(/_/g, " ")} can't be run from your account`);
+      const ctx = {
+        walletAddress: a.wallet, safeAddress: a.safeAddress, balanceAddress: a.safeAddress, provider,
+        params: {}, planSummary: a.summary, planSteps: [], totalEstimatedValueUsd: a.valueUsd, balances: null,
+      };
+      return adapter.execute(ctx, { payload: a.execution });
+    });
+    console.log(`[approval] ${a.id} executed: ${result.txHash}`);
     return result;
   } catch (err: any) {
-    settle(a, { error: err.message });
     console.error(`[approval] ${a.id} failed: ${err.message}`);
     throw err;
   }

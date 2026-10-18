@@ -60,12 +60,12 @@ The verdict is deterministic, explainable and fail-closed (`src/policy/index.ts`
 | Unrecognized action | `NEEDS_APPROVAL` |
 | Rolling-24h auto-approved spend would exceed your **daily limit** (default $100) | `NEEDS_APPROVAL` |
 | Token outside your verified list *(if configured)* | `NEEDS_APPROVAL` |
-| Recipient outside your known addresses *(if configured)* | `NEEDS_APPROVAL` |
+| First send to an address the account hasn't sent to before *(always on, sends only)* | `NEEDS_APPROVAL` |
 | Too many auto-approvals today *(if configured)* | `NEEDS_APPROVAL` |
 | More than 10× your typical transaction (median of recent activity, once there are 5+) | `NEEDS_APPROVAL` |
 | Otherwise | `AUTO_EXECUTE` |
 
-Rules can only escalate, never weaken. Each wallet has its own policy (`user:profile:<wallet>`), editable from the policy panel. Deposits from your wallet into your own Safe are exempt from the agent limits: you sign them yourself.
+Rules can only escalate, never weaken. A recipient counts as known only after a send to it has gone through (the server records it in its own field of the profile, not in the policy you can edit); your own wallet and your own account are always known, and a daily limit of $0 means every payment asks. Each wallet has its own policy (`user:profile:<wallet>`), editable from the policy panel. Deposits from your wallet into your own Safe are exempt from the agent limits: you sign them yourself.
 
 ---
 
@@ -278,7 +278,7 @@ frontend/src/
 6. On your phone, the review page shows *Send 150 USDC to 0xd8dA…6045 from your Safe*; you approve with your fingerprint. The passkey's challenge is bound to the payload hash.
 7. The agent wallet executes exactly that transfer through the Safe; the page, the Telegram message and the chat show the Etherscan link.
 
-With *"send 20 USDC to vitalik.eth"* instead, step 4 returns `AUTO_EXECUTE` and the transfer executes immediately.
+With *"send 20 USDC to vitalik.eth"* instead, the amount is within the limit, but the first send to a new address always asks: step 4 returns `NEEDS_APPROVAL` ("You haven't sent to this address before"). Once that send has gone through, vitalik.eth's address is remembered and a later *"send 20 USDC to vitalik.eth"* executes immediately.
 
 ---
 

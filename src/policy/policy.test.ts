@@ -49,8 +49,10 @@ test("resolveDailyLimit: positive number honoured", () => {
   assert.equal(resolveDailyLimit(5), 5);
   assert.equal(resolveDailyLimit(2500), 2500);
 });
-test("resolveDailyLimit: invalid → default", () => {
-  assert.equal(resolveDailyLimit(0), DEFAULT_DAILY_LIMIT);
+test("resolveDailyLimit: 0 is honoured (\"always ask me\"); only missing or invalid → default", () => {
+  assert.equal(resolveDailyLimit(0), 0);
+  assert.equal(resolveDailyLimit(NaN), DEFAULT_DAILY_LIMIT);
+  assert.equal(resolveDailyLimit(Infinity), DEFAULT_DAILY_LIMIT);
   assert.equal(resolveDailyLimit(-1), DEFAULT_DAILY_LIMIT);
   assert.equal(resolveDailyLimit(undefined), DEFAULT_DAILY_LIMIT);
   assert.equal(resolveDailyLimit("50"), DEFAULT_DAILY_LIMIT);
@@ -126,6 +128,7 @@ const swapPlan = (tokenIn: string, tokenOut: string) => ({
   summary: "swap",
   steps: [{ action: "swap", params: { tokenIn, tokenOut } }],
 });
+const KNOWN = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045";
 const sendPlan = (to: string) => ({ summary: "send", steps: [{ action: "send", params: { to } }] });
 
 test("decide: balance → INFO", () => {
@@ -148,7 +151,7 @@ test("decide: over daily limit → NEEDS_APPROVAL (passkey tier under $1000)", (
   assert.deepEqual(d.triggered, ["daily-limit"]);
 });
 test("decide: boundary — value equal to limit auto-executes", () => {
-  const d = decide({ intentType: "send", valueUsd: 100, dailyLimitUsd: 100, plan: { summary: "send", steps: [{ action: "send" }] } });
+  const d = decide({ intentType: "send", valueUsd: 100, dailyLimitUsd: 100, plan: sendPlan(KNOWN), profile: { knownAddresses: [KNOWN] } });
   assert.equal(d.verdict, "AUTO_EXECUTE");
 });
 test("decide: missing summary → BLOCKED", () => {
@@ -255,6 +258,35 @@ test("decide: known recipient (case-insensitive) → AUTO_EXECUTE", () => {
     plan: sendPlan(known.toLowerCase()), profile: { knownAddresses: [known] },
   });
   assert.equal(d.verdict, "AUTO_EXECUTE");
+});
+// ORC-68: the first send to an address always asks (the rule can't be switched off by an empty list)
+test("decide: unknown recipient with an empty or missing known list → NEEDS_APPROVAL (fails closed)", () => {
+  for (const profile of [undefined, {}, { knownAddresses: [] }]) {
+    const d = decide({ intentType: "send", valueUsd: 5, dailyLimitUsd: 100, plan: sendPlan(KNOWN), profile });
+    assert.equal(d.verdict, "NEEDS_APPROVAL");
+    assert.deepEqual(d.triggered, ["unknown-recipient"]);
+    assert.equal(d.reason, "You haven't sent to this address before, so it needs your OK.");
+  }
+});
+test("decide: known recipient under the limit → AUTO_EXECUTE; own wallet/account are known when injected", () => {
+  const own = "0x00000000000000000000000000000000000000A1";
+  const d = decide({ intentType: "send", valueUsd: 5, dailyLimitUsd: 100, plan: sendPlan(own), profile: { knownAddresses: [own.toLowerCase()] } });
+  assert.equal(d.verdict, "AUTO_EXECUTE");
+});
+test("decide: a send with no readable recipient asks, and the rule is send-only (swaps unchanged)", () => {
+  const d = decide({ intentType: "send", valueUsd: 5, dailyLimitUsd: 100, plan: { summary: "send", steps: [{ action: "send", params: {} }] }, profile: { knownAddresses: [KNOWN] } });
+  assert.deepEqual(d.triggered, ["unknown-recipient"]);
+  const swap = decide({ intentType: "swap", valueUsd: 5, dailyLimitUsd: 100, plan: okPlan });
+  assert.equal(swap.verdict, "AUTO_EXECUTE");
+});
+test("decide: daily limit 0 means always ask — even for a tiny or unpriced action", () => {
+  for (const valueUsd of [0, 0.01, 50]) {
+    const d = decide({ intentType: "swap", valueUsd, dailyLimitUsd: resolveDailyLimit(0), plan: okPlan });
+    assert.equal(d.verdict, "NEEDS_APPROVAL", String(valueUsd));
+    assert.deepEqual(d.triggered, ["daily-limit"]);
+  }
+  const send = decide({ intentType: "send", valueUsd: 1, dailyLimitUsd: 0, plan: sendPlan(KNOWN), profile: { knownAddresses: [KNOWN] } });
+  assert.equal(send.verdict, "NEEDS_APPROVAL");
 });
 test("decide: daily count velocity cap → escalates", () => {
   const now = Date.parse("2026-07-20T12:00:00Z");

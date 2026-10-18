@@ -50,6 +50,22 @@ function tokenAt(address: string): TokenDef | null {
 
 const amount = (n: number, symbol: string) => `${formatTokenAmount(n, symbol)} ${symbol}`;
 
+/**
+ * Who a stored send pays, decoded from the transaction that will run (a native transfer's `to`,
+ * or the recipient inside an ERC-20 transfer) — not from any summary or label. Null if unreadable.
+ */
+export function sentRecipient(execution: Record<string, unknown> | undefined): string | null {
+  const tx = (execution as any)?.sendData?.unsignedTx;
+  if (!tx || typeof tx.to !== "string") return null;
+  const data = String(tx.data || "0x");
+  try {
+    if (data === "0x") return ethers.getAddress(tx.to);
+    return ethers.getAddress(ERC20.decodeFunctionData("transfer", data)[0]);
+  } catch {
+    return null;
+  }
+}
+
 /** Title + details decoded from the payload, or null if it isn't something we recognise. */
 function decode(a: PendingApproval): { title: string; details: ReviewDetail[] } | null {
   if (a.intentType === "send") {

@@ -4,7 +4,43 @@
 // network: the status is checked and claimed *before* anything executes, so a
 // request the user already declined (or that someone else already settled) never runs.
 
-import { requirePending, claim, reject, getApproval, ApprovalError, type PendingApproval } from "./index";
+import { requirePending, claim, reject, getApproval, settle, ApprovalError, type PendingApproval } from "./index";
+import { sentRecipient } from "./describe";
+import { recordKnownRecipient } from "../policy/store";
+
+/**
+ * After a send through the account actually went through, remember who it paid: the next send to
+ * them no longer asks. Only called on success (never for a decline, failure, expiry or a send from
+ * the user's own wallet), and it never turns a completed send into an error.
+ */
+export async function rememberSentRecipient(wallet: string, intentType: string, execution: Record<string, unknown> | undefined): Promise<void> {
+  if (intentType !== "send") return;
+  const to = sentRecipient(execution);
+  if (!to) return;
+  try {
+    await recordKnownRecipient(wallet, to);
+  } catch (err: any) {
+    console.warn(`[approval] sent, but couldn't remember the recipient: ${err.message}`);
+  }
+}
+
+/** Run a claimed approval's stored payload (`run`) and record the outcome; a successful send is remembered. */
+export async function executeApprovalFlow(
+  a: PendingApproval,
+  run: (a: PendingApproval) => Promise<{ txHash: string; explorerUrl: string } | null>,
+): Promise<{ txHash: string; explorerUrl: string }> {
+  try {
+    const exec = await run(a);
+    if (!exec) throw new Error("It ran but gave no result, so I can't confirm it went through");
+    const result = { txHash: exec.txHash, explorerUrl: exec.explorerUrl };
+    settle(a, { result });
+    await rememberSentRecipient(a.wallet, a.intentType, a.execution);
+    return result;
+  } catch (err: any) {
+    settle(a, { error: err.message });
+    throw err;
+  }
+}
 
 export interface PasskeyApproveDeps {
   /** Check the WebAuthn response against the stored challenge. */
