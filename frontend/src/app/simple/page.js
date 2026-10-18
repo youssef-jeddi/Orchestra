@@ -21,6 +21,7 @@ import LimitsSheet from '@/components/LimitsSheet';
 import { LIMITS_BUTTON_HINT } from '@/lib/limits';
 import {
   ruleHint, declineLabel, declinedText, expiredText, ALREADY_SETTLED, approvalControls,
+  cardView, doneOutcome, outcomeAfterError,
 } from '@/lib/approvalCard';
 import { verdictLabel, ruleLabel, EXAMPLES, WELCOME, showWelcome, RECEIPT_LABEL, balanceTiles, ADD_PASSKEY_HINT } from '@/lib/plainLanguage';
 
@@ -159,6 +160,11 @@ function SimpleChat() {
     }
   }, [ledger.walletAddress, safe, emailWallet, session.hasPasskey]);
 
+  // Mark a held card as settled (done or failed) so it shows the outcome and loses its buttons.
+  const settleCard = useCallback((idx, outcome) => {
+    setMessages((m) => m.map((x, i) => (i === idx ? { ...x, outcome } : x)));
+  }, []);
+
   // Approve + execute with a passkey (biometric) instead of signing directly.
   const approvePasskey = useCallback(async (data, idx) => {
     if (!ledger.walletAddress) {
@@ -172,13 +178,18 @@ function SimpleChat() {
     setSigningIdx(idx);
     try {
       const result = await approveWithPasskey(ledger.walletAddress, data.approval.id);
-      setMessages((m) => [...m, { role: 'system', txHash: result.txHash, explorerUrl: result.explorerUrl }]);
+      settleCard(idx, doneOutcome(result));
     } catch (err) {
-      setMessages((m) => [...m, { role: 'agent', error: err.message }]);
+      // If the server already settled it (it ran and failed, or lapsed), the card says so and loses
+      // its buttons; if it is still waiting (prompt cancelled, check failed) it stays open.
+      const approval = await getApproval(data.approval.id).catch(() => null);
+      const outcome = outcomeAfterError(err, approval, data.intentType);
+      if (outcome) settleCard(idx, outcome);
+      else setMessages((m) => [...m, { role: 'agent', error: err.message }]);
     } finally {
       setSigningIdx(null);
     }
-  }, [ledger.walletAddress]);
+  }, [ledger.walletAddress, settleCard]);
 
   const registerPk = useCallback(async () => {
     if (!ledger.walletAddress) return;
@@ -377,7 +388,7 @@ function SimpleChat() {
   );
 }
 
-function MessageRow({ m, idx, onExecute, onPasskey, onDecline, onAddPasskeyHere, passkeyReg, signing, onAddPasskey, canAddPasskey }) {
+function MessageRow({ m, idx, onExecute, onPasskey, onAddPasskeyHere, passkeyReg, signing, onAddPasskey, canAddPasskey }) {
   if (m.passkeyPrompt || isPasskeyRequired(m.data)) {
     return <PasskeyPrompt text={m.passkeyPrompt ? PASSKEY_PROMPT : agentText(m.data)} onAdd={onAddPasskey} canAdd={canAddPasskey} />;
   }
@@ -418,6 +429,7 @@ function MessageRow({ m, idx, onExecute, onPasskey, onDecline, onAddPasskeyHere,
       onExecute={() => onExecute(m.data, idx)}
       onPasskey={() => onPasskey(m.data, idx)}
       onAddPasskey={onAddPasskeyHere}
+      outcome={m.outcome}
       passkeyReg={passkeyReg}
       signing={signing}
     />
@@ -462,7 +474,7 @@ function PasskeyPrompt({ text, onAdd, canAdd }) {
   );
 }
 
-function AgentCard({ data, onExecute, onPasskey, onAddPasskey, passkeyReg, signing }) {
+function AgentCard({ data, onExecute, onPasskey, onAddPasskey, passkeyReg, signing, outcome }) {
   const verdict = data.assessment?.verdict || 'UNKNOWN';
   const color = VERDICT_COLOR[verdict] || '#666';
   const triggered = data.assessment?.triggered || [];
@@ -473,6 +485,8 @@ function AgentCard({ data, onExecute, onPasskey, onAddPasskey, passkeyReg, signi
   const [declining, setDeclining] = useState(false);
   const [settled, setSettled] = useState(false); // settled elsewhere (e.g. said no on the phone)
   const settle = useCallback(() => setSettled(true), []);
+
+  const view = cardView({ outcome, ended, signing, declining, settledElsewhere: settled });
 
   const decline = async () => {
     setDeclining(true);
@@ -543,14 +557,19 @@ function AgentCard({ data, onExecute, onPasskey, onAddPasskey, passkeyReg, signi
           ✓ Done — {RECEIPT_LABEL}
         </a>
       )}
-      {controls && ended && !ended.retry && (
-        <span style={{ fontSize: 13, color: '#999', lineHeight: 1.5 }}>{ended.text}</span>
+      {controls && view.settled && (
+        <span style={{ fontSize: 13, color: outcome?.status === 'done' ? '#30D158' : '#999', lineHeight: 1.5 }}>
+          {view.line}
+          {view.receiptUrl && (
+            <> <a href={view.receiptUrl} target="_blank" rel="noreferrer" style={{ color: '#30D158', textDecoration: 'none' }}>{RECEIPT_LABEL}</a></>
+          )}
+        </span>
       )}
-      {controls && !(ended && !ended.retry) && (
+      {controls && !view.settled && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 2 }}>
           {controls.mode === 'telegram' && <TelegramWait approval={data.approval} onSettled={settle} />}
           {controls.mode === 'passkey' && (
-            <button onClick={onPasskey} disabled={signing || declining} style={approveBtn(signing)}>
+            <button onClick={onPasskey} disabled={view.approveDisabled} style={approveBtn(signing)}>
               {signing ? 'Confirm on your device…' : '🔑 Approve with passkey'}
             </button>
           )}
@@ -565,8 +584,8 @@ function AgentCard({ data, onExecute, onPasskey, onAddPasskey, passkeyReg, signi
           {controls.mode === 'need-passkey' && (
             <button onClick={onAddPasskey} style={{ ...approveBtn(false), alignSelf: 'flex-start' }}>🔑 Add passkey</button>
           )}
-          {controls.canDecline && !settled && (
-            <button onClick={decline} disabled={signing || declining} style={{ ...pill(false), alignSelf: 'flex-start', padding: '6px 12px', fontSize: 12 }}
+          {controls.canDecline && view.showDecline && (
+            <button onClick={decline} disabled={view.declineDisabled} style={{ ...pill(false), alignSelf: 'flex-start', padding: '6px 12px', fontSize: 12 }}
               title="Cancel this request. You can always ask again.">
               {declining ? 'Cancelling…' : declineLabel(data.intentType)}
             </button>

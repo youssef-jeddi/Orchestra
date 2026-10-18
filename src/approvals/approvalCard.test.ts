@@ -103,6 +103,62 @@ test("a deposit into their own account is still allowed for a MetaMask user with
   assert.equal(sent[0].to, safe);
 });
 
+// ── Card state transitions (ORC-70): open → approving → done / failed, or ended ──
+const open = { signing: false, declining: false };
+
+test("open card: both buttons are there and enabled", () => {
+  const v = card.cardView({ ...open });
+  assert.deepEqual([v.settled, v.showApprove, v.showDecline, v.approveDisabled, v.declineDisabled], [false, true, true, false, false]);
+});
+
+test("approving: the decline button is disabled (and so is approve) so the two can't race", () => {
+  const v = card.cardView({ ...open, signing: true });
+  assert.equal(v.settled, false);
+  assert.equal(v.declineDisabled, true);
+  assert.equal(v.approveDisabled, true);
+  const d = card.cardView({ ...open, declining: true });
+  assert.equal(d.approveDisabled, true, "and approve is disabled while a decline is in flight");
+});
+
+test("approved: the card says Done with the receipt link and loses both buttons", () => {
+  const outcome = card.doneOutcome({ txHash: "0xabc", explorerUrl: "https://sepolia.etherscan.io/tx/0xabc" });
+  const v = card.cardView({ ...open, outcome });
+  assert.deepEqual([v.settled, v.line, v.receiptUrl, v.showApprove, v.showDecline], [true, "Done.", "https://sepolia.etherscan.io/tx/0xabc", false, false]);
+  assert.equal(card.DONE_TEXT, "Done.");
+});
+
+test("failed after the server ran it: a plain error line, no buttons", () => {
+  const outcome = card.outcomeAfterError(new Error("boom"), { status: "failed", error: "The transfer reverted" }, "send");
+  assert.equal(outcome.status, "failed");
+  assert.equal(outcome.text, "It didn't go through: The transfer reverted");
+  const v = card.cardView({ ...open, outcome });
+  assert.deepEqual([v.settled, v.showApprove, v.showDecline], [true, false, false]);
+  assert.ok(!JARGON.test(v.line));
+});
+
+test("an error while the approval is still waiting (prompt cancelled, check failed) leaves the card open", () => {
+  for (const approval of [{ status: "pending" }, { status: "executing" }, null, undefined]) {
+    assert.equal(card.outcomeAfterError(new Error("cancelled"), approval, "send"), null);
+  }
+});
+
+test("the server's state wins when the approval call errors: executed → Done, declined/expired → the plain ended line", () => {
+  const done = card.outcomeAfterError(new Error("timeout"), { status: "executed", txHash: "0x1", explorerUrl: "https://x" }, "send");
+  assert.equal(card.cardView({ ...open, outcome: done }).line, "Done.");
+  assert.equal(card.outcomeAfterError(new Error("x"), { status: "rejected" }, "send").text, "You said no. Nothing was sent.");
+  assert.equal(card.outcomeAfterError(new Error("x"), { status: "expired" }, "swap").text, "This request expired. Nothing was swapped.");
+});
+
+test("declined card: the line replaces the buttons; a failed decline keeps them; settled elsewhere hides only decline", () => {
+  const ended = { text: card.declinedText("send") };
+  const v = card.cardView({ ...open, ended });
+  assert.deepEqual([v.settled, v.line, v.showApprove, v.showDecline], [true, "You said no. Nothing was sent.", false, false]);
+  const retry = card.cardView({ ...open, ended: { text: "network", retry: true } });
+  assert.deepEqual([retry.settled, retry.showApprove, retry.showDecline], [false, true, true]);
+  const phone = card.cardView({ ...open, settledElsewhere: true });
+  assert.deepEqual([phone.showApprove, phone.showDecline], [true, false]);
+});
+
 (async () => {
   console.log("approval card");
   for (const [name, fn] of tests) {

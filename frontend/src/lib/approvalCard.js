@@ -65,3 +65,48 @@ export function approvalControls({ intentType, approval, passkeyReg }) {
   if (passkeyReg) return { mode: 'passkey', canDecline: true };
   return { mode: 'need-passkey', canDecline: true, text: NEEDS_PASSKEY_TEXT };
 }
+
+// ── The card's life after the user acts ──
+// A held card moves from open to approving to done / failed (or ends because the user said no or
+// it lapsed). A settled card has no buttons and says what happened; while the passkey approval is
+// running the decline button is disabled so the two can't race (the server refuses either way).
+
+export const DONE_TEXT = 'Done.';
+const failedText = (message) => `It didn't go through: ${message || 'something went wrong'}`;
+
+/** The outcome stored on a card after a passkey approval went through. */
+export const doneOutcome = (result) => ({ status: 'done', txHash: result?.txHash, explorerUrl: result?.explorerUrl });
+
+/**
+ * The outcome to settle the card with after the approval call failed, from the approval's state on
+ * the server (null if it is still waiting, e.g. the passkey prompt was cancelled or didn't verify:
+ * the card stays open so they can try again).
+ */
+export function outcomeAfterError(err, approval, intentType) {
+  switch (approval?.status) {
+    case 'executed': return doneOutcome(approval);
+    case 'failed': return { status: 'failed', text: failedText(approval.error || err?.message) };
+    case 'rejected': return { status: 'ended', text: declinedText(intentType) };
+    case 'expired': return { status: 'ended', text: expiredText(intentType) };
+    default: return null;
+  }
+}
+
+/**
+ * What a held card shows now.
+ *   line / receiptUrl   the sentence that replaces the buttons once it is settled
+ *   showApprove / showDecline   which buttons are there
+ *   approveDisabled / declineDisabled   greyed out while something is in flight
+ */
+export function cardView({ outcome, ended, signing, declining, settledElsewhere }) {
+  if (outcome?.status === 'done') return { settled: true, line: DONE_TEXT, receiptUrl: outcome.explorerUrl, showApprove: false, showDecline: false };
+  if (outcome?.status === 'failed' || outcome?.status === 'ended') return { settled: true, line: outcome.text, showApprove: false, showDecline: false };
+  if (ended && !ended.retry) return { settled: true, line: ended.text, showApprove: false, showDecline: false };
+  return {
+    settled: false,
+    showApprove: true,
+    showDecline: !settledElsewhere,
+    approveDisabled: !!signing || !!declining,
+    declineDisabled: !!signing || !!declining,
+  };
+}
