@@ -34,25 +34,74 @@ export async function executeViaSafe(
   ]);
 }
 
+/** Headroom over the estimate: the chain can move a little between estimating and mining. */
+const GAS_HEADROOM_PERCENT = 20n;
+
+/** The gas limit for an estimate: the estimate plus GAS_HEADROOM_PERCENT. */
+export function gasLimitFromEstimate(estimate: bigint): bigint {
+  return (estimate * (100n + GAS_HEADROOM_PERCENT)) / 100n;
+}
+
+/** A Safe revert reason (GS013, …) from a failed call, if it carries one. */
+function safeRevertReason(err: any): string | null {
+  const reason = err?.reason ?? err?.revert?.args?.[0] ?? err?.info?.error?.message;
+  return typeof reason === "string" && reason ? reason : null;
+}
+
+/**
+ * The gas limit for a Safe transaction from `estimate` (see executeBatchViaSafe).
+ * Throws when the estimate reverts: the transaction would fail on-chain too.
+ * Falls back to `fallbackGasLimit` only when the RPC can't estimate at all.
+ */
+export async function safeGasLimit(estimate: () => Promise<bigint>, fallbackGasLimit?: string): Promise<string | undefined> {
+  try {
+    const gas = await estimate();
+    const limit = gasLimitFromEstimate(gas).toString();
+    console.log(`[safe] gas estimate ${gas} → limit ${limit}`);
+    return limit;
+  } catch (err: any) {
+    if (err?.code === "CALL_EXCEPTION") {
+      const reason = safeRevertReason(err);
+      throw new Error(
+        `This transaction would fail${reason ? ` (${reason}${reason === "GS013" ? " — the inner call failed" : ""})` : ""}, so it wasn't sent. Nothing was spent.`
+      );
+    }
+    console.warn(`[safe] couldn't estimate gas (${err?.shortMessage ?? err?.message}); using ${fallbackGasLimit ?? "the SDK's default"}`);
+    return fallbackGasLimit;
+  }
+}
+
 /**
  * Execute one or more transactions through the Safe in a single on-chain tx.
  * When transactions.length > 1, the SDK automatically uses MultiSend
  * (all operations execute atomically in one Safe tx with one nonce).
+ *
+ * The gas limit comes from estimating the whole Safe transaction (plus
+ * headroom), not from the inner call's own estimate: a quote's gas estimate
+ * leaves out the Safe's overhead, and on thin testnet pools it can be far too
+ * low, so the inner call runs out of gas and Safe reverts with GS013.
+ * safeTxGas and gasPrice are 0, so Safe reverts instead of returning false: if
+ * the estimate itself reverts, the transaction would fail on-chain too, and
+ * nothing is sent. Only when the RPC can't estimate at all is `fallbackGasLimit`
+ * used.
  */
 export async function executeBatchViaSafe(
   safeAddress: string,
   signerPrivateKey: string,
   transactions: Array<{ to: string; value: string; data: string }>,
-  gasLimit?: string
+  fallbackGasLimit?: string
 ): Promise<string> {
   const safe = await initSafe(safeAddress, signerPrivateKey);
 
   const tx = await safe.createTransaction({ transactions });
   const signedTx = await safe.signTransaction(tx);
 
-  // A fixed gas limit skips estimation. Estimation isn't reliable for router
-  // calldata, but a mined tx can still revert — GS013 means the inner call
-  // failed (safeTxGas and gasPrice are 0, so Safe reverts instead of returning false).
+  const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC);
+  const from = new ethers.Wallet(signerPrivateKey).address;
+  const data = await safe.getEncodedTransaction(signedTx);
+  // The Safe pays any value from its own balance, so the outer call carries none.
+  const gasLimit = await safeGasLimit(() => provider.estimateGas({ from, to: safeAddress, data }), fallbackGasLimit);
+
   const opts = gasLimit ? { gasLimit } : {};
   const result = await safe.executeTransaction(signedTx, opts) as { hash?: string; transactionResponse?: { wait: () => Promise<{ status?: number } | null> } };
   const hash = result.hash || "";

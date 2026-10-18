@@ -453,10 +453,13 @@ const swapAdapter: IntentAdapter = {
     }
     batch.push({ to: swapTx.to, value: swapValue, data: swapTx.data });
 
+    // The gas limit is estimated for the whole Safe transaction. The quote's own
+    // estimate covers only the swap and has been far too low on Sepolia, so it
+    // only sets the fallback, with a floor, for when the RPC can't estimate.
     const uniswapGas = parseInt(freshQuote.quote?.gasUseEstimate || "300000", 10);
-    const safeGasLimit = String(uniswapGas + 150000);
-    console.log(`[adapter:swap] AUTO_EXECUTE — executing ${batch.length} op(s) via Safe, gasLimit=${safeGasLimit}…`);
-    const txHash = await executeBatchViaSafe(ctx.safeAddress, agentKey, batch, safeGasLimit);
+    const fallbackGasLimit = String(Math.max(uniswapGas + 150000, 600000));
+    console.log(`[adapter:swap] AUTO_EXECUTE — executing ${batch.length} op(s) via Safe…`);
+    const txHash = await executeBatchViaSafe(ctx.safeAddress, agentKey, batch, fallbackGasLimit);
 
     const { logTradeResult } = await import("./logResult");
     const tradeId = quoteData.tradeId || crypto.randomUUID();
