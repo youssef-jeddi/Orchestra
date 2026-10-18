@@ -1,7 +1,8 @@
 // ─── Frontend — React list keys (source scan, no browser) ───
 // Run with `npm run test:react-keys`. React warns "Each child in a list should have a unique
-// key" for an element rendered from .map() without a key, and for a provider's child that a
-// library (Privy) places in a list. Flags the common mistakes before they reach the console.
+// key" for an element rendered from .map() without a key. Flags the common mistake before it
+// reaches the console. (Not covered: the warning Privy's own sign-in window logs for returning
+// wallet users; see the note in OrchestraContext.jsx.)
 
 import assert from "node:assert/strict";
 import * as fs from "fs";
@@ -34,11 +35,6 @@ test("the scan flags a missing key and accepts a keyed element", () => {
 test("no list rendered with .map() in the frontend is missing its key", () => {
   const bad = walk("frontend/src").flatMap((f) => unkeyedMaps(fs.readFileSync(path.join(ROOT, f), "utf8")).map((h) => `${f}: ${h}`));
   assert.deepEqual(bad, []);
-});
-
-test("OrchestraProvider keys the element it hands to Privy", () => {
-  const src = fs.readFileSync(path.join(ROOT, "frontend/src/context/OrchestraContext.jsx"), "utf8");
-  assert.match(src, /<OrchestraState key="orchestra">/);
 });
 
 (async () => {
