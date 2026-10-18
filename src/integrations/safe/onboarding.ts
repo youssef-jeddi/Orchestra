@@ -1,7 +1,11 @@
-// ─── Safe — automatic onboarding: one deployment per wallet, rate-limited ───
+// ─── Safe — automatic onboarding: one deployment per wallet, rate-limited, finished step by step ───
 // Every wallet's account is deployed at sign-in with gas paid by the agent wallet,
-// so this is the only place that decides *whether* the agent may spend that gas.
+// so this is the only place that decides *whether* the agent may spend that gas. "Ready" means
+// every setup step is done (setupSteps.ts); an account whose later steps failed is finished by
+// the next start, which runs only what is missing and never deploys twice.
 // Pure and injectable (clock, deploy function) so the rules are tested without network.
+
+import { type SetupInspection, type SetupStep, type SetupSteps, isSetupComplete, needsDeployment, remainingSteps } from "./setupSteps";
 
 export class OnboardingError extends Error {
   constructor(public status: number, message: string, public code?: string) {
@@ -31,9 +35,13 @@ export class OnboardingLimiter {
   private global: number[] = [];
   private byIp = new Map<string, number[]>();
 
-  constructor(private limits: OnboardingLimits = DEFAULT_ONBOARDING_LIMITS, private now: () => number = Date.now) {}
+  constructor(
+    private limits: OnboardingLimits = DEFAULT_ONBOARDING_LIMITS,
+    private now: () => number = Date.now,
+    private perKeyMessage = (wait: string) => `You've set up several accounts from this connection recently. Try again in ${wait}.`,
+  ) {}
 
-  /** Takes one slot, or throws a 429 saying when to come back. */
+  /** Takes one slot, or throws a 429 saying when to come back. `ip` is whatever the per-key cap is keyed by. */
   acquire(ip: string): void {
     const t = this.now();
     const fresh = (xs: number[]) => xs.filter((x) => t - x < this.limits.windowMs);
@@ -44,7 +52,7 @@ export class OnboardingLimiter {
     const full = (xs: number[], max: number) => xs.length >= max ? Math.ceil((xs[0] + this.limits.windowMs - t) / 60_000) : 0;
     const waitIp = full(mine, this.limits.perIpPerWindow);
     const waitAll = full(this.global, this.limits.globalPerWindow);
-    if (waitIp) throw new OnboardingError(429, `You've set up several accounts from this connection recently. Try again in ${waitIp} minute${waitIp === 1 ? "" : "s"}.`, "onboarding_rate_limited");
+    if (waitIp) throw new OnboardingError(429, this.perKeyMessage(`${waitIp} minute${waitIp === 1 ? "" : "s"}`), "onboarding_rate_limited");
     if (waitAll) throw new OnboardingError(429, `Lots of people are signing up right now. Try again in ${waitAll} minute${waitAll === 1 ? "" : "s"}.`, "onboarding_rate_limited");
 
     this.global.push(t);
@@ -52,13 +60,29 @@ export class OnboardingLimiter {
   }
 }
 
+// Finishing an account that is already deployed costs the agent a few transactions, not a
+// deployment, so it doesn't use the deployment budget above (a user whose setup stopped partway
+// must be able to finish). It has its own caps so a step that keeps failing, or a script that
+// keeps asking, can't make the agent pay without limit: per account and across all accounts.
+export const DEFAULT_COMPLETION_LIMITS: OnboardingLimits = {
+  globalPerWindow: Number(process.env.ONBOARD_MAX_RESUMES_PER_HOUR) || 60,
+  perIpPerWindow: Number(process.env.ONBOARD_MAX_RESUMES_PER_ACCOUNT_PER_HOUR) || 4,
+  windowMs: 3_600_000,
+};
+const completionMessage = (wait: string) => `We're still finishing your account setup. Try again in ${wait}.`;
+
 export type OnboardingState = "ready" | "deploying" | "failed" | "not_started";
 export interface OnboardingStatus {
   status: OnboardingState;
   safeAddress: string;
-  /** True when this call is the one that started a deployment. */
+  /** True when this call is the one that started a run (a deployment, or finishing the missing steps). */
   started?: boolean;
+  /** With `started`: the run only finishes steps of an account that was already deployed. */
+  resumed?: boolean;
   error?: string;
+  /** Which setup steps are done (when known): "ready" only when all are. */
+  steps?: SetupSteps;
+  remaining?: SetupStep[];
 }
 
 /** Longest one deployment may take (≈7 Sepolia transactions); past it the job fails so the queue moves on. */
@@ -68,36 +92,43 @@ interface Job { safeAddress: string; failed?: string }
 
 /**
  * One deployment per wallet. Repeated or concurrent starts join the running job; a wallet
- * that already has an account is never deployed again; the agent's transactions for
- * different wallets run one after another so they can't race on the agent's nonce.
+ * whose account is fully set up is never touched again; one whose later steps failed is finished
+ * (only the missing steps, no second deployment); the agent's transactions for different
+ * wallets run one after another so they can't race on the agent's nonce.
  */
 export class OnboardingQueue {
   private jobs = new Map<string, Job>();
   private deciding = new Map<string, Promise<OnboardingStatus>>();
   private tail: Promise<unknown> = Promise.resolve();
+  private completions: OnboardingLimiter;
 
   constructor(private deps: {
-    /** The account address if the wallet already has a deployed or stored one, else null. */
-    existing: (wallet: string) => Promise<string | null>;
-    predict: (wallet: string) => Promise<string>;
+    /** The account's address and which setup steps are done, read from the chain (and our records). */
+    inspect: (wallet: string) => Promise<SetupInspection>;
     /**
-     * `isCancelled()` turns true once the job timed out: the deploy must check it before each
-     * transaction it is about to send and stop, so an abandoned job can't keep sending while
-     * the next one runs. A transaction already sent may still confirm later; ethers takes the
-     * pending nonce for the next send, so it queues behind it instead of replacing it.
+     * Runs the steps `inspect` reports missing, and only those. `isCancelled()` turns true once
+     * the job timed out: it must check it before each transaction it is about to send and stop,
+     * so an abandoned job can't keep sending while the next one runs. A transaction already sent
+     * may still confirm later; ethers takes the pending nonce for the next send, so it queues
+     * behind it instead of replacing it.
      */
-    deploy: (wallet: string, isCancelled: () => boolean) => Promise<void>;
+    finish: (wallet: string, isCancelled: () => boolean) => Promise<void>;
+    /** Caps new deployments (per IP, global). */
     limiter: OnboardingLimiter;
+    /** Caps runs that only finish a deployed account (per account, global). */
+    completionLimiter?: OnboardingLimiter;
     timeoutMs?: number;
-  }) {}
+  }) {
+    this.completions = deps.completionLimiter ?? new OnboardingLimiter(DEFAULT_COMPLETION_LIMITS, Date.now, completionMessage);
+  }
 
-  /** Starts (or joins) the wallet's deployment. Returns at once; poll `status` for the outcome. */
+  /** Starts (or joins) the wallet's setup. Returns at once; poll `status` for the outcome. */
   start(wallet: string, ip: string): Promise<OnboardingStatus> {
     const key = wallet.toLowerCase();
     const job = this.jobs.get(key);
     if (job && !job.failed) return Promise.resolve({ status: "deploying", safeAddress: job.safeAddress });
     const joined = this.deciding.get(key);
-    if (joined) return joined.then(({ started: _, ...rest }) => rest);
+    if (joined) return joined.then(({ started: _, resumed: __, ...rest }) => rest);
     const pending = this.decide(key, wallet, ip).finally(() => this.deciding.delete(key));
     this.deciding.set(key, pending);
     return pending;
@@ -108,23 +139,32 @@ export class OnboardingQueue {
     const key = wallet.toLowerCase();
     const job = this.jobs.get(key);
     if (job) return job.failed
-      ? { status: "failed", safeAddress: job.safeAddress, error: job.failed }
+      ? { status: "failed", safeAddress: job.safeAddress, error: job.failed, ...(await this.stepsOf(wallet)) }
       : { status: "deploying", safeAddress: job.safeAddress };
-    const existing = await this.deps.existing(wallet);
-    if (existing) return { status: "ready", safeAddress: existing };
-    return { status: "not_started", safeAddress: await this.deps.predict(wallet) };
+    const found = await this.deps.inspect(wallet);
+    return isSetupComplete(found.steps)
+      ? { status: "ready", safeAddress: found.safeAddress, ...describeSteps(found.steps) }
+      : { status: "not_started", safeAddress: found.safeAddress, ...describeSteps(found.steps) };
+  }
+
+  /** The steps for a failed job; a chain read that fails here must not hide the failure itself. */
+  private async stepsOf(wallet: string): Promise<{ steps?: SetupSteps; remaining?: SetupStep[] }> {
+    try { return describeSteps((await this.deps.inspect(wallet)).steps); } catch { return {}; }
   }
 
   private async decide(key: string, wallet: string, ip: string): Promise<OnboardingStatus> {
     const job = this.jobs.get(key);
     if (job && !job.failed) return { status: "deploying", safeAddress: job.safeAddress };
-    const existing = await this.deps.existing(wallet);
-    if (existing) {
+    const found = await this.deps.inspect(wallet);
+    if (isSetupComplete(found.steps)) {
       this.jobs.delete(key);
-      return { status: "ready", safeAddress: existing };
+      return { status: "ready", safeAddress: found.safeAddress, ...describeSteps(found.steps) };
     }
-    this.deps.limiter.acquire(ip); // throws 429; a failed job stays so the error remains visible
-    const safeAddress = await this.deps.predict(wallet);
+    // A new deployment uses the deployment budget; finishing an account that already exists uses
+    // the (separate, per-account) completion budget. A failed job stays so the error remains visible.
+    const resumed = !needsDeployment(found.steps);
+    if (resumed) this.completions.acquire(key); else this.deps.limiter.acquire(ip); // throws 429
+    const safeAddress = found.safeAddress;
     const fresh: Job = { safeAddress };
     this.jobs.set(key, fresh);
     const run = this.tail.then(() => this.withTimeout(wallet));
@@ -132,14 +172,14 @@ export class OnboardingQueue {
     run.then(
       () => { if (this.jobs.get(key) === fresh) this.jobs.delete(key); },
       (err) => {
-        console.error(`[onboard] Deployment failed for ${wallet}:`, err?.message);
+        console.error(`[onboard] Setup failed for ${wallet}:`, err?.message);
         fresh.failed = "We couldn't finish setting up your account. Please try again.";
       },
     );
-    return { status: "deploying", safeAddress, started: true };
+    return { status: "deploying", safeAddress, started: true, ...(resumed ? { resumed: true } : {}), remaining: remainingSteps(found.steps) };
   }
 
-  /** Runs one deployment, failing it if it takes longer than the timeout (a transaction that never confirms). */
+  /** Runs one setup, failing it if it takes longer than the timeout (a transaction that never confirms). */
   private async withTimeout(wallet: string): Promise<void> {
     let cancelled = false;
     let timer: NodeJS.Timeout | undefined;
@@ -148,9 +188,11 @@ export class OnboardingQueue {
       timer.unref(); // never keeps the process alive on its own
     });
     try {
-      await Promise.race([this.deps.deploy(wallet, () => cancelled), limit]);
+      await Promise.race([this.deps.finish(wallet, () => cancelled), limit]);
     } finally {
       clearTimeout(timer);
     }
   }
 }
+
+const describeSteps = (steps: SetupSteps) => ({ steps, remaining: remainingSteps(steps) });

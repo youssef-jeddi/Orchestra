@@ -1140,7 +1140,7 @@ app.post("/onboard", requireSession, async (req, res) => {
     const result = await onboarding.start(wallet, req.ip || "unknown");
     res.json({
       ...result,
-      isNewUser: !!result.started,
+      isNewUser: !!result.started && !result.resumed, // finishing an older account's setup is not a new user
       spendingLimitUSD: await storedSpendingLimit(wallet),
     });
   } catch (err: any) {

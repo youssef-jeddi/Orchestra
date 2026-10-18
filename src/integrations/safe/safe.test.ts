@@ -5,7 +5,8 @@ import assert from "node:assert/strict";
 import { predictedSafeConfig } from "./deploy";
 // @ts-expect-error plain JS helper shared with the frontend, no type declarations
 import { safeStatusFor, shouldPoll, pollAction, onboardingErrorMessage, shortAddress } from "../../../frontend/src/lib/onboarding.js";
-import { OnboardingLimiter, OnboardingQueue, OnboardingError } from "./onboarding";
+import { OnboardingLimiter, OnboardingQueue, OnboardingError, type OnboardingLimits } from "./onboarding";
+import { SETUP_STEPS, type SetupStep, type SetupSteps, allStepsDone, deriveSteps, finishSetup, remainingSteps } from "./setupSteps";
 
 let passed = 0;
 const tests: [string, () => void | Promise<void>][] = [];
@@ -13,27 +14,37 @@ const test = (name: string, fn: () => void | Promise<void>) => tests.push([name,
 
 const AGENT = "0x00000000000000000000000000000000000000A1";
 const USER = "0x00000000000000000000000000000000000000B2";
+const COMPLETION = { globalPerWindow: 10, perIpPerWindow: 2, windowMs: 3_600_000 };
 const LIMITS = { globalPerWindow: 4, perIpPerWindow: 2, windowMs: 3_600_000 };
 
-function setup(over: Partial<ConstructorParameters<typeof OnboardingQueue>[0]> = {}, limits = LIMITS) {
+type Deps = ConstructorParameters<typeof OnboardingQueue>[0];
+const noSteps = (): SetupSteps => ({ deploy: false, module: false, delegate: false, allowances: false, register: false, record: false });
+
+/** A fake chain: per wallet, which steps are done. Only the "deploy" step waits for release(). */
+function setup(over: Partial<Deps> = {}, limits = LIMITS, opts: { failAt?: SetupStep; completion?: OnboardingLimits } = {}) {
   let clock = 1_000_000;
-  const deployed = new Set<string>();
+  const chain = new Map<string, SetupSteps>();
   const log: string[] = [];
   const gates: (() => void)[] = [];
+  const stepsOf = (w: string) => chain.get(w.toLowerCase()) ?? noSteps();
+  const complete = (w: string) => chain.set(w.toLowerCase(), allStepsDone());
+  const inspect = async (w: string) => ({ safeAddress: `acct-${w}`, steps: { ...stepsOf(w) } });
+  const doer = (w: string, step: SetupStep) => async () => {
+    log.push(`${step} ${w}`);
+    if (step === "deploy") await new Promise<void>((r) => gates.push(r));
+    if (opts.failAt === step) throw new Error(`${step} reverted: 0xdeadbeef secret detail`);
+    chain.set(w.toLowerCase(), { ...stepsOf(w), [step]: true });
+  };
   const queue = new OnboardingQueue({
-    existing: async (w) => (deployed.has(w.toLowerCase()) ? `acct-${w}` : null),
-    predict: async (w) => `acct-${w}`,
-    deploy: async (w) => {
-      log.push(`start ${w}`);
-      await new Promise<void>((r) => gates.push(r));
-      deployed.add(w.toLowerCase());
-      log.push(`end ${w}`);
-    },
+    inspect,
+    finish: (w, isCancelled) => finishSetup(() => inspect(w), Object.fromEntries(SETUP_STEPS.map((st) => [st, doer(w, st)])) as Record<SetupStep, () => Promise<void>>, isCancelled).then(() => {}),
     limiter: new OnboardingLimiter(limits, () => clock),
+    completionLimiter: new OnboardingLimiter(opts.completion ?? COMPLETION, () => clock, () => "wait"),
     ...over,
   });
   const release = async () => { await new Promise((r) => setImmediate(r)); gates.shift()?.(); await new Promise((r) => setImmediate(r)); };
-  return { queue, deployed, log, release, tick: (ms: number) => { clock += ms; } };
+  const settle = () => new Promise((r) => setTimeout(r, 20));
+  return { queue, chain, complete, stepsOf, log, release, settle, tick: (ms: number) => { clock += ms; } };
 }
 
 test("the predicted-address config is pinned: owners [agent, user], threshold 1, no salt", () => {
@@ -43,82 +54,171 @@ test("the predicted-address config is pinned: owners [agent, user], threshold 1,
 });
 
 test("concurrent starts for one wallet share a single deployment", async () => {
-  const { queue, log, release } = setup();
+  const { queue, log, release, settle } = setup();
   const [a, b, c] = await Promise.all([queue.start(USER, "1.1.1.1"), queue.start(USER, "1.1.1.1"), queue.start(USER, "2.2.2.2")]);
   assert.equal(a.status, "deploying");
   assert.equal(b.safeAddress, a.safeAddress);
   assert.equal(c.safeAddress, a.safeAddress);
   assert.equal([a, b, c].filter((r) => r.started).length, 1);
   await release();
-  assert.deepEqual(log, [`start ${USER}`, `end ${USER}`]);
+  await settle();
+  assert.deepEqual(log.filter((l) => l.startsWith("deploy")), [`deploy ${USER}`]);
+  assert.equal(log.length, SETUP_STEPS.length); // each step once
 });
 
-test("a wallet that already has an account is never deployed again", async () => {
-  const { queue, log, release, deployed } = setup();
+test("a wallet whose account is fully set up is never touched again", async () => {
+  const { queue, log, release, settle, complete } = setup();
   await queue.start(USER, "1.1.1.1");
   await release();
+  await settle();
+  const before = log.length;
   const again = await queue.start(USER, "1.1.1.1");
   assert.equal(again.status, "ready");
-  deployed.add("0xother");
+  complete("0xother");
   assert.equal((await queue.start("0xOTHER", "1.1.1.1")).status, "ready");
-  assert.equal(log.filter((l) => l.startsWith("start")).length, 1);
+  assert.equal(log.length, before);
 });
 
 test("an existing account does not use up the rate limit", async () => {
-  const { queue, deployed } = setup({}, { ...LIMITS, perIpPerWindow: 1 });
-  deployed.add(USER.toLowerCase());
+  const { queue, complete } = setup({}, { ...LIMITS, perIpPerWindow: 1 });
+  complete(USER);
   for (let i = 0; i < 5; i++) assert.equal((await queue.start(USER, "1.1.1.1")).status, "ready");
 });
 
 test("agent transactions for different wallets run one after another", async () => {
-  const { queue, log, release } = setup();
+  const { queue, log, release, settle } = setup();
   const w2 = "0x00000000000000000000000000000000000000C3";
   await queue.start(USER, "1.1.1.1");
   await queue.start(w2, "2.2.2.2");
   await new Promise((r) => setImmediate(r));
-  assert.deepEqual(log, [`start ${USER}`]); // the second waits for the first
+  assert.deepEqual(log, [`deploy ${USER}`]); // the second waits for the first
   await release();
+  await settle();
   await release();
-  assert.deepEqual(log, [`start ${USER}`, `end ${USER}`, `start ${w2}`, `end ${w2}`]);
+  await settle();
+  assert.deepEqual(log.filter((l) => l.startsWith("deploy")), [`deploy ${USER}`, `deploy ${w2}`]);
+  assert.ok(log.indexOf(`record ${USER}`) < log.indexOf(`deploy ${w2}`));
 });
 
-test("status reports not_started, deploying, then ready", async () => {
-  const { queue, release } = setup();
-  assert.equal((await queue.status(USER)).status, "not_started");
+test("status reports not_started, deploying, then ready, with the steps", async () => {
+  const { queue, release, settle } = setup();
+  const first = await queue.status(USER);
+  assert.equal(first.status, "not_started");
+  assert.deepEqual(first.remaining, [...SETUP_STEPS]);
   const started = await queue.start(USER, "1.1.1.1");
   assert.deepEqual(await queue.status(USER), { status: "deploying", safeAddress: started.safeAddress });
   await release();
-  assert.equal((await queue.status(USER)).status, "ready");
+  await settle();
+  const done = await queue.status(USER);
+  assert.equal(done.status, "ready");
+  assert.deepEqual(done.remaining, []);
 });
 
 test("a failed deployment is reported plainly and can be retried", async () => {
-  let fail = true;
-  const { queue, deployed } = setup({
-    deploy: async (w) => { if (fail) throw new Error("estimate reverted: 0xdeadbeef secret detail"); deployed.add(w.toLowerCase()); },
-  });
+  const { queue, release, settle } = setup({}, LIMITS, { failAt: "deploy" });
   await queue.start(USER, "1.1.1.1");
-  await new Promise((r) => setImmediate(r));
+  await release();
+  await settle();
   const failed = await queue.status(USER);
   assert.equal(failed.status, "failed");
   assert.ok(!failed.error!.includes("0xdeadbeef")); // internals are not shown to the user
-  fail = false;
-  assert.equal((await queue.start(USER, "1.1.1.1")).started, true);
-  await new Promise((r) => setImmediate(r));
+});
+
+test("failure after the deploy leaves the account NOT ready, and says what is missing", async () => {
+  const { queue, release, settle, stepsOf } = setup({}, LIMITS, { failAt: "delegate" });
+  await queue.start(USER, "1.1.1.1");
+  await release();
+  await settle();
+  const st = await queue.status(USER);
+  assert.equal(st.status, "failed");
+  assert.deepEqual(st.remaining, ["delegate", "allowances", "register", "record"]);
+  assert.equal(stepsOf(USER).deploy, true);
+  assert.equal(stepsOf(USER).module, true);
+  assert.equal(stepsOf(USER).record, false);
+});
+
+test("a retry runs only the missing steps: no second deploy, same address", async () => {
+  const { queue, log, chain, release, settle, stepsOf } = setup();
+  const first = await queue.start(USER, "1.1.1.1");
+  chain.set(USER.toLowerCase(), { ...allStepsDone(), delegate: false, allowances: false, register: false, record: false }); // as if it stopped after "module"
+  await release();
+  await settle();
+  log.length = 0;
+  chain.set(USER.toLowerCase(), { ...allStepsDone(), allowances: false, register: false, record: false });
+  const retry = await queue.start(USER, "1.1.1.1");
+  assert.equal(retry.status, "deploying");
+  assert.equal(retry.resumed, true);
+  assert.equal(retry.safeAddress, first.safeAddress);
+  await settle();
+  assert.deepEqual(log, [`allowances ${USER}`, `register ${USER}`, `record ${USER}`]);
+  assert.equal((await queue.status(USER)).status, "ready");
+  assert.equal(Object.values(stepsOf(USER)).every(Boolean), true);
+});
+
+test("a retry after a timed-out deploy (the code is already there) sends no second deploy", async () => {
+  const { queue, log, chain, settle } = setup({ timeoutMs: 20 });
+  await queue.start(USER, "1.1.1.1"); // the deploy step hangs on its gate: the job times out
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal((await queue.status(USER)).status, "failed");
+  log.length = 0;
+  chain.set(USER.toLowerCase(), { ...noSteps(), deploy: true }); // the transaction confirmed after all
+  await queue.start(USER, "1.1.1.1");
+  await settle();
+  assert.equal(log.some((l) => l.startsWith("deploy")), false);
+  assert.deepEqual(log.map((l) => l.split(" ")[0]), ["module", "delegate", "allowances", "register", "record"]);
+});
+
+test("finishing an account does not use the deployment budget", async () => {
+  const { queue, chain, settle, release } = setup({}, { ...LIMITS, perIpPerWindow: 1 });
+  await queue.start("0x01", "9.9.9.9"); // takes the IP's only deployment slot
+  await assert.rejects(queue.start("0x02", "9.9.9.9"), (e: any) => e.status === 429);
+  chain.set(USER.toLowerCase(), { ...allStepsDone(), allowances: false, register: false, record: false });
+  const r = await queue.start(USER, "9.9.9.9"); // same IP, but only finishing
+  assert.equal(r.resumed, true);
+  await release(); // the first wallet's deployment ends; the queue then finishes this account
+  await settle();
   assert.equal((await queue.status(USER)).status, "ready");
 });
 
-test("a retry finds the account if the failed attempt did deploy it", async () => {
-  const { queue, deployed } = setup({ deploy: async (w) => { deployed.add(w.toLowerCase()); throw new Error("later step failed"); } });
-  await queue.start(USER, "1.1.1.1");
-  await new Promise((r) => setImmediate(r));
-  assert.equal((await queue.start(USER, "1.1.1.1")).status, "ready"); // not deployed a second time
+test("attack: asking over and over to finish one account is capped per account, and across accounts", async () => {
+  const stuck = { ...allStepsDone(), record: false };
+  const a = setup({}, LIMITS, { failAt: "record" });
+  a.chain.set(USER.toLowerCase(), stuck);
+  for (let i = 0; i < 2; i++) { await a.queue.start(USER, "1.1.1.1"); await a.settle(); }
+  await assert.rejects(a.queue.start(USER, "1.1.1.1"), (e: any) => e instanceof OnboardingError && e.status === 429 && e.code === "onboarding_rate_limited");
+  assert.equal(a.log.filter((l) => l.startsWith("record")).length, 2, "the third attempt sent nothing");
+
+  const b = setup({}, LIMITS, { completion: { globalPerWindow: 3, perIpPerWindow: 2, windowMs: 3_600_000 } });
+  for (let i = 0; i < 3; i++) b.chain.set(`0x2${i}`, stuck);
+  for (let i = 0; i < 3; i++) await b.queue.start(`0x2${i}`, "2.2.2.2");
+  b.chain.set("0x29", stuck);
+  await assert.rejects(b.queue.start("0x29", "3.3.3.3"), (e: any) => e.status === 429);
+  assert.equal(b.log.some((l) => l.startsWith("deploy")), false, "finishing never deploys");
+});
+
+test("deriveSteps: the chain decides; nothing after deploy counts without code", () => {
+  const all = { hasCode: true, moduleEnabled: true, agentIsDelegate: true, allowancesMissing: 0, policyConfigured: true, registered: true, recorded: true };
+  assert.deepEqual(remainingSteps(deriveSteps(all)), []);
+  assert.deepEqual(remainingSteps(deriveSteps({ ...all, hasCode: false })), [...SETUP_STEPS], "local flags can't make an undeployed account ready");
+  assert.deepEqual(remainingSteps(deriveSteps({ ...all, moduleEnabled: false, allowancesMissing: 2 })), ["module", "allowances"]);
+  assert.deepEqual(remainingSteps(deriveSteps({ ...all, agentIsDelegate: false, registered: false, recorded: false })), ["delegate", "register", "record"]);
+  assert.deepEqual(remainingSteps(deriveSteps({ ...all, policyConfigured: false, registered: false })), [], "nothing to register without a policy contract");
+});
+
+test("a fully set-up account does nothing on retry (finishSetup runs no step)", async () => {
+  const ran: string[] = [];
+  const doers = Object.fromEntries(SETUP_STEPS.map((st) => [st, async () => { ran.push(st); }])) as Record<SetupStep, () => Promise<void>>;
+  assert.deepEqual(await finishSetup(async () => ({ safeAddress: "a", steps: allStepsDone() }), doers, () => false), []);
+  assert.deepEqual(ran, []);
+  await assert.rejects(finishSetup(async () => ({ safeAddress: "a", steps: noSteps() }), doers, () => true), /timed out/);
+  assert.deepEqual(ran, [], "a cancelled run stops before its next transaction");
 });
 
 test("a deployment that never finishes times out, fails its job and lets the next one run", async () => {
   const log: string[] = [];
   const { queue } = setup({
     timeoutMs: 20,
-    deploy: async (w) => { log.push(`start ${w}`); if (w === USER) await new Promise(() => {}); log.push(`end ${w}`); },
+    finish: async (w) => { log.push(`start ${w}`); if (w === USER) await new Promise(() => {}); log.push(`end ${w}`); },
   });
   const w2 = "0x00000000000000000000000000000000000000C3";
   await queue.start(USER, "1.1.1.1");
@@ -131,7 +231,7 @@ test("a deployment that never finishes times out, fails its job and lets the nex
 
 test("a timed-out deployment is told to stop before its next transaction", async () => {
   let cancelled: (() => boolean) | undefined;
-  const { queue } = setup({ timeoutMs: 10, deploy: async (_w, isCancelled) => { cancelled = isCancelled; await new Promise(() => {}); } });
+  const { queue } = setup({ timeoutMs: 10, finish: async (_w, isCancelled) => { cancelled = isCancelled; await new Promise(() => {}); } });
   await queue.start(USER, "1.1.1.1");
   await new Promise((r) => setImmediate(r));
   assert.equal(cancelled!(), false);

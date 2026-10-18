@@ -1,16 +1,18 @@
 // ─── Safe — onboarding wiring: deploy, configure and register a user's account ───
-// Runs the real steps for OnboardingQueue (onboarding.ts). The server's default limit is
+// Runs the real steps for OnboardingQueue (onboarding.ts), each only if the chain shows it missing. The server's default limit is
 // used for everything: nothing the client sends decides a policy value here.
 
 import { ethers } from "ethers";
 import { makeSepoliaProvider } from "../../utils/rpc";
 import { read, write } from "../zero-g/storage";
 import { readUserProfile, writeUserProfile } from "../../policy/store";
+import Safe from "@safe-global/protocol-kit";
 import { deploySafe, predictSafeAddress } from "./deploy";
-import { detectExistingSafe } from "./detect";
 import { getAgentAddress } from "./agentWallet";
-import { setInitialSpendingLimits } from "./spendingLimit";
+import { enableAllowanceModule, addAgentDelegate, setAgentAllowances, isAgentDelegate, tokensWithoutAllowance } from "./spendingLimit";
+import { ALLOWANCE_MODULE_ADDRESS } from "../../types/safe";
 import { OnboardingError, OnboardingLimiter, OnboardingQueue } from "./onboarding";
+import { type SetupFacts, type SetupInspection, allStepsDone, deriveSteps, finishSetup, isSetupComplete, remainingSteps } from "./setupSteps";
 
 export const DEFAULT_SPENDING_LIMIT_USD = 100;
 
@@ -22,59 +24,116 @@ async function agentAddress(): Promise<string> {
   }
 }
 
-/** Deploys the account and sets it up exactly as before: limits, OrchestraPolicy, stored record, profile. */
-async function deployAndConfigure(wallet: string, isCancelled: () => boolean): Promise<void> {
-  const proceed = () => { if (isCancelled()) throw new Error("deployment timed out"); };
+// Our own progress record for an account's setup: written before the first transaction, so a
+// crash or timeout after the deploy still leaves a trace that the setup is unfinished. Chain
+// state decides each step; this only holds what the chain can't show (registered, finished).
+interface SetupRecord { safeAddress: string; startedAt: string; registeredAt?: string; completedAt?: string }
+const setupKey = (user: string) => `onboard:${user.toLowerCase()}`;
+const POLICY_READ_ABI = ["function getPolicy(address user) view returns (tuple(address safeAddress, address agentWallet, uint256 spendingLimitUSD, bool initialized))"];
+
+/** Reads where the wallet's account stands: its address, and each setup step from the chain. */
+async function inspectAccount(wallet: string): Promise<SetupInspection> {
+  const user = ethers.getAddress(wallet);
+  const agent = await agentAddress();
+  const safeAddress = await predictSafeAddress(user, agent);
+  const record = (await read(setupKey(user))) as SetupRecord | null;
+  if (record?.completedAt && record.safeAddress === safeAddress) return { safeAddress, steps: allStepsDone() };
+
+  const provider = makeSepoliaProvider();
+  // A failed read throws: not knowing is never taken as "not deployed" (that would deploy twice).
+  const hasCode = (await provider.getCode(safeAddress)) !== "0x";
+  const policyAddress = process.env.ORCHESTRA_POLICY_ADDRESS;
+  let facts: SetupFacts = {
+    hasCode, moduleEnabled: false, agentIsDelegate: false, allowancesMissing: 3,
+    policyConfigured: !!policyAddress, registered: false, recorded: false,
+  };
+  if (hasCode) {
+    const stored = (await read(`safe:${user.toLowerCase()}`)) as { safeAddress?: string } | null;
+    // An account from before step tracking (stored, no progress record) was set up by the old
+    // flow: its registration isn't re-sent (the policy contract holds one entry per agent, so
+    // re-registering would overwrite another account's).
+    const legacy = !record && !!stored?.safeAddress;
+    let registeredOnChain = false;
+    if (policyAddress && !record?.registeredAt && !legacy) {
+      const policy = new ethers.Contract(policyAddress, POLICY_READ_ABI, provider);
+      registeredOnChain = String((await policy.getPolicy(agent)).safeAddress).toLowerCase() === safeAddress.toLowerCase();
+    }
+    const safe = await Safe.init({ provider: process.env.SEPOLIA_RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com", safeAddress });
+    facts = {
+      ...facts,
+      moduleEnabled: await safe.isModuleEnabled(ALLOWANCE_MODULE_ADDRESS),
+      agentIsDelegate: await isAgentDelegate(safeAddress, agent),
+      allowancesMissing: (await tokensWithoutAllowance(safeAddress, agent)).length,
+      registered: !!record?.registeredAt || registeredOnChain || legacy,
+      recorded: legacy,
+    };
+  }
+  const steps = deriveSteps(facts);
+  if (isSetupComplete(steps) && !record?.completedAt) {
+    // Everything checks out on chain (an account from before step tracking): remember it, so
+    // later sign-ins skip these reads.
+    await write(setupKey(user), { ...record, safeAddress, startedAt: record?.startedAt ?? new Date().toISOString(), completedAt: new Date().toISOString() } satisfies SetupRecord);
+  }
+  return { safeAddress, steps };
+}
+
+/** Runs the account's missing setup steps, in order, each checked against the chain first. */
+async function finishAccount(wallet: string, isCancelled: () => boolean): Promise<void> {
   const user = ethers.getAddress(wallet);
   const agent = await agentAddress();
   const agentKey = process.env.AGENT_PRIVATE_KEY!;
   const provider = makeSepoliaProvider();
   const limit = DEFAULT_SPENDING_LIMIT_USD;
+  const { safeAddress } = await inspectAccount(user);
 
-  proceed();
-  const safeAddress = await deploySafe(user, agent, provider);
+  const record = ((await read(setupKey(user))) as SetupRecord | null) ?? { safeAddress, startedAt: new Date().toISOString() };
+  await write(setupKey(user), record); // before any transaction: an interrupted setup stays visible
 
-  proceed();
-  // Spending limits are non-blocking, as before: the account works without them.
-  try {
-    await setInitialSpendingLimits(safeAddress, agent, limit, agentKey);
-  } catch (e: any) {
-    console.warn(`[onboard] Spending limits setup deferred: ${e.message}`);
+  const ran = await finishSetup(() => inspectAccount(user), {
+    deploy: async () => { await deploySafe(user, agent, provider); },
+    module: () => enableAllowanceModule(safeAddress, agentKey),
+    delegate: () => addAgentDelegate(safeAddress, agent, agentKey),
+    allowances: async () => setAgentAllowances(safeAddress, agent, limit, agentKey, await tokensWithoutAllowance(safeAddress, agent)),
+    register: async () => {
+      const abi = ["function registerSafe(address safeAddress, address agentWallet, uint256 spendingLimitUSD) external"];
+      const policy = new ethers.Contract(process.env.ORCHESTRA_POLICY_ADDRESS!, abi, new ethers.Wallet(agentKey, provider));
+      const tx = await policy.registerSafe(safeAddress, agent, limit * 100);
+      await tx.wait();
+      console.log(`[onboard] Policy registered: ${tx.hash}`);
+      await write(setupKey(user), { ...record, registeredAt: new Date().toISOString() } satisfies SetupRecord);
+    },
+    record: async () => {
+      await write(`safe:${user.toLowerCase()}`, {
+        safeAddress, agentWallet: agent, spendingLimitUSD: limit, deployedAt: new Date().toISOString(),
+      });
+      // Merge: keep any existing guardrail policy instead of wiping it.
+      const profile = await readUserProfile(user);
+      await writeUserProfile(user, {
+        ...profile,
+        address: user,
+        safeAddress,
+        riskTolerance: profile.riskTolerance || "moderate",
+        autoApproveLimit: limit,
+        preferredTokens: profile.preferredTokens || ["USDC", "WETH", "ETH"],
+        createdAt: profile.createdAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+    },
+  }, isCancelled);
+
+  // Done only if the chain agrees: the next inspect decides, not this function's say-so.
+  if (ran.length) {
+    const after = await inspectAccount(user);
+    if (!isSetupComplete(after.steps)) throw new Error(`setup incomplete: ${remainingSteps(after.steps).join(", ")}`);
+    const latest = ((await read(setupKey(user))) as SetupRecord | null) ?? record;
+    if (!latest.completedAt) await write(setupKey(user), { ...latest, completedAt: new Date().toISOString() } satisfies SetupRecord);
+    console.log(`[onboard] Account ready: ${safeAddress} (ran: ${ran.join(", ")})`);
   }
-
-  proceed();
-  const policyAddress = process.env.ORCHESTRA_POLICY_ADDRESS;
-  if (policyAddress) {
-    const abi = ["function registerSafe(address safeAddress, address agentWallet, uint256 spendingLimitUSD) external"];
-    const policy = new ethers.Contract(policyAddress, abi, new ethers.Wallet(agentKey, provider));
-    const tx = await policy.registerSafe(safeAddress, agent, limit * 100);
-    await tx.wait();
-    console.log(`[onboard] Policy registered: ${tx.hash}`);
-  }
-
-  await write(`safe:${user.toLowerCase()}`, {
-    safeAddress, agentWallet: agent, spendingLimitUSD: limit, deployedAt: new Date().toISOString(),
-  });
-
-  // Merge: keep any existing guardrail policy instead of wiping it.
-  const profile = await readUserProfile(user);
-  await writeUserProfile(user, {
-    ...profile,
-    address: user,
-    safeAddress,
-    riskTolerance: profile.riskTolerance || "moderate",
-    autoApproveLimit: limit,
-    preferredTokens: profile.preferredTokens || ["USDC", "WETH", "ETH"],
-    createdAt: profile.createdAt || new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  });
-  console.log(`[onboard] Account ready: ${safeAddress}`);
 }
 
 export const onboarding = new OnboardingQueue({
-  existing: (wallet) => detectExistingSafe(wallet),
-  predict: async (wallet) => predictSafeAddress(ethers.getAddress(wallet), await agentAddress()),
-  deploy: deployAndConfigure,
+  inspect: inspectAccount,
+  finish: finishAccount,
   limiter: new OnboardingLimiter(),
 });
 
