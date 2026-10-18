@@ -22,7 +22,7 @@ const CLOCK_SKEW_MS = 60_000;
 
 /** Plain-language reason shown in the chat and returned with code `passkey_required`. */
 export const PASSKEY_REQUIRED_MESSAGE =
-  "To keep your money safe, confirm transactions with a passkey (Face ID, fingerprint or your device PIN). We'll email you a code first to make sure it's you.";
+  "To keep your money safe, confirm transactions with a passkey (Face ID, fingerprint or your device PIN). First we'll check it's really you.";
 
 // ── Pure decisions ──
 

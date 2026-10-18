@@ -342,7 +342,7 @@ export async function requirePasskeyToMoveFunds(wallet: string): Promise<void> {
 }
 
 function emailVerificationNeeded(): PasskeyError {
-  return new PasskeyError(403, "We'll email you a code first to make sure it's you. Enter it, then add your passkey.", "email_verification_required");
+  return new PasskeyError(403, "First we need to check it's really you. Confirm your sign-in again, then add your passkey.", "email_verification_required");
 }
 
 // ── Owner check: an existing passkey before adding another ──

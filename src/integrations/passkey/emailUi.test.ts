@@ -20,7 +20,8 @@ const test = (name: string, fn: () => void | Promise<void>) => tests.push([name,
 
   test("UI: the prompt is plain words for newcomers — passkey, email code, no jargon", () => {
     assert.match(ui.PASSKEY_PROMPT, /passkey/);
-    assert.match(ui.PASSKEY_PROMPT, /email you a code/);
+    assert.match(ui.PASSKEY_PROMPT, /check it's really you/);
+    assert.ok(!/email|code/i.test(ui.PASSKEY_PROMPT), "true for email and social sign-ins alike");
     assert.ok(!/\bSafe\b|wallet|signer|multisig/.test(ui.PASSKEY_PROMPT), ui.PASSKEY_PROMPT);
     assert.equal(ui.isPasskeyRequired({ status: "passkey_required" }), true);
     assert.equal(ui.isPasskeyRequired({ status: "ok" }), false);

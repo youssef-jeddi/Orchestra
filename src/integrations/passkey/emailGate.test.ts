@@ -77,6 +77,7 @@ const test = (name: string, fn: () => void | Promise<void>) => tests.push([name,
     assert.equal(gate.passkeyGate({ emailWallet: false, passkeyCount: 0 }).ok, true);
     const refused = gate.passkeyGate({ emailWallet: true, passkeyCount: 0 });
     assert.ok(!refused.ok && refused.code === "passkey_required" && !/Safe/.test(refused.message));
+    assert.ok(!refused.ok && !/email|code/i.test(refused.message), "wording fits social sign-ins too");
   });
 
   // ── No passkey, no funds ──

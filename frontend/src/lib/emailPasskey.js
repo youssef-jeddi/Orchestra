@@ -5,7 +5,7 @@
 
 /** Shown in the chat (and by the server as the reason): plain words, "your account", no jargon. */
 export const PASSKEY_PROMPT =
-  "To keep your money safe, confirm transactions with a passkey (Face ID, fingerprint or your device PIN). We'll email you a code first to make sure it's you.";
+  "To keep your money safe, confirm transactions with a passkey (Face ID, fingerprint or your device PIN). First we'll check it's really you.";
 
 export const SIGN_REFUSED = 'Confirm this with your passkey instead.';
 
