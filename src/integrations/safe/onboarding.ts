@@ -77,9 +77,11 @@ export interface OnboardingStatus {
   safeAddress: string;
   /** True when this call is the one that started a run (a deployment, or finishing the missing steps). */
   started?: boolean;
-  /** With `started`: the run only finishes steps of an account that was already deployed. */
+  /** The run only finishes steps of an account that was already deployed (the UI says "finishing", not "setting up"). */
   resumed?: boolean;
   error?: string;
+  /** With `error`: `setup_pending` means an earlier transaction may still confirm; nothing was sent again. */
+  errorCode?: string;
   /** Which setup steps are done (when known): "ready" only when all are. */
   steps?: SetupSteps;
   remaining?: SetupStep[];
@@ -88,7 +90,7 @@ export interface OnboardingStatus {
 /** Longest one deployment may take (≈7 Sepolia transactions); past it the job fails so the queue moves on. */
 export const DEPLOY_TIMEOUT_MS = Number(process.env.ONBOARD_DEPLOY_TIMEOUT_MS) || 600_000;
 
-interface Job { safeAddress: string; failed?: string }
+interface Job { safeAddress: string; resumed: boolean; failed?: string; failedCode?: string }
 
 /**
  * One deployment per wallet. Repeated or concurrent starts join the running job; a wallet
@@ -126,9 +128,9 @@ export class OnboardingQueue {
   start(wallet: string, ip: string): Promise<OnboardingStatus> {
     const key = wallet.toLowerCase();
     const job = this.jobs.get(key);
-    if (job && !job.failed) return Promise.resolve({ status: "deploying", safeAddress: job.safeAddress });
+    if (job && !job.failed) return Promise.resolve({ status: "deploying", safeAddress: job.safeAddress, ...(job.resumed ? { resumed: true } : {}) });
     const joined = this.deciding.get(key);
-    if (joined) return joined.then(({ started: _, resumed: __, ...rest }) => rest);
+    if (joined) return joined.then(({ started: _, ...rest }) => rest);
     const pending = this.decide(key, wallet, ip).finally(() => this.deciding.delete(key));
     this.deciding.set(key, pending);
     return pending;
@@ -139,8 +141,8 @@ export class OnboardingQueue {
     const key = wallet.toLowerCase();
     const job = this.jobs.get(key);
     if (job) return job.failed
-      ? { status: "failed", safeAddress: job.safeAddress, error: job.failed, ...(await this.stepsOf(wallet)) }
-      : { status: "deploying", safeAddress: job.safeAddress };
+      ? { status: "failed", safeAddress: job.safeAddress, error: job.failed, ...(job.failedCode ? { errorCode: job.failedCode } : {}), ...(await this.stepsOf(wallet)) }
+      : { status: "deploying", safeAddress: job.safeAddress, ...(job.resumed ? { resumed: true } : {}) };
     const found = await this.deps.inspect(wallet);
     return isSetupComplete(found.steps)
       ? { status: "ready", safeAddress: found.safeAddress, ...describeSteps(found.steps) }
@@ -154,7 +156,7 @@ export class OnboardingQueue {
 
   private async decide(key: string, wallet: string, ip: string): Promise<OnboardingStatus> {
     const job = this.jobs.get(key);
-    if (job && !job.failed) return { status: "deploying", safeAddress: job.safeAddress };
+    if (job && !job.failed) return { status: "deploying", safeAddress: job.safeAddress, ...(job.resumed ? { resumed: true } : {}) };
     const found = await this.deps.inspect(wallet);
     if (isSetupComplete(found.steps)) {
       this.jobs.delete(key);
@@ -165,7 +167,7 @@ export class OnboardingQueue {
     const resumed = !needsDeployment(found.steps);
     if (resumed) this.completions.acquire(key); else this.deps.limiter.acquire(ip); // throws 429
     const safeAddress = found.safeAddress;
-    const fresh: Job = { safeAddress };
+    const fresh: Job = { safeAddress, resumed };
     this.jobs.set(key, fresh);
     const run = this.tail.then(() => this.withTimeout(wallet));
     this.tail = run.catch(() => {});
@@ -173,7 +175,9 @@ export class OnboardingQueue {
       () => { if (this.jobs.get(key) === fresh) this.jobs.delete(key); },
       (err) => {
         console.error(`[onboard] Setup failed for ${wallet}:`, err?.message);
-        fresh.failed = "We couldn't finish setting up your account. Please try again.";
+        // Our own plain sentences (e.g. "still finishing") are shown as they are; anything else is not.
+        fresh.failed = err instanceof OnboardingError ? err.message : "We couldn't finish setting up your account. Please try again.";
+        if (err instanceof OnboardingError && err.code) fresh.failedCode = err.code;
       },
     );
     return { status: "deploying", safeAddress, started: true, ...(resumed ? { resumed: true } : {}), remaining: remainingSteps(found.steps) };
@@ -196,3 +200,13 @@ export class OnboardingQueue {
 }
 
 const describeSteps = (steps: SetupSteps) => ({ steps, remaining: remainingSteps(steps) });
+
+/**
+ * May the agent act for this wallet's account? Only when every setup step is done. Anything
+ * unknown (a failed chain read, a running or failed setup) counts as not ready.
+ */
+export async function accountReady(queue: Pick<OnboardingQueue, "status">, wallet: string): Promise<boolean> {
+  try { return (await queue.status(wallet)).status === "ready"; } catch { return false; }
+}
+
+export const ACCOUNT_NOT_READY_REASON = "Your account isn't fully set up yet, so I can't do that right now. Give it a minute and try again.";
