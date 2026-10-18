@@ -9,7 +9,7 @@ import * as pk from "../integrations/passkey";
 import { markEmailWallet, _resetEmailGate } from "../integrations/passkey/emailGate";
 import { resolveDailyLimit, decide } from "./index";
 import { parseChange, classifyChange, requestConfirmation, applyChange, readLimits, describeLoosening, _resetLimits, LimitsError } from "./limits";
-import { writeUserProfile, readUserProfile, recordKnownRecipient, getKnownRecipients, getPolicyProfile, _resetPolicyStoreCache } from "./store";
+import { writeUserProfile, readUserProfile, recordActivity, recordKnownRecipient, getKnownRecipients, getPolicyProfile, _resetPolicyStoreCache } from "./store";
 import * as storage from "../integrations/zero-g/storage";
 
 const FRIEND = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045";
@@ -66,6 +66,47 @@ test("classification: lowering is tightening; raising, clearing a cap or going a
   assert.equal(c({ typicalMaxUsd: 30 }, { typicalMaxUsd: null }), "loosening");
   assert.equal(c({ dailyLimitUsd: 50, maxAutoTxPerDay: 5 }, { dailyLimitUsd: 20, maxAutoTxPerDay: null }), "loosening", "one loosening part makes the whole change need proof");
   assert.equal(classifyChange({}, { set: {}, removeAddress: FRIEND.toLowerCase() }), "tightening");
+});
+
+// The usual amount: unset isn't "no rule" when the engine has learned a baseline from recent activity.
+const learn = async (wallet: string, usd: number) => {
+  for (let i = 0; i < 5; i++) await recordActivity(wallet, { valueUsd: usd, at: new Date().toISOString() });
+};
+
+test("classification uses the learned baseline while no usual amount is saved", async () => {
+  const c = (stored: any, set: any, learned: number | null) => classifyChange(stored, { set }, learned);
+  assert.equal(c({}, { typicalMaxUsd: 1_000_000 }, 10), "loosening", "above the learned baseline switches it off");
+  assert.equal(c({}, { typicalMaxUsd: 11 }, 10), "loosening");
+  assert.equal(c({}, { typicalMaxUsd: 10 }, 10), "tightening");
+  assert.equal(c({}, { typicalMaxUsd: 5 }, 10), "tightening");
+  assert.equal(c({}, { typicalMaxUsd: 1_000_000 }, null), "tightening", "no baseline yet: setting one adds a rule");
+  assert.equal(c({ typicalMaxUsd: 30 }, { typicalMaxUsd: null }, 10), "loosening", "clearing a saved value stays loosening");
+  assert.equal(c({}, { typicalMaxUsd: null }, 10), "tightening", "clearing nothing changes nothing");
+  assert.equal(c({ typicalMaxUsd: 30 }, { typicalMaxUsd: 20 }, 10), "tightening", "a saved value replaces the baseline");
+  assert.equal(c({ typicalMaxUsd: 30 }, { typicalMaxUsd: 40 }, 10), "loosening");
+});
+
+test("classification reads old unchecked stored values the way the engine does (strings, junk)", async () => {
+  const c = (stored: any, set: any) => classifyChange(stored, { set });
+  assert.equal(c({ maxAutoTxPerDay: "3" }, { maxAutoTxPerDay: 5 }), "loosening", '"3" is read as 3');
+  assert.equal(c({ typicalMaxUsd: "30" }, { typicalMaxUsd: 40 }), "loosening");
+  assert.equal(c({ typicalMaxUsd: 0 }, { typicalMaxUsd: 40 }), "tightening", "a stored 0 already means no rule");
+});
+
+test("attack: with a learned baseline, a session alone can't set the usual amount above it; with none it can", async () => {
+  const learned = await setup();
+  await learn(learned.address, 10); // five payments of $10 → baseline $10
+  for (const typicalMaxUsd of [1_000_000, 11]) {
+    assert.equal(await code(applyChange(learned.address, raise({ typicalMaxUsd }), RP, notify)), "confirmation_required", String(typicalMaxUsd));
+    assert.equal((await requestConfirmation(learned.address, raise({ typicalMaxUsd }), RP) as any).required, true);
+  }
+  assert.equal((await readLimits(learned.address)).policy.typicalMaxUsd, undefined, "nothing was saved");
+  const lowered = await applyChange(learned.address, raise({ typicalMaxUsd: 5 }), RP, notify);
+  assert.equal(lowered.policy.typicalMaxUsd, 5, "going below the baseline needs no proof");
+
+  const fresh = await setup();
+  const r = await applyChange(fresh.address, raise({ typicalMaxUsd: 1_000_000 }), RP, notify);
+  assert.equal(r.policy.typicalMaxUsd, 1_000_000, "no baseline yet: it only adds a rule");
 });
 
 test("a limit of 0 is honoured: every value-bearing action needs approval", async () => {

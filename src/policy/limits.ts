@@ -8,8 +8,8 @@
 
 import crypto from "crypto";
 import { ethers } from "ethers";
-import { resolveDailyLimit, DEFAULT_DAILY_LIMIT, MAX_DAILY_LIMIT } from "./index";
-import { readUserProfile, updateUserProfile, recipientsOf } from "./store";
+import { resolveDailyLimit, computeHabitProfile, DEFAULT_DAILY_LIMIT, MAX_DAILY_LIMIT } from "./index";
+import { readUserProfile, updateUserProfile, recipientsOf, getRecentActivity } from "./store";
 import { hasAnyPasskey, authenticationOptions, verifyAuthentication, type RelyingParty } from "../integrations/passkey";
 import { isEmailWallet } from "../integrations/passkey/emailGate";
 import { canonicalJson } from "../approvals";
@@ -64,23 +64,52 @@ export function parseChange(body: unknown): LimitChange {
   return { set, ...(removeAddress ? { removeAddress } : {}) };
 }
 
-const num = (v: unknown, ok: (n: number) => boolean, otherwise: number) =>
-  typeof v === "number" && Number.isFinite(v) && ok(v) ? v : otherwise;
-
-/** How much the agent may do on its own under a value; bigger = looser. Missing means the default / no cap. */
-function looseness(field: LimitField, v: unknown): number {
-  if (field === "dailyLimitUsd") return resolveDailyLimit(v ?? undefined);
-  if (field === "maxAutoTxPerDay") return num(v, (n) => n >= 0, Infinity);
-  return num(v, (n) => n > 0, Infinity);
+/** A stored value the way the engine reads it (older versions saved unchecked values, even strings). */
+function engineNumber(v: unknown): number {
+  return typeof v === "number" || typeof v === "string" ? Number(v) : NaN;
 }
 
-/** Loosening if any field would allow more than it does now; everything else (including no change) is tightening. */
-export function classifyChange(storedPolicy: Record<string, unknown>, change: LimitChange): "tightening" | "loosening" {
+/**
+ * How much the agent may do on its own under a stored value; bigger = looser. Unset means what the
+ * engine really uses: the $100 default for the daily limit, no rule for the count, and for the usual
+ * amount the baseline learned from recent activity (`learnedTypicalUsd`), or no rule without one.
+ */
+function looseness(field: LimitField, v: unknown, learnedTypicalUsd: number | null): number {
+  if (field === "dailyLimitUsd") return resolveDailyLimit(v ?? undefined);
+  if (field === "maxAutoTxPerDay") {
+    const n = engineNumber(v);
+    return v == null || Number.isNaN(n) ? Infinity : Math.max(n, 0);
+  }
+  if (v == null) return learnedTypicalUsd ?? Infinity;
+  const n = engineNumber(v);
+  return n > 0 ? n : Infinity; // a stored 0 or junk turns the rule off, and also stops the learned baseline
+}
+
+/** A requested value: null clears the field. Clearing a usual amount is treated as removing the rule. */
+function requestedLooseness(field: LimitField, v: number | null | undefined, learnedTypicalUsd: number | null): number {
+  if (v === null && field === "typicalMaxUsd") return Infinity;
+  return looseness(field, v, learnedTypicalUsd);
+}
+
+/**
+ * Loosening if any field would allow more than it does now; everything else (including no change)
+ * is tightening. `learnedTypicalUsd` is the usual-amount baseline learned from the wallet's recent
+ * activity (computeHabitProfile), which is what the engine uses while no usual amount is saved:
+ * setting a higher one would switch that off, so it needs proof like any other raise.
+ */
+export function classifyChange(storedPolicy: Record<string, unknown>, change: LimitChange, learnedTypicalUsd: number | null = null): "tightening" | "loosening" {
   for (const field of LIMIT_FIELDS) {
     if (!(field in change.set)) continue;
-    if (looseness(field, change.set[field]) > looseness(field, storedPolicy[field])) return "loosening";
+    const v = change.set[field];
+    if (field === "typicalMaxUsd" && v === null && storedPolicy[field] == null) continue; // clearing nothing
+    if (requestedLooseness(field, v, learnedTypicalUsd) > looseness(field, storedPolicy[field], learnedTypicalUsd)) return "loosening";
   }
   return "tightening";
+}
+
+/** The wallet's learned usual amount, read the way the pipeline reads it. */
+async function learnedTypical(wallet: string): Promise<number | null> {
+  return computeHabitProfile(await getRecentActivity(wallet)).typicalMaxUsd;
 }
 
 const changeKey = (c: LimitChange) => canonicalJson({ set: c.set, removeAddress: c.removeAddress ?? null });
@@ -144,7 +173,7 @@ export type Confirmation =
 export async function requestConfirmation(wallet: string, body: unknown, rp: RelyingParty, now = Date.now()): Promise<Confirmation> {
   const change = parseChange(body);
   const stored = (await readUserProfile(wallet)).policy ?? {};
-  if (classifyChange(stored, change) === "tightening") return { required: false };
+  if (classifyChange(stored, change, await learnedTypical(wallet)) === "tightening") return { required: false };
   sweep(now);
   const w = wallet.toLowerCase();
   const nonce = crypto.randomBytes(16).toString("base64url");
@@ -195,16 +224,16 @@ async function verifyConfirmation(wallet: string, change: LimitChange, proof: an
 }
 
 /** The plain-words list of what was raised, for the Telegram notice. */
-export function describeLoosening(before: Record<string, unknown>, change: LimitChange): string[] {
+export function describeLoosening(before: Record<string, unknown>, change: LimitChange, learnedTypicalUsd: number | null = null): string[] {
   const lines: string[] = [];
-  const word = (field: LimitField, v: unknown) => {
-    const n = looseness(field, v);
-    return field === "dailyLimitUsd" ? `$${n}` : Number.isFinite(n) ? (field === "maxAutoTxPerDay" ? String(n) : `$${n}`) : "no limit";
-  };
+  const word = (n: number, field: LimitField) =>
+    !Number.isFinite(n) ? "no limit" : field === "maxAutoTxPerDay" ? String(n) : `$${n}`;
   const label: Record<LimitField, string> = { dailyLimitUsd: "Daily limit without asking", maxAutoTxPerDay: "Automatic payments per day", typicalMaxUsd: "Usual amount" };
   for (const f of LIMIT_FIELDS) {
     if (!(f in change.set)) continue;
-    if (looseness(f, change.set[f]) > looseness(f, before[f])) lines.push(`${label[f]}: ${word(f, before[f])} → ${word(f, change.set[f])}`);
+    const was = looseness(f, before[f], learnedTypicalUsd);
+    const now = requestedLooseness(f, change.set[f], learnedTypicalUsd);
+    if (now > was) lines.push(`${label[f]}: ${word(was, f)} → ${word(now, f)}`);
   }
   return lines;
 }
@@ -236,7 +265,8 @@ export async function applyChange(
 ): Promise<LimitsView & { loosened: boolean }> {
   const change = parseChange(body);
   const before = (await readUserProfile(wallet)).policy ?? {};
-  const loosening = classifyChange(before, change) === "loosening";
+  const learned = await learnedTypical(wallet);
+  const loosening = classifyChange(before, change, learned) === "loosening";
   if (loosening) await verifyConfirmation(wallet, change, body?.confirmation, rp, now);
 
   await updateUserProfile(wallet, (p) => {
@@ -252,7 +282,7 @@ export async function applyChange(
   });
 
   if (loosening && notify) {
-    const lines = describeLoosening(before, change);
+    const lines = describeLoosening(before, change, learned);
     notify(wallet, `⚠️ Your Orchestra limits were raised:\n${lines.join("\n")}\nIf this wasn't you, lower it in Orchestra (Limits).`).catch(() => {});
   }
   return { ...(await readLimits(wallet)), loosened: loosening };
