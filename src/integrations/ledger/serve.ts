@@ -9,7 +9,7 @@ import crypto from "crypto";
 import { ethers } from "ethers";
 import { BridgeServer } from "./bridge";
 import { originGuard, originPermitted, mockTradeEnabled } from "./origins";
-import { requireOwnAddress } from "./access";
+import { requireOwnAddress, requireOwnWallet, approvalBelongsTo, broadcastSenderProblem } from "./access";
 import type { ApprovalRequest, ProposedTrade } from "./types";
 import { assessRisk } from "./riskEngine";
 import { checkApproval, getQuote } from "../uniswap/api";
@@ -281,6 +281,11 @@ app.post("/broadcast", requireSession, async (req, res) => {
 
     if (!signedTx) {
       res.status(400).json({ error: "signedTx (hex) is required" });
+      return;
+    }
+    const problem = broadcastSenderProblem(signedTx, res.locals.wallet);
+    if (problem) {
+      res.status(problem.status).json({ error: problem.error, ...(problem.code ? { code: problem.code } : {}) });
       return;
     }
 
@@ -746,10 +751,10 @@ app.get("/compute-provider", (_req, res) => {
 });
 
 // ─── Passkey (WebAuthn) — medium-tier approval ───
-app.get("/passkey/status", async (req, res) => {
+app.get("/passkey/status", requireSession, async (req, res) => {
   try {
-    const wallet = String(req.query.wallet || "");
-    if (!wallet) { res.status(400).json({ error: "wallet query param required" }); return; }
+    if (!requireOwnWallet(res, req.query.wallet)) return;
+    const wallet = res.locals.wallet as string;
     res.json({ registered: await hasPasskey(wallet, rpForOrigin(req.headers.origin) ?? browserRp()) });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
@@ -863,9 +868,10 @@ app.post("/passkey/approve", requireSession, async (req, res) => {
 });
 
 // ─── Approval status (the frontend polls this while an approval is out on another channel) ───
-app.get("/approvals/:id", (req, res) => {
-  const a = getApproval(req.params.id);
-  if (!a) { res.status(404).json({ error: "I can't find that approval. It may have expired." }); return; }
+app.get("/approvals/:id", requireSession, (req, res) => {
+  const a = getApproval(String(req.params.id));
+  // Someone else's approval looks exactly like one that doesn't exist.
+  if (!a || !approvalBelongsTo(a, res.locals.wallet)) { res.status(404).json({ error: "I can't find that approval. It may have expired." }); return; }
   res.json(approvalView(a));
 });
 
@@ -1095,13 +1101,10 @@ app.get("/policy", requireSession, async (_req, res) => {
 });
 
 // The habit profile the engine has learned from recorded activity.
-app.get("/habit", async (req, res) => {
+app.get("/habit", requireSession, async (req, res) => {
   try {
-    const wallet = String(req.query.wallet || "");
-    if (!wallet) {
-      res.status(400).json({ error: "wallet query param required" });
-      return;
-    }
+    if (!requireOwnWallet(res, req.query.wallet)) return;
+    const wallet = res.locals.wallet as string;
     const history = await getRecentActivity(wallet);
     res.json({ wallet, ...computeHabitProfile(history) });
   } catch (e: any) {
