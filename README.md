@@ -95,7 +95,7 @@ Once a wallet links Telegram, its risky transactions can only be approved there 
 - **The WebSocket** (`/ws`) takes the session as its first message, `{"type":"AUTH","token":"<session token>"}` (never in the URL); a socket that doesn't sign in within 5 seconds, or sends a forged or expired token, is closed (code 4401) and receives nothing. Each approval is sent only to sockets signed in as its owner, and only they can answer it.
 - **Telegram linking** requires an EIP-712 signature from the wallet, so nobody can route your approvals to their chat.
 - **Phone passkey setup** needs both your signed-in desktop session and your linked Telegram chat: the one-time setup link (10 minutes, single use) is sent there.
-- **Spending-limit updates** are only recorded after the chain shows the owner's exact limit-update transaction succeeded.
+- **The daily limit** is changed only through `POST /policy`: lowering applies at once; raising needs your passkey or a wallet signature.
 
 ---
 
@@ -115,11 +115,11 @@ Once a wallet links Telegram, its risky transactions can only be approved there 
 ### Ledger — Hardware security
 - Device Management Kit (DMK) over Bluetooth in the browser
 - ERC-7730 clear-signing descriptors for Permit2 and the Universal Router (`src/integrations/ledger/`, not yet wired into the signing flow)
-- EIP-712 signing for sign-in and Telegram linking; required for spending-limit updates
+- EIP-712 signing for sign-in and Telegram linking
 
 ### Your account — Smart account custody
-- One Orchestra account per user (a Safe smart account under the hood; your wallet is the owner, the agent wallet a delegate that executes auto-approved actions)
-- On-chain spending limits via the AllowanceModule; `OrchestraPolicy.sol` registry of per-user policies
+- One Orchestra account per user (a Safe smart account under the hood; your wallet and the agent wallet are its owners; the agent executes auto-approved actions)
+- One daily limit, enforced by the server's policy engine (there is no on-chain spending limit); `OrchestraPolicy.sol` registry of per-account policies
 - Fund it from the chat (*"fund my account with 20 USDC"*); the agent can never move funds out of your own wallet
 
 ---

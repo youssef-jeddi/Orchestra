@@ -1,7 +1,7 @@
 // ─── Safe — find the account a wallet owns, without writing anything ───
 // /intent needs the account address even when storage was lost (in-memory storage after a restart).
 // The address is deterministic, so it is predicted and checked for code. Read-only on purpose:
-// an account that is deployed but not finished (module, allowances, registration still to do) is
+// an account that is deployed but not finished (registration or records still to do) is
 // found here too, and must not be recorded as the user's own. `safe:<wallet>` is written only by
 // the last setup step (accountRecord.ts), and no limit is read from anywhere: another account's
 // registry entry can't leak into this one.

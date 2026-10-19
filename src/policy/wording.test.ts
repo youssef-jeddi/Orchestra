@@ -5,7 +5,6 @@
 import assert from "node:assert/strict";
 import * as fs from "fs";
 import * as path from "path";
-import { limitTxProblem } from "../integrations/safe/verifyLimitTx";
 import { PLANNER_SYSTEM_PROMPT } from "../intent/prompt";
 
 const ROOT = path.resolve(__dirname, "../..");
@@ -50,14 +49,10 @@ test("frontend components, pages, and helpers show no 'Safe' to the user", () =>
 });
 
 test("bridge messages shown to users say 'account'", () => {
-  for (const f of ["src/integrations/safe/verifyLimitTx.ts", "src/integrations/passkey/emailGate.ts"]) {
+  for (const f of ["src/integrations/passkey/emailGate.ts"]) {
     const hits = visibleSafe(fs.readFileSync(path.join(ROOT, f), "utf8")).filter((l) => !/console\.|\[Safe\]|\[safe\]|\bsafe:|address safe|safe\$\{/.test(l));
     assert.deepEqual(hits, [], f);
   }
-  const SAFE = "0x" + "11".repeat(20);
-  const msg = limitTxProblem({ tx: { from: "0x" + "22".repeat(20), to: "0x" + "33".repeat(20), data: "0x" }, receipt: { status: 1 }, wallet: "0x" + "22".repeat(20), safeAddress: SAFE, expectedData: "0x" });
-  assert.match(msg!, /your account/);
-  assert.ok(!/\bSafe\b/.test(msg!), msg!);
 });
 
 test("a reverted account transaction is explained in plain words, with no codes", () => {

@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
-const FILES = ["transaction.ts", "spendingLimit.ts", "detect.ts", "deploy.ts", "onboard.ts"];
+const FILES = ["transaction.ts", "detect.ts", "deploy.ts", "onboard.ts"];
 
 let passed = 0;
 function test(name: string, fn: () => void) {

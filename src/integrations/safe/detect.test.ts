@@ -41,14 +41,13 @@ test("a deployed but unfinished account is detected without writing safe:<wallet
   assert.equal(await detectWith(reads, user), SAFE_A);
   assert.equal(await storage.read(`safe:${user.toLowerCase()}`), null, "detection wrote nothing");
 
-  // The same account, seen by the setup: deployed, module not enabled yet, nothing recorded.
+  // The same account, seen by the setup: deployed, not registered yet, nothing recorded.
   let record: SetupRecord | null = { safeAddress: SAFE_A, startedAt: "t" };
   const reads2: AccountReads = {
     safeAddress: SAFE_A, policyAddress: POLICY,
     setupRecord: async () => record, saveSetupRecord: async (r) => { record = r; },
     storedAccount: async () => (await storage.read(`safe:${user.toLowerCase()}`)) as any, profile: async () => null,
-    hasCode: async () => true, moduleEnabled: async () => false, agentIsDelegate: async () => false,
-    allowancesMissing: async () => 3, registryIsCurrent: async () => true, registeredOnChain: async () => false, now: () => "t",
+    hasCode: async () => true, registryIsCurrent: async () => true, registeredOnChain: async () => false, now: () => "t",
   };
   const queue = new OnboardingQueue({ inspect: () => inspectWith(reads2), finish: async () => {}, limiter: new OnboardingLimiter() });
   const status = await queue.status(user);
@@ -62,27 +61,23 @@ test("only the last setup step records the account; the record then makes it rea
   await storage.clear();
   const user = ethers.Wallet.createRandom().address;
   const key = `safe:${user.toLowerCase()}`;
-  const w = { module: false, delegate: false, allowancesMissing: 3, registered: false, code: true };
+  const w = { registered: false, code: true };
   let record: SetupRecord | null = null;
   const reads: AccountReads = {
     safeAddress: SAFE_A, policyAddress: POLICY,
     setupRecord: async () => record, saveSetupRecord: async (r) => { record = r; },
     storedAccount: async () => (await storage.read(key)) as any,
     profile: async () => (await storage.read(key)) as any,
-    hasCode: async () => w.code, moduleEnabled: async () => w.module, agentIsDelegate: async () => w.delegate,
-    allowancesMissing: async () => w.allowancesMissing, registryIsCurrent: async () => true, registeredOnChain: async () => w.registered, now: () => "t",
+    hasCode: async () => w.code, registryIsCurrent: async () => true, registeredOnChain: async () => w.registered, now: () => "t",
   };
   const seenAtStep: Record<string, unknown> = {};
   const step = (name: SetupStep, fn: () => void) => async () => { seenAtStep[name] = await storage.read(key); fn(); };
   await finishWith(reads, {
     deploy: step("deploy", () => {}),
-    module: step("module", () => { w.module = true; }),
-    delegate: step("delegate", () => { w.delegate = true; }),
-    allowances: step("allowances", () => { w.allowancesMissing = 0; }),
     register: step("register", () => { w.registered = true; }),
     record: async () => { seenAtStep.record = await storage.read(key); await storage.write(key, { safeAddress: SAFE_A }); },
   }, () => false);
-  for (const s of ["module", "delegate", "allowances", "register", "record"]) assert.equal(seenAtStep[s], null, `nothing recorded before/at '${s}'`);
+  for (const s of ["register", "record"]) assert.equal(seenAtStep[s], null, `nothing recorded before/at '${s}'`);
   assert.deepEqual(await storage.read(key), { safeAddress: SAFE_A });
 });
 

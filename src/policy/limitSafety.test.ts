@@ -7,8 +7,8 @@
 import assert from "node:assert/strict";
 import { ethers } from "ethers";
 import { spawnSync } from "node:child_process";
-import { decide, parseWholeDollarLimit, MAX_DAILY_LIMIT } from "./index";
-import { applyChange, readLimits, requestConfirmation, _resetLimits } from "./limits";
+import { decide, parseWholeDollarLimit, resolveDailyLimit, MAX_DAILY_LIMIT } from "./index";
+import { applyChange, dailyLimitFor, readLimits, requestConfirmation, _resetLimits } from "./limits";
 import {
   readUserProfile, writeUserProfile, updateUserProfile, recordKnownRecipient, getKnownRecipients, getPolicyProfile,
   getRecentActivity, recordActivity, readPolicyInputs, _resetPolicyStoreCache,
@@ -69,6 +69,25 @@ test("attack: an unreadable profile never becomes the $100 default — /intent's
   const ok = await readPolicyInputs(w);
   assert.equal(ok.ok, true);
   if (ok.ok) assert.equal(ok.profile.dailyLimitUsd, 20, "with a readable profile the lowered limit applies");
+});
+
+test("the wallet's stored daily limit is the only limit: a send over it asks, one under it doesn't", async () => {
+  const w = await seed(); // $20 a day
+  const inputs = await readPolicyInputs(w);
+  assert.ok(inputs.ok);
+  if (!inputs.ok) return;
+  const plan = { summary: "Send USDC", steps: [{ action: "send", params: { to: FRIEND } }] };
+  const run = (valueUsd: number) => decide({ intentType: "send", valueUsd, dailyLimitUsd: resolveDailyLimit(inputs.profile.dailyLimitUsd), plan, profile: { knownAddresses: [FRIEND] }, history: [] }).verdict;
+  assert.equal(run(50), "NEEDS_APPROVAL");
+  assert.equal(run(10), "AUTO_EXECUTE");
+});
+
+test("the limit shown for an account is the policy's: a change to $30 shows as 30, an unreadable profile gives null", async () => {
+  const w = ethers.Wallet.createRandom().address;
+  assert.equal(await dailyLimitFor(w), 100, "no saved limit: the default");
+  await applyChange(w, { policy: { dailyLimitUsd: 30 } }, RP);
+  assert.equal(await dailyLimitFor(w), 30);
+  assert.equal(await withFault("profile-read", () => dailyLimitFor(w)), null);
 });
 
 test("attack: a profile read that hangs hits the timeout and is 'not ok', not an empty profile", async () => {
