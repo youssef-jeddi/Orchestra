@@ -25,6 +25,9 @@ export interface AccountExecInput {
   /** The signed-in wallet, who may sign an over-cap request themselves. */
   wallet?: string;
   summary?: string;
+  /** Recipient / token, kept with the owner-sign offer so the activity list can show them afterwards. */
+  to?: string;
+  token?: string;
 }
 
 export interface AccountExecDeps {
@@ -33,17 +36,19 @@ export interface AccountExecDeps {
   viaModule: (safeAddress: string, key: string, batch: Batch, fallback?: string) => Promise<string>;
   viaOwner: (safeAddress: string, key: string, batch: Batch, fallback?: string) => Promise<string>;
   /** Hold the exact Safe transaction for the owner to sign; null when that isn't possible. */
-  offer: (wallet: string, safeAddress: string, summary: string, batch: Batch) => Promise<Record<string, unknown> | null>;
+  offer: (wallet: string, safeAddress: string, summary: string, batch: Batch, meta: OfferMeta) => Promise<Record<string, unknown> | null>;
 }
+
+export interface OfferMeta { valueUsd: number; to?: string; token?: string }
 
 const realDeps: AccountExecDeps = {
   enabled: isSpendingModuleEnabled,
   remainingCents: (safe) => remainingToday(safe),
   viaModule: execViaModule,
   viaOwner: executeBatchViaSafe,
-  offer: async (wallet, safe, summary, batch) => {
+  offer: async (wallet, safe, summary, batch, meta) => {
     try {
-      return await offerOwnerSign(wallet, safe, summary, batch);
+      return await offerOwnerSign(wallet, safe, summary, batch, meta);
     } catch (err) {
       logCapReadFailure(err);
       return null;
@@ -52,7 +57,7 @@ const realDeps: AccountExecDeps = {
 };
 
 async function overCap(input: AccountExecInput, deps: AccountExecDeps): Promise<OverCapError> {
-  const ownerSign = input.wallet ? await deps.offer(input.wallet, input.safeAddress, input.summary ?? "", input.batch) : null;
+  const ownerSign = input.wallet ? await deps.offer(input.wallet, input.safeAddress, input.summary ?? "", input.batch, { valueUsd: input.valueUsd, to: input.to, token: input.token }) : null;
   return new OverCapError(ownerSign ? OVER_CAP_TEXT : OVER_CAP_NO_OWNER_TEXT, ownerSign ?? undefined);
 }
 

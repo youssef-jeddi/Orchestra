@@ -3,9 +3,10 @@
 
 import assert from "node:assert/strict";
 import { ethers } from "ethers";
-import { isSpendingModuleEnabled, exceedsRemaining, DailyCapRevert, OVER_CAP_TEXT, OVER_CAP_NO_OWNER_TEXT } from "./spendingModule";
+import { isSpendingModuleEnabled, exceedsRemaining, remainingToday, DailyCapRevert, OVER_CAP_TEXT, OVER_CAP_NO_OWNER_TEXT } from "./spendingModule";
 import { executeForAccount, type AccountExecDeps, type AccountExecInput } from "./accountExec";
-import { holdOwnerSign, submitOwnerSignature, ownerSignView, safeTxHashOf, clearOwnerSignRecords, SAFE_TX_TYPES, OWNER_SIGN_TTL_MS } from "./ownerSign";
+import { getRecentActivity, _resetPolicyStoreCache } from "../../policy/store";
+import { holdOwnerSign, submitOwnerSignature, getOwnerSign, ownerSignView, safeTxHashOf, clearOwnerSignRecords, SAFE_TX_TYPES, OWNER_SIGN_TTL_MS } from "./ownerSign";
 import { registerSafeArgs, REGISTERED_SPENDING_LIMIT } from "./policyContract";
 import { errorResponse } from "../ledger/errors";
 // @ts-expect-error plain JS helpers shared with the frontend, no type declarations
@@ -13,6 +14,7 @@ import { userMaySign } from "../../../frontend/src/lib/emailPasskey.js";
 // @ts-expect-error plain JS helper shared with the frontend, no type declarations
 import { errorMessage } from "../../../frontend/src/lib/ownerSign.js";
 import { OverCapError, UserFacingError } from "../../utils/userFacing";
+import { faultOn, faultInjectProblem } from "../../utils/faultInject";
 
 let passed = 0;
 const tests: [string, () => void | Promise<void>][] = [];
@@ -226,6 +228,96 @@ test("a failed relay leaves the request retryable; a concurrent second submit wh
   await assert.rejects(submitOwnerSignature(owner.address, r.id, sig, relayOk([])), /already sent/);
   release();
   assert.equal((await first).txHash, "0x1");
+});
+
+
+test("remaining-zero fault: remainingToday returns 0 without calling the chain", async () => {
+  const before = process.env.ORCHESTRA_FAULT_INJECT;
+  const mod = process.env.SPENDING_MODULE_ADDRESS;
+  try {
+    process.env.ORCHESTRA_FAULT_INJECT = "remaining-zero";
+    process.env.SPENDING_MODULE_ADDRESS = "0x00000000000000000000000000000000000000c3";
+    // Would throw without a provider/module if it hit the chain; the fault short-circuits.
+    assert.equal(await remainingToday(SAFE), 0n);
+  } finally {
+    if (before === undefined) delete process.env.ORCHESTRA_FAULT_INJECT; else process.env.ORCHESTRA_FAULT_INJECT = before;
+    if (mod === undefined) delete process.env.SPENDING_MODULE_ADDRESS; else process.env.SPENDING_MODULE_ADDRESS = mod;
+  }
+});
+
+test("attack: remaining-zero is ignored in production and on 0G, and the bridge refuses to start with it in production", () => {
+  const env = (e: Record<string, string>) => e as NodeJS.ProcessEnv;
+  assert.equal(faultOn("remaining-zero", env({ ORCHESTRA_FAULT_INJECT: "remaining-zero" })), true);
+  assert.equal(faultOn("remaining-zero", env({ ORCHESTRA_FAULT_INJECT: "remaining-zero", NODE_ENV: "production" })), false);
+  assert.equal(faultOn("remaining-zero", env({ ORCHESTRA_FAULT_INJECT: "remaining-zero", STORAGE_BACKEND: "0g" })), false);
+  assert.match(faultInjectProblem(env({ ORCHESTRA_FAULT_INJECT: "remaining-zero", NODE_ENV: "production" }))!, /production/);
+  assert.equal(faultInjectProblem(env({ ORCHESTRA_FAULT_INJECT: "remaining-zero" })), null);
+});
+
+const holdWith = (extra: { valueUsd?: number; to?: string; token?: string }, now?: number) =>
+  holdOwnerSign({ wallet: owner.address, safeAddress: SAFE, summary: "Send 1500 USDC", call, ...extra }, now);
+
+test("an owner-signed send is recorded once in the activity list, with source owner and the relay's hash", async () => {
+  clearOwnerSignRecords();
+  _resetPolicyStoreCache();
+  const hash = "0x" + "cd".repeat(32);
+  const r = holdWith({ valueUsd: 1500, to: call.to, token: "USDC" });
+  const out = await submitOwnerSignature(owner.address, r.id, await sign(owner, r), { relay: async () => hash });
+  const mine = (await getRecentActivity(owner.address)).filter((row) => row.txHash === hash);
+  assert.equal(mine.length, 1);
+  assert.equal(mine[0].source, "owner");
+  assert.equal(mine[0].valueUsd, 1500);
+  assert.equal(mine[0].to, call.to);
+  assert.equal(mine[0].token, "USDC");
+  assert.equal(mine[0].explorerUrl, out.explorerUrl);
+  await assert.rejects(submitOwnerSignature(owner.address, r.id, await sign(owner, r), { relay: async () => hash }), /already sent/);
+  assert.equal((await getRecentActivity(owner.address)).filter((row) => row.txHash === hash).length, 1, "a repeat doesn't record again");
+});
+
+test("a failed relay records nothing; attack: another wallet can't submit (or record) for the owner", async () => {
+  clearOwnerSignRecords();
+  _resetPolicyStoreCache();
+  // Fresh wallets so leftover activity from earlier tests in this file can't confuse the empty check.
+  const payer = ethers.Wallet.createRandom();
+  const other = ethers.Wallet.createRandom();
+  const r = holdOwnerSign({ wallet: payer.address, safeAddress: SAFE, summary: "Send", call, valueUsd: 1500 });
+  const sig = await sign(payer, r);
+  const before = (await getRecentActivity(payer.address)).length;
+  await assert.rejects(submitOwnerSignature(payer.address, r.id, sig, { relay: async () => { throw new UserFacingError("nope"); } }), /nope/);
+  await assert.rejects(submitOwnerSignature(other.address, r.id, sig, relayOk([])), /couldn't find/);
+  assert.equal((await getRecentActivity(payer.address)).length, before, "failed relay must not record");
+  assert.equal((await getRecentActivity(other.address)).length, 0);
+});
+
+test("the offer carries the amount, recipient and token from the account run (not from the client)", async () => {
+  const seen: unknown[] = [];
+  const { deps } = fake({ remaining: 0n, offer: async (_w, _s, _sum, _b, meta) => { seen.push(meta); return { kind: "safe-owner", id: "x" }; } });
+  await assert.rejects(executeForAccount(input(1500, { to: call.to, token: "USDC" }), deps), OverCapError);
+  assert.deepEqual(seen, [{ valueUsd: 1500, to: call.to, token: "USDC" }]);
+});
+
+test("getOwnerSign: only the owner sees a pending request; missing, someone else's, used and expired all look the same", async () => {
+  clearOwnerSignRecords();
+  const t0 = Date.now();
+  const r = hold(t0);
+  assert.equal(getOwnerSign(owner.address, r.id, t0).id, r.id);
+  assert.equal(getOwnerSign(owner.address.toLowerCase(), r.id, t0).id, r.id);
+  assert.equal(ownerSignView(getOwnerSign(owner.address, r.id, t0)).safeTxHash, safeTxHashOf(r.domain, r.message));
+  for (const bad of [() => getOwnerSign(stranger.address, r.id, t0), () => getOwnerSign(owner.address, "nope", t0), () => getOwnerSign(owner.address, undefined, t0)]) {
+    assert.throws(bad, (e: any) => e instanceof UserFacingError && e.status === 404);
+  }
+  assert.throws(() => getOwnerSign(owner.address, r.id, t0 + OWNER_SIGN_TTL_MS + 1), (e: any) => e.status === 404);
+  assert.throws(() => getOwnerSign(owner.address, r.id, t0), (e: any) => e.status === 404, "once expired it stays expired");
+  const done = hold();
+  await submitOwnerSignature(owner.address, done.id, await sign(owner, done), relayOk([]));
+  assert.throws(() => getOwnerSign(owner.address, done.id), (e: any) => e.status === 404, "an executed one can't be shown again");
+});
+
+test("remaining-zero: executeForAccount offers owner-sign for a small send when remaining reads 0", async () => {
+  // Mirrors what the fault does for the real remainingToday: deps.remainingCents returns 0.
+  const { deps, calls } = fake({ remaining: 0n });
+  await assert.rejects(executeForAccount(input(1), deps), (e: any) => e instanceof OverCapError && !!e.ownerSign);
+  assert.ok(!calls.includes("module") && !calls.includes("owner"), "nothing reached the chain");
 });
 
 // ─── The /simple page ───

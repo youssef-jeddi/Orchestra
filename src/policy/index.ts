@@ -167,13 +167,19 @@ export interface PolicyProfile {
   typicalMaxUsd?: number;
 }
 
-/** One past auto-approved/executed action, used by velocity + habit rules. */
+/** How a spend was authorised: by policy alone, by the user's approval, or by the owner's own signature. */
+export type ActivitySource = "auto" | "approved" | "owner";
+
+/** One past executed spend (auto, approved, or owner-signed), used by velocity + habit rules and the activity list. */
 export interface ActivityRecord {
   valueUsd: number;
   /** ISO timestamp. */
   at: string;
   to?: string;
   token?: string;
+  txHash?: string;
+  explorerUrl?: string;
+  source?: ActivitySource;
 }
 
 export interface PolicyDecision {

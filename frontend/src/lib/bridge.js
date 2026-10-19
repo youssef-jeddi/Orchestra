@@ -233,6 +233,16 @@ export async function submitOwnerSignature(id, signature) {
   return bridgeFetch(`/owner-sign/${encodeURIComponent(id)}/submit`, { method: 'POST', body: JSON.stringify({ signature }) });
 }
 
+/** A pending owner-sign request again (the Telegram link opens the app with its id). 404 = gone or expired. */
+export async function getOwnerSign(id) {
+  return bridgeFetch(`/owner-sign/${encodeURIComponent(id)}`);
+}
+
+/** This wallet's recent spends, newest first: `{ activity: [...] }`. */
+export async function getActivity() {
+  return bridgeFetch('/activity');
+}
+
 // ── Server-held approvals ──
 
 export async function getApproval(approvalId) {

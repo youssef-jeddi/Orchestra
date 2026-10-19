@@ -160,6 +160,11 @@ test("fault injection is inert in production and on 0G storage, and the bridge r
   assert.equal(faultOn("profile-read", env({ ORCHESTRA_FAULT_INJECT: "profile-read", STORAGE_BACKEND: "0g" })), false);
   assert.equal(faultOn("activity-read", env({ ORCHESTRA_FAULT_INJECT: "profile-read" })), false, "only what was asked for");
   assert.equal(faultOn("profile-read", env({})), false);
+  // remaining-zero (over-cap test switch): same guards — never in production / 0G.
+  assert.equal(faultOn("remaining-zero", env({ ORCHESTRA_FAULT_INJECT: "remaining-zero" })), true);
+  assert.equal(faultOn("remaining-zero", env({ ORCHESTRA_FAULT_INJECT: "remaining-zero", NODE_ENV: "production" })), false);
+  assert.equal(faultOn("remaining-zero", env({ ORCHESTRA_FAULT_INJECT: "remaining-zero", STORAGE_BACKEND: "0g" })), false);
+  assert.match(faultInjectProblem(env({ ORCHESTRA_FAULT_INJECT: "remaining-zero", NODE_ENV: "production" }))!, /production/);
   assert.match(faultInjectProblem(env({ ORCHESTRA_FAULT_INJECT: "profile-read", NODE_ENV: "production" }))!, /production/);
   assert.equal(faultInjectProblem(env({ NODE_ENV: "production" })), null);
   assert.match(faultInjectProblem(env({ ORCHESTRA_FAULT_INJECT: "typo" }))!, /unknown/);

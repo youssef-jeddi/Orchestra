@@ -135,6 +135,9 @@ function accountRun(ctx: ExecutionContext, agentKey: string) {
   return {
     safeAddress: ctx.safeAddress!, agentKey, valueUsd: ctx.totalEstimatedValueUsd,
     wallet: ctx.walletAddress, summary: ctx.planSummary,
+    // For the activity list if the owner signs this over-cap request themselves.
+    to: typeof ctx.params?.to === "string" ? ctx.params.to : undefined,
+    token: typeof (ctx.params?.tokenIn || ctx.params?.token) === "string" ? (ctx.params.tokenIn || ctx.params.token) : undefined,
   };
 }
 

@@ -23,7 +23,7 @@ import { onboarding, isAccountReady } from "../safe/onboard";
 import { OnboardingError, ACCOUNT_NOT_READY_REASON } from "../safe/onboarding";
 import { errorResponse, isUserFacing, executionErrorMessage } from "./errors";
 import { UserFacingError, OverCapError } from "../../utils/userFacing";
-import { submitOwnerSignature, relayWithAgent } from "../safe/ownerSign";
+import { submitOwnerSignature, relayWithAgent, getOwnerSign, ownerSignView } from "../safe/ownerSign";
 import { readPositions, type Position } from "../uniswap/liquidity";
 import { tokenByAddress } from "../../intent/tokens";
 import { executePlan } from "../../executor";
@@ -34,7 +34,7 @@ import {
   getPrices,
   type PolicyProfile,
 } from "../../policy";
-import { getRecentActivity, recordActivity, readPolicyInputs } from "../../policy/store";
+import { getRecentActivity, recordActivity, spendActivity, readPolicyInputs } from "../../policy/store";
 import { readLimits, requestConfirmation, applyChange, dailyLimitFor } from "../../policy/limits";
 import { loginRequest, login, issueToken, requireSession, sessionWallet, verifyToken, AuthError } from "../../auth";
 import { verifyPrivyUser, importPrivyPasskeys, noteEmailSignIn, verifyEmailForPasskey } from "../../auth/privy";
@@ -575,12 +575,14 @@ app.post("/intent", async (req, res) => {
           console.log(`[intent ${rid}] ✓ ${intentType} auto-executed: ${exec.txHash}`);
           // Only value that actually moved counts toward the daily limit / velocity / habit rules.
           if (wallet) {
-            recordActivity(wallet, {
+            recordActivity(wallet, spendActivity({
               valueUsd: action.valueUsd,
-              at: new Date().toISOString(),
               to: action.params.to,
               token: action.params.tokenIn || action.params.token,
-            }).catch(() => {});
+              txHash: exec.txHash,
+              explorerUrl: exec.explorerUrl,
+              source: "auto",
+            })).catch(() => {});
             // The address now counts as one the user has sent to (it was already known, or they approved it).
             if (intentType === "send") rememberSentRecipient(wallet, intentType, approvalExecution(intentType, result.payload) ?? undefined).catch(() => {});
           }
@@ -927,6 +929,25 @@ app.post("/owner-sign/:id/submit", requireSession, async (req, res) => {
     const result = await submitOwnerSignature(wallet, req.params.id, req.body?.signature, { relay: relayWithAgent });
     console.log(`[owner-sign] ${req.params.id} signed by ${shortAddr(wallet)} — sent`);
     res.json({ status: "ok", ...result });
+  } catch (e: any) { sendError(res, e); }
+});
+
+// The pending owner-sign request again (the Telegram link opens the app with its id). Only the
+// wallet it was held for sees it; missing, someone else's, used and expired all answer 404.
+app.get("/owner-sign/:id", requireSession, (req, res) => {
+  try {
+    res.json(ownerSignView(getOwnerSign(res.locals.wallet as string, req.params.id)));
+  } catch (e: any) { sendError(res, e); }
+});
+
+// The signed-in wallet's recent spends (auto, approved, owner-signed), newest first.
+// Deposits aren't listed: they're sent by the user's own wallet in the browser, and no server
+// path records them.
+app.get("/activity", requireSession, async (_req, res) => {
+  try {
+    const rows = await getRecentActivity(res.locals.wallet as string);
+    const activity = [...rows].sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).slice(0, 20);
+    res.json({ activity });
   } catch (e: any) { sendError(res, e); }
 });
 
