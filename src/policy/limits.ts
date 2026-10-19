@@ -282,6 +282,15 @@ export async function readLimits(wallet: string): Promise<LimitsView> {
   return { policy, knownRecipients: recipientsOf(p) };
 }
 
+/** The wallet's daily limit in dollars (the default if none is saved), or null when its profile can't be read. */
+export async function dailyLimitFor(wallet: string): Promise<number | null> {
+  try {
+    return resolveDailyLimit((await readLimits(wallet)).policy.dailyLimitUsd);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Apply a change. Tightening needs only the session; loosening needs `body.confirmation`
  * (see requestConfirmation). `notify` tells the user on Telegram about a loosening and never
