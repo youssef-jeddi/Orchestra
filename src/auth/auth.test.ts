@@ -23,7 +23,6 @@ const test = (name: string, fn: () => void | Promise<void>) => tests.push([name,
 
 (async () => {
   const auth = await import("./index");
-  const { limitTxProblem } = await import("../integrations/safe/verifyLimitTx");
   const store = await import("../policy/store");
   const storage = await import("../integrations/zero-g/storage");
   auth._setSecret("test-secret-test-secret-test-secret!");
@@ -122,26 +121,6 @@ const test = (name: string, fn: () => void | Promise<void>) => tests.push([name,
     const ok = run(`Bearer ${issueToken(owner.address).token}`);
     assert.equal(ok.next, true);
     assert.equal(ok.wallet, owner.address.toLowerCase());
-  });
-
-  // ── Limit-update tx verification ──
-  const SAFE = "0x933f48ed12e2de3da82cc69c7a4f95c2adece3d1";
-  const good = {
-    tx: { from: owner.address, to: SAFE, data: "0xabcd" },
-    receipt: { status: 1 },
-    wallet: owner.address.toLowerCase(),
-    safeAddress: SAFE,
-    expectedData: "0xABCD",
-  };
-  test("limitTxProblem: the exact tx from the owner to the Safe passes", () => {
-    assert.equal(limitTxProblem(good), null);
-  });
-  test("limitTxProblem: missing, reverted, wrong sender, wrong target or wrong calldata fail", () => {
-    assert.match(limitTxProblem({ ...good, tx: null })!, /isn't mined/);
-    assert.match(limitTxProblem({ ...good, receipt: { status: 0 } })!, /reverted/);
-    assert.match(limitTxProblem({ ...good, tx: { ...good.tx, from: attacker.address } })!, /your wallet/);
-    assert.match(limitTxProblem({ ...good, tx: { ...good.tx, to: attacker.address } })!, /your account/);
-    assert.match(limitTxProblem({ ...good, expectedData: "0xabce" })!, /requested limit/);
   });
 
   // ── Per-wallet policy ──

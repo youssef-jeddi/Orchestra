@@ -34,9 +34,6 @@ export interface AccountReads {
   /** The stored profile. */
   profile(): Promise<{ safeAddress?: string } | null>;
   hasCode(): Promise<boolean>;
-  moduleEnabled(): Promise<boolean>;
-  agentIsDelegate(): Promise<boolean>;
-  allowancesMissing(): Promise<number>;
   /** The configured contract is the per-account registry for our agent (not the old per-sender one, not some other contract). */
   registryIsCurrent(): Promise<boolean>;
   /** The registry has an entry for this account. Only asked once `registryIsCurrent` says yes. */
@@ -87,7 +84,7 @@ export async function inspectWith(r: AccountReads): Promise<SetupInspection> {
 
   const hasCode = await r.hasCode(); // a failed read throws: never taken as "not deployed" (that would deploy twice)
   let facts: SetupFacts = {
-    hasCode, moduleEnabled: false, agentIsDelegate: false, allowancesMissing: 3,
+    hasCode,
     policyConfigured: !!policyAddress, registered: false, recorded: false,
   };
   if (hasCode) {
@@ -102,9 +99,6 @@ export async function inspectWith(r: AccountReads): Promise<SetupInspection> {
     facts = {
       ...facts,
       policyConfigured: usable,
-      moduleEnabled: await r.moduleEnabled(),
-      agentIsDelegate: await r.agentIsDelegate(),
-      allowancesMissing: await r.allowancesMissing(),
       registered,
       recorded,
     };
