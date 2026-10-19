@@ -1,3 +1,30 @@
+## Orchestra contracts
+
+### OrchestraPolicy
+Per-account registry (Safe address → metadata). Does **not** enforce spending. See `DeployOrchestraPolicy` below.
+
+### SpendingLimitModule (ORC-107)
+Fixed **$1000/day** on-chain ceiling for the agent. The agent is **not** a Safe owner; it may only move funds by calling `exec` on this module, which then uses `execTransactionFromModule`.
+
+- **Metering:** outbound USD only — ETH+WETH via Chainlink ETH/USD, USDC at $1. Approvals and inbound swap output do not reduce the spend.
+- **Fail closed:** stale/missing/non-positive feed, unknown token contracts, non-allowlisted targets, and over-cap calls revert; nothing moves.
+- **Allowlist:** Universal Router, Permit2, NonfungiblePositionManager (Call); Safe MultiSend / MultiSendCallOnly (DelegateCall only). WETH and USDC contracts are always callable (approve/transfer). Plain ETH sends (empty data) to any recipient are allowed and metered.
+- **Ceiling:** immutable `DAILY_LIMIT_CENTS = 100_000`. No admin to raise it.
+
+#### Deploy (Sepolia) — humans only
+```shell
+$ AGENT_ADDRESS=<agent wallet> forge script script/DeploySpendingLimitModule.s.sol:DeploySpendingLimitModule \
+    --rpc-url <sepolia_rpc_url> --private-key <deployer_key> --broadcast
+```
+Then set `SPENDING_MODULE_ADDRESS` on the server (PR B). Until that env is set, the app keeps today's behaviour.
+
+#### Test
+```shell
+$ forge test -vv
+```
+
+---
+
 ## Foundry
 
 **Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
