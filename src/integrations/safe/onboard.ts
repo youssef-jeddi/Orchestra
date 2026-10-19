@@ -3,7 +3,7 @@
 // used for everything: nothing the client sends decides a policy value here.
 
 import { ethers } from "ethers";
-import { makeSepoliaProvider } from "../../utils/rpc";
+import { makeSepoliaProvider, sepoliaRpcUrl } from "../../utils/rpc";
 import { read, write, deleteKey } from "../zero-g/storage";
 import { readUserProfile } from "../../policy/store";
 import Safe from "@safe-global/protocol-kit";
@@ -39,7 +39,6 @@ async function accountReads(wallet: string): Promise<AccountReads> {
   const safeAddress = await predictSafeAddress(user, agent);
   const provider = makeSepoliaProvider();
   const policyAddress = configuredPolicy();
-  const rpc = process.env.SEPOLIA_RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com";
   return {
     safeAddress,
     policyAddress,
@@ -48,7 +47,7 @@ async function accountReads(wallet: string): Promise<AccountReads> {
     storedAccount: async () => (await read(`safe:${user.toLowerCase()}`)) as { safeAddress?: string } | null,
     profile: async () => (await readUserProfile(user)) as { safeAddress?: string },
     hasCode: async () => (await provider.getCode(safeAddress)) !== "0x",
-    moduleEnabled: async () => (await Safe.init({ provider: rpc, safeAddress })).isModuleEnabled(ALLOWANCE_MODULE_ADDRESS),
+    moduleEnabled: async () => (await Safe.init({ provider: sepoliaRpcUrl(), safeAddress })).isModuleEnabled(ALLOWANCE_MODULE_ADDRESS),
     agentIsDelegate: () => isAgentDelegate(safeAddress, agent),
     allowancesMissing: async () => (await tokensWithoutAllowance(safeAddress, agent)).length,
     registryIsCurrent: () => isPerAccountRegistry(provider, policyAddress!, agent),

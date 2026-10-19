@@ -2,10 +2,7 @@ import Safe from '@safe-global/protocol-kit';
 import { ethers } from 'ethers';
 import { ALLOWANCE_MODULE_ADDRESS } from '../../types/safe';
 import type { TxTracker } from './inflight';
-import { shortAddr } from "../../utils/redact";
-import { POLICY_ABI } from './policyContract';
-
-const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
+import { makeSepoliaProvider, sepoliaRpcUrl } from '../../utils/rpc';
 
 // Sepolia token addresses
 const ETH_ADDRESS = '0x0000000000000000000000000000000000000000';
@@ -23,7 +20,7 @@ const ALLOWANCE_ABI = [
 
 // Helper: fresh Safe SDK instance (avoids stale nonce after tx execution)
 async function initSafe(safeAddress: string, signerPrivateKey: string) {
-  return Safe.init({ provider: SEPOLIA_RPC, signer: signerPrivateKey, safeAddress });
+  return Safe.init({ provider: sepoliaRpcUrl(), signer: signerPrivateKey, safeAddress });
 }
 
 // Helper: wait for nonce to increment on-chain
@@ -102,7 +99,7 @@ export async function addAgentDelegate(safeAddress: string, agentWalletAddress: 
 
 /** Chain read: is the agent a delegate of the Safe's AllowanceModule? */
 export async function isAgentDelegate(safeAddress: string, agentWalletAddress: string): Promise<boolean> {
-  const moduleContract = new ethers.Contract(ALLOWANCE_MODULE_ADDRESS, ALLOWANCE_ABI, new ethers.JsonRpcProvider(SEPOLIA_RPC));
+  const moduleContract = new ethers.Contract(ALLOWANCE_MODULE_ADDRESS, ALLOWANCE_ABI, makeSepoliaProvider());
   const delegates = await moduleContract.getDelegates(safeAddress, 0, 10);
   return delegates.results.map((a: string) => a.toLowerCase()).includes(agentWalletAddress.toLowerCase());
 }
@@ -112,7 +109,7 @@ export async function isAgentDelegate(safeAddress: string, agentWalletAddress: s
  * of the limit doesn't count as missing (amount or nonce is non-zero once it was ever set).
  */
 export async function tokensWithoutAllowance(safeAddress: string, agentWalletAddress: string): Promise<string[]> {
-  const moduleContract = new ethers.Contract(ALLOWANCE_MODULE_ADDRESS, ALLOWANCE_ABI, new ethers.JsonRpcProvider(SEPOLIA_RPC));
+  const moduleContract = new ethers.Contract(ALLOWANCE_MODULE_ADDRESS, ALLOWANCE_ABI, makeSepoliaProvider());
   const missing: string[] = [];
   for (const token of allowanceTokens(1)) {
     const a = await moduleContract.getTokenAllowance(safeAddress, agentWalletAddress, token.address);
@@ -135,66 +132,6 @@ export async function setAgentAllowances(
     const hash = await execSafeTx(safeAddress, signerPrivateKey, ALLOWANCE_MODULE_ADDRESS, data, tracker);
     console.log(`[Safe] ${token.name} allowance set: ${hash}`);
   }
-}
-
-export async function setInitialSpendingLimits(
-  safeAddress: string,
-  agentWalletAddress: string,
-  limitUSD: number,
-  signerPrivateKey: string
-): Promise<void> {
-  console.log(`[Safe] Setting spending limits on ${shortAddr(safeAddress)}...`);
-  console.log(`[Safe]   limitUSD: $${limitUSD}`);
-
-  await enableAllowanceModule(safeAddress, signerPrivateKey);
-  await addAgentDelegate(safeAddress, agentWalletAddress, signerPrivateKey);
-  await setAgentAllowances(safeAddress, agentWalletAddress, limitUSD, signerPrivateKey);
-
-  console.log('[Safe] All spending limits configured');
-}
-
-export async function updateSpendingLimit(
-  safeAddress: string,
-  agentWalletAddress: string,
-  newLimitUSD: number,
-  signerPrivateKey: string
-): Promise<string[]> {
-  console.log(`[Safe] Updating spending limit to $${newLimitUSD}...`);
-
-  const allowanceIface = new ethers.Interface(ALLOWANCE_ABI);
-  const txHashes: string[] = [];
-
-  const usdcAmount = BigInt(newLimitUSD) * 1000000n;
-  const ethAmount = ethers.parseEther((newLimitUSD / 2500).toFixed(8));
-
-  const tokens = [
-    { address: USDC_SEPOLIA, amount: usdcAmount },
-    { address: WETH_SEPOLIA, amount: ethAmount },
-    { address: ETH_ADDRESS, amount: ethAmount },
-  ];
-
-  for (const token of tokens) {
-    const data = allowanceIface.encodeFunctionData('setAllowance', [
-      agentWalletAddress, token.address, token.amount, 1440, 0,
-    ]);
-    const hash = await execSafeTx(safeAddress, signerPrivateKey, ALLOWANCE_MODULE_ADDRESS, data);
-    txHashes.push(hash);
-  }
-
-  // Also update OrchestraPolicy on-chain
-  const policyAddress = process.env.ORCHESTRA_POLICY_ADDRESS;
-  if (policyAddress) {
-    const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC);
-    const wallet = new ethers.Wallet(signerPrivateKey, provider);
-    const policy = new ethers.Contract(policyAddress, POLICY_ABI, wallet);
-    const policyTx = await policy.updateSpendingLimit(safeAddress, newLimitUSD * 100);
-    await policyTx.wait();
-    txHashes.push(policyTx.hash);
-    console.log(`[Safe] OrchestraPolicy updated: ${policyTx.hash}`);
-  }
-
-  console.log('[Safe] Spending limits updated');
-  return txHashes;
 }
 
 // ── Ledger-signed limit update ──

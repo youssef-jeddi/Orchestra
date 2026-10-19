@@ -22,7 +22,7 @@ import { detectExistingSafe } from "../safe/detect";
 import { updateRegistryLimit } from "../safe/policyContract";
 import { onboarding, storedSpendingLimit, isAccountReady } from "../safe/onboard";
 import { OnboardingError, ACCOUNT_NOT_READY_REASON } from "../safe/onboarding";
-import { setInitialSpendingLimits, updateSpendingLimit, buildLimitUpdateTx } from "../safe/spendingLimit";
+import { buildLimitUpdateTx } from "../safe/spendingLimit";
 import { getAgentAddress } from "../safe/agentWallet";
 import { errorResponse, isUserFacing } from "./errors";
 import { UserFacingError } from "../../utils/userFacing";
