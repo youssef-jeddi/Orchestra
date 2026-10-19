@@ -3,9 +3,13 @@ pragma solidity ^0.8.20;
 
 /// @notice Fixed $1000/day on-chain ceiling for the Orchestra agent.
 /// The agent is not a Safe owner: it may only move funds through this module.
-/// Spend is measured as outbound USD value of ETH/WETH (Chainlink) and USDC (1:1).
-/// Unknown tokens and a stale/missing ETH/USD feed refuse the call (fail closed).
-/// The daily ceiling is immutable; only the Safe's owner can change Safe config.
+/// Batches are Call-only (no DelegateCall / MultiSend). Every call is checked
+/// against a per-target selector allowlist before any of them run. Spend is
+/// outbound ETH+WETH (Chainlink) and USDC ($1). Approvals are restricted so a
+/// compromised agent cannot grant an attacker a pull on tracked or untracked tokens.
+///
+/// Day boundary: the counter resets at UTC midnight, so two consecutive days can
+/// allow up to $2000 across the boundary — the same as a plain "per day" limit.
 
 interface ISafe {
     enum Operation {
@@ -26,49 +30,103 @@ interface AggregatorV3Interface {
         returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound);
 }
 
+
 interface IERC20 {
     function balanceOf(address account) external view returns (uint256);
 }
 
+/// Mirrors Uniswap v3 NonfungiblePositionManager mint/collect/unwrap arg shapes (decode only).
+library NpmDecode {
+    struct MintParams {
+        address token0;
+        address token1;
+        uint24 fee;
+        int24 tickLower;
+        int24 tickUpper;
+        uint256 amount0Desired;
+        uint256 amount1Desired;
+        uint256 amount0Min;
+        uint256 amount1Min;
+        address recipient;
+        uint256 deadline;
+    }
+
+    struct CollectParams {
+        uint256 tokenId;
+        address recipient;
+        uint128 amount0Max;
+        uint128 amount1Max;
+    }
+}
+
 contract SpendingLimitModule {
-    /// $1000 in USD cents.
     uint256 public constant DAILY_LIMIT_CENTS = 100_000;
-    /// Refuse a Chainlink answer older than this (mainnet-safe; Sepolia feeds update less often — override via constructor).
     uint256 public immutable feedStaleAfter;
-    /// USDC decimals on the target chain (6 on Ethereum / Sepolia).
     uint8 public immutable usdcDecimals;
 
     address public immutable agent;
     AggregatorV3Interface public immutable ethUsdFeed;
     address public immutable weth;
     address public immutable usdc;
+    address public immutable universalRouter;
+    address public immutable permit2;
+    address public immutable positionManager;
 
-    mapping(address => bool) public allowedTarget;
-    /// DelegateCall is only safe to MultiSend contracts we trust.
-    mapping(address => bool) public allowedDelegate;
+    /// Spenders that may receive ERC-20 / Permit2 approvals (Permit2, Universal Router, NPM).
+    mapping(address => bool) public allowedSpender;
+    /// Never callable as `to` (Safe singletons, proxy factories, …). The Safe and this module are always blocked.
+    mapping(address => bool) public blockedTarget;
+
+    struct Call {
+        address to;
+        uint256 value;
+        bytes data;
+    }
 
     struct DaySpend {
-        uint64 day; // floor(timestamp / 1 days)
+        uint64 day;
         uint192 spentCents;
     }
 
     mapping(address => DaySpend) public spendOf;
-
     uint256 private locked;
+
+    // ERC-20 / WETH
+    bytes4 private constant SEL_TRANSFER = 0xa9059cbb;
+    bytes4 private constant SEL_APPROVE = 0x095ea7b3;
+    bytes4 private constant SEL_DEPOSIT = 0xd0e30db0;
+    bytes4 private constant SEL_WITHDRAW = 0x2e1a7d4d;
+    // Permit2
+    bytes4 private constant SEL_PERMIT2_APPROVE = 0x87517c45;
+    // Universal Router
+    bytes4 private constant SEL_UR_EXECUTE_DEADLINE = 0x3593564c;
+    bytes4 private constant SEL_UR_EXECUTE = 0x24856bc3;
+    // NPM
+    bytes4 private constant SEL_NPM_MINT = 0x88316456;
+    bytes4 private constant SEL_NPM_INCREASE = 0x219f5d17;
+    bytes4 private constant SEL_NPM_DECREASE = 0x0c49ccbe;
+    bytes4 private constant SEL_NPM_COLLECT = 0xfc6f7865;
+    bytes4 private constant SEL_NPM_MULTICALL = 0xac9650d8;
+    bytes4 private constant SEL_NPM_REFUND_ETH = 0x12210e8a;
+    bytes4 private constant SEL_NPM_UNWRAP = 0x49404b7c;
 
     error NotAgent();
     error ZeroAddress();
     error TargetNotAllowed();
-    error DelegateNotAllowed();
+    error SelectorNotAllowed();
+    error BadSpender();
+    error BadRecipient();
+    error BadToken();
+    error BlockedTarget();
     error StalePrice();
     error BadPrice();
     error DailyLimitExceeded(uint256 spentCents, uint256 wouldSpendCents, uint256 limitCents);
     error ExecFailed();
     error Reentrancy();
+    error EmptyBatch();
+    error NestedMulticall();
 
-    event Executed(address indexed safe, address indexed to, uint256 value, uint256 spendCents, uint256 spentTodayCents);
-    event TargetAllowed(address indexed target, bool allowed);
-    event DelegateAllowed(address indexed target, bool allowed);
+    event Executed(address indexed safe, uint256 calls, uint256 spendCents, uint256 spentTodayCents);
 
     modifier onlyAgent() {
         if (msg.sender != agent) revert NotAgent();
@@ -82,7 +140,8 @@ contract SpendingLimitModule {
         locked = 0;
     }
 
-    /// @param feedStaleAfter_ Max age of the ETH/USD answer in seconds (e.g. 1 hours on mainnet, 24 hours on Sepolia).
+    /// @param spenders_ Permit2, Universal Router, Position Manager (and any other allowed approve targets).
+    /// @param blocked_ Safe singleton / proxy factory addresses that must never be `to`.
     constructor(
         address agent_,
         address ethUsdFeed_,
@@ -90,58 +149,69 @@ contract SpendingLimitModule {
         address usdc_,
         uint8 usdcDecimals_,
         uint256 feedStaleAfter_,
-        address[] memory callTargets,
-        address[] memory delegateTargets
+        address universalRouter_,
+        address permit2_,
+        address positionManager_,
+        address[] memory spenders_,
+        address[] memory blocked_
     ) {
-        if (agent_ == address(0) || ethUsdFeed_ == address(0) || weth_ == address(0) || usdc_ == address(0)) {
-            revert ZeroAddress();
-        }
+        if (
+            agent_ == address(0) || ethUsdFeed_ == address(0) || weth_ == address(0) || usdc_ == address(0)
+                || universalRouter_ == address(0) || permit2_ == address(0) || positionManager_ == address(0)
+        ) revert ZeroAddress();
         if (feedStaleAfter_ == 0) revert BadPrice();
+
         agent = agent_;
         ethUsdFeed = AggregatorV3Interface(ethUsdFeed_);
         weth = weth_;
         usdc = usdc_;
         usdcDecimals = usdcDecimals_;
         feedStaleAfter = feedStaleAfter_;
-        for (uint256 i = 0; i < callTargets.length; i++) {
-            if (callTargets[i] == address(0)) revert ZeroAddress();
-            allowedTarget[callTargets[i]] = true;
-            emit TargetAllowed(callTargets[i], true);
+        universalRouter = universalRouter_;
+        permit2 = permit2_;
+        positionManager = positionManager_;
+
+        for (uint256 i = 0; i < spenders_.length; i++) {
+            if (spenders_[i] == address(0)) revert ZeroAddress();
+            allowedSpender[spenders_[i]] = true;
         }
-        for (uint256 i = 0; i < delegateTargets.length; i++) {
-            if (delegateTargets[i] == address(0)) revert ZeroAddress();
-            allowedDelegate[delegateTargets[i]] = true;
-            emit DelegateAllowed(delegateTargets[i], true);
+        // The three protocol addresses must always be spenders even if the array omitted them.
+        allowedSpender[permit2_] = true;
+        allowedSpender[universalRouter_] = true;
+        allowedSpender[positionManager_] = true;
+
+        for (uint256 i = 0; i < blocked_.length; i++) {
+            if (blocked_[i] == address(0)) revert ZeroAddress();
+            blockedTarget[blocked_[i]] = true;
         }
     }
 
-    /// Agent-only: execute `to/value/data` on `safe` through the module, metering outbound USD.
-    function exec(address safe, address to, uint256 value, bytes calldata data, ISafe.Operation operation)
-        external
-        onlyAgent
-        nonReentrant
-    {
-        if (safe == address(0) || to == address(0)) revert ZeroAddress();
-        _checkTarget(to, data, operation);
+    /// Agent-only: run `calls` as Safe Calls (no DelegateCall), check each, then meter outbound USD once.
+    function exec(address safe, Call[] calldata calls) external onlyAgent nonReentrant {
+        if (safe == address(0)) revert ZeroAddress();
+        uint256 n = calls.length;
+        if (n == 0) revert EmptyBatch();
+
+        for (uint256 i = 0; i < n; i++) {
+            _checkCall(safe, calls[i].to, calls[i].data);
+        }
 
         (uint256 ethEqBefore, uint256 usdcBefore) = _balances(safe);
 
-        bool ok = ISafe(safe).execTransactionFromModule(to, value, data, operation);
-        if (!ok) revert ExecFailed();
+        for (uint256 i = 0; i < n; i++) {
+            bool ok = ISafe(safe).execTransactionFromModule(
+                calls[i].to, calls[i].value, calls[i].data, ISafe.Operation.Call
+            );
+            if (!ok) revert ExecFailed();
+        }
 
         (uint256 ethEqAfter, uint256 usdcAfter) = _balances(safe);
-        // Outbound only: increases (swap output, wrap) do not reduce the spend.
         uint256 ethOut = ethEqBefore > ethEqAfter ? ethEqBefore - ethEqAfter : 0;
         uint256 usdcOut = usdcBefore > usdcAfter ? usdcBefore - usdcAfter : 0;
-
-        // Any drop in a non-tracked token would not show here; callers must only hit allowlisted
-        // routes that move ETH/WETH/USDC. Plain ERC20 transfers of other tokens are refused by
-        // _checkTarget (token contract not allowlisted, and not a simple ETH send).
-
         uint256 spendCents = _ethCents(ethOut) + _usdcCents(usdcOut);
         uint256 spent = _accumulate(safe, spendCents);
 
-        emit Executed(safe, to, value, spendCents, spent);
+        emit Executed(safe, n, spendCents, spent);
     }
 
     function spentToday(address safe) external view returns (uint256) {
@@ -155,21 +225,164 @@ contract SpendingLimitModule {
         return spent >= DAILY_LIMIT_CENTS ? 0 : DAILY_LIMIT_CENTS - spent;
     }
 
-    // ── internals ───────────────────────────────────────────────────────────
+    // ── call checks ─────────────────────────────────────────────────────────
 
-    function _checkTarget(address to, bytes calldata data, ISafe.Operation operation) internal view {
-        if (operation == ISafe.Operation.DelegateCall) {
-            if (!allowedDelegate[to]) revert DelegateNotAllowed();
+    function _checkCall(address safe, address to, bytes calldata data) internal view {
+        if (to == address(0)) revert ZeroAddress();
+        if (to == safe || to == address(this) || blockedTarget[to]) revert BlockedTarget();
+
+        // Plain ETH send to an arbitrary EOA / contract (empty calldata).
+        if (data.length == 0) return;
+
+        if (data.length < 4) revert SelectorNotAllowed();
+        bytes4 sel = bytes4(data[0:4]);
+
+        if (to == usdc) {
+            _checkErc20(sel, data, false);
             return;
         }
-        // Call: ETH send to anyone, or call to an allowlisted contract (router, Permit2, NPM, token…).
-        // Token contracts (USDC/WETH) are allowlisted so approve/transfer work; other ERC-20s are not.
-        if (to == weth || to == usdc || allowedTarget[to]) return;
-        // Plain ETH transfer (empty data) to an arbitrary recipient is allowed; metering catches value.
-        if (data.length == 0) return;
-        // Non-empty data to a non-allowlisted address is refused (blocks arbitrary calls / unknown tokens).
+        if (to == weth) {
+            _checkErc20(sel, data, true);
+            return;
+        }
+        if (to == permit2) {
+            _checkPermit2(sel, data);
+            return;
+        }
+        if (to == universalRouter) {
+            if (sel != SEL_UR_EXECUTE_DEADLINE && sel != SEL_UR_EXECUTE) revert SelectorNotAllowed();
+            return;
+        }
+        if (to == positionManager) {
+            _checkNpm(safe, sel, data, false);
+            return;
+        }
         revert TargetNotAllowed();
     }
+
+    function _checkErc20(bytes4 sel, bytes calldata data, bool isWeth) internal view {
+        if (sel == SEL_TRANSFER) {
+            if (data.length != 4 + 64) revert SelectorNotAllowed();
+            return;
+        }
+        if (sel == SEL_APPROVE) {
+            if (data.length != 4 + 64) revert SelectorNotAllowed();
+            address spender = address(uint160(uint256(bytes32(data[4:36]))));
+            if (!allowedSpender[spender]) revert BadSpender();
+            return;
+        }
+        if (isWeth) {
+            if (sel == SEL_DEPOSIT) {
+                if (data.length != 4) revert SelectorNotAllowed();
+                return;
+            }
+            if (sel == SEL_WITHDRAW) {
+                if (data.length != 4 + 32) revert SelectorNotAllowed();
+                return;
+            }
+        }
+        revert SelectorNotAllowed();
+    }
+
+    function _checkPermit2(bytes4 sel, bytes calldata data) internal view {
+        // approve(address token, address spender, uint160 amount, uint48 expiration)
+        if (sel != SEL_PERMIT2_APPROVE) revert SelectorNotAllowed();
+        if (data.length != 4 + 128) revert SelectorNotAllowed();
+        address token = address(uint160(uint256(bytes32(data[4:36]))));
+        address spender = address(uint160(uint256(bytes32(data[36:68]))));
+        if (token != weth && token != usdc) revert BadToken();
+        if (spender != universalRouter) revert BadSpender();
+    }
+
+    function _checkNpm(address safe, bytes4 sel, bytes calldata data, bool insideMulticall) internal view {
+        if (sel == SEL_NPM_MINT) {
+            address recipient = _mintRecipient(data);
+            if (recipient != safe) revert BadRecipient();
+            return;
+        }
+        if (sel == SEL_NPM_COLLECT) {
+            address recipient = _collectRecipient(data);
+            if (recipient != safe) revert BadRecipient();
+            return;
+        }
+        if (sel == SEL_NPM_UNWRAP) {
+            address recipient = _unwrapRecipient(data);
+            if (recipient != safe) revert BadRecipient();
+            return;
+        }
+        if (sel == SEL_NPM_INCREASE || sel == SEL_NPM_DECREASE || sel == SEL_NPM_REFUND_ETH) {
+            return;
+        }
+        if (sel == SEL_NPM_MULTICALL) {
+            if (insideMulticall) revert NestedMulticall();
+            _checkNpmMulticall(safe, data);
+            return;
+        }
+        revert SelectorNotAllowed();
+    }
+
+    function _checkNpmMulticall(address safe, bytes calldata data) internal pure {
+        bytes[] memory inner = abi.decode(data[4:], (bytes[]));
+        for (uint256 i = 0; i < inner.length; i++) {
+            bytes memory one = inner[i];
+            if (one.length < 4) revert SelectorNotAllowed();
+            bytes4 sel;
+            assembly {
+                sel := mload(add(one, 32))
+            }
+            // Recreate calldata-style check using a memory copy via assembly is awkward;
+            // decode recipients from memory bytes instead.
+            if (sel == SEL_NPM_MINT) {
+                if (_mintRecipientMem(one) != safe) revert BadRecipient();
+            } else if (sel == SEL_NPM_COLLECT) {
+                if (_collectRecipientMem(one) != safe) revert BadRecipient();
+            } else if (sel == SEL_NPM_UNWRAP) {
+                if (_unwrapRecipientMem(one) != safe) revert BadRecipient();
+            } else if (sel == SEL_NPM_INCREASE || sel == SEL_NPM_DECREASE || sel == SEL_NPM_REFUND_ETH) {
+                // ok
+            } else if (sel == SEL_NPM_MULTICALL) {
+                revert NestedMulticall();
+            } else {
+                revert SelectorNotAllowed();
+            }
+        }
+    }
+
+    function _mintRecipient(bytes calldata data) internal pure returns (address) {
+        return abi.decode(data[4:], (NpmDecode.MintParams)).recipient;
+    }
+
+    function _collectRecipient(bytes calldata data) internal pure returns (address) {
+        return abi.decode(data[4:], (NpmDecode.CollectParams)).recipient;
+    }
+
+    function _unwrapRecipient(bytes calldata data) internal pure returns (address) {
+        (, address recipient) = abi.decode(data[4:], (uint256, address));
+        return recipient;
+    }
+
+    function _mintRecipientMem(bytes memory data) internal pure returns (address) {
+        return abi.decode(_skipSel(data), (NpmDecode.MintParams)).recipient;
+    }
+
+    function _collectRecipientMem(bytes memory data) internal pure returns (address) {
+        return abi.decode(_skipSel(data), (NpmDecode.CollectParams)).recipient;
+    }
+
+    function _unwrapRecipientMem(bytes memory data) internal pure returns (address) {
+        (, address recipient) = abi.decode(_skipSel(data), (uint256, address));
+        return recipient;
+    }
+
+    function _skipSel(bytes memory data) internal pure returns (bytes memory payload) {
+        require(data.length >= 4, "sel");
+        payload = new bytes(data.length - 4);
+        for (uint256 i = 4; i < data.length; i++) {
+            payload[i - 4] = data[i];
+        }
+    }
+
+    // ── metering ────────────────────────────────────────────────────────────
 
     function _balances(address safe) internal view returns (uint256 ethEq, uint256 usdcBal) {
         ethEq = safe.balance + IERC20(weth).balanceOf(safe);
@@ -202,18 +415,13 @@ contract SpendingLimitModule {
         if (updatedAt == 0 || block.timestamp < updatedAt || block.timestamp - updatedAt > feedStaleAfter) {
             revert StalePrice();
         }
-        uint8 dec = ethUsdFeed.decimals(); // typically 8
-        // wei * price(1e8) / 1e18 → USD with `dec` decimals; then → cents (2 decimals).
-        // cents = wei * price * 100 / (10^dec * 10^18)
+        uint8 dec = ethUsdFeed.decimals();
         return (weiAmount * uint256(answer) * 100) / (10 ** uint256(dec) * 1e18);
     }
 
     function _usdcCents(uint256 amount) internal view returns (uint256) {
         if (amount == 0) return 0;
-        // USDC 1:1 → cents. amount has usdcDecimals; cents have 2.
-        if (usdcDecimals >= 2) {
-            return amount / (10 ** uint256(usdcDecimals - 2));
-        }
+        if (usdcDecimals >= 2) return amount / (10 ** uint256(usdcDecimals - 2));
         return amount * (10 ** uint256(2 - usdcDecimals));
     }
 }
