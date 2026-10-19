@@ -1,0 +1,95 @@
+# Deploy the Orchestra bridge to the Azure VM over SSH.
+# - push to main (bridge files changed) -> prod only (staging is manual for now)
+# - manual run (Actions > Bridge deploy > Run workflow) -> prod, staging or both;
+#   staging can be built from any branch/tag/SHA (e.g. a PR branch).
+# Repo secrets: AZURE_VM_HOST, AZURE_VM_USER, AZURE_VM_SSH_KEY (private key, deploy-only)
+# Optional:     AZURE_VM_KNOWN_HOSTS (output of `ssh-keyscan -t ed25519 <host>`; pins the
+#               host key instead of trusting it on first use)
+name: Bridge deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".npmrc"
+      - "tsconfig.json"
+      - ".github/workflows/bridge-deploy.yml"
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "What to deploy"
+        type: choice
+        options: [staging, prod, both]
+        default: staging
+      staging_ref:
+        description: "Git ref for staging (branch, tag or SHA). Prod is always main."
+        type: string
+        default: main
+
+# No checkout, no GitHub API calls: the job only needs its secrets.
+permissions: {}
+
+concurrency:
+  group: bridge-deploy
+  cancel-in-progress: false
+
+jobs:
+  prod:
+    if: github.event_name == 'push' || inputs.target == 'prod' || inputs.target == 'both'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Set up SSH
+        env:
+          SSH_KEY: ${{ secrets.AZURE_VM_SSH_KEY }}
+          HOST: ${{ secrets.AZURE_VM_HOST }}
+          KNOWN_HOSTS: ${{ secrets.AZURE_VM_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy && chmod 600 ~/.ssh/id_deploy
+          if [ -n "$KNOWN_HOSTS" ]; then printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else ssh-keyscan -T 15 -t ed25519,ecdsa,rsa "$HOST" > ~/.ssh/known_hosts 2>/dev/null; fi
+      - name: Deploy bridge-prod (main)
+        env:
+          HOST: ${{ secrets.AZURE_VM_HOST }}
+          USER_: ${{ secrets.AZURE_VM_USER }}
+        run: |
+          ssh -i ~/.ssh/id_deploy -o BatchMode=yes -o ServerAliveInterval=30 "$USER_@$HOST" \
+            '/opt/orchestra/deploy.sh prod'
+
+  staging:
+    needs: prod
+    if: >-
+      !cancelled() &&
+      (needs.prod.result == 'success' || needs.prod.result == 'skipped') &&
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.target == 'staging' || inputs.target == 'both')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Validate ref
+        env:
+          REF: ${{ inputs.staging_ref }}
+        run: |
+          [[ "$REF" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "invalid ref: $REF"; exit 1; }
+          echo "REF=$REF" >> "$GITHUB_ENV"
+      - name: Set up SSH
+        env:
+          SSH_KEY: ${{ secrets.AZURE_VM_SSH_KEY }}
+          HOST: ${{ secrets.AZURE_VM_HOST }}
+          KNOWN_HOSTS: ${{ secrets.AZURE_VM_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy && chmod 600 ~/.ssh/id_deploy
+          if [ -n "$KNOWN_HOSTS" ]; then printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else ssh-keyscan -T 15 -t ed25519,ecdsa,rsa "$HOST" > ~/.ssh/known_hosts 2>/dev/null; fi
+      - name: Deploy bridge-staging
+        env:
+          HOST: ${{ secrets.AZURE_VM_HOST }}
+          USER_: ${{ secrets.AZURE_VM_USER }}
+        run: |
+          ssh -i ~/.ssh/id_deploy -o BatchMode=yes -o ServerAliveInterval=30 "$USER_@$HOST" \
+            "/opt/orchestra/deploy.sh staging '$REF'"
