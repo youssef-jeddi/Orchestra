@@ -35,11 +35,11 @@ export async function executeApprovalFlow(
     const exec = await run(a);
     if (!exec) throw new UserFacingError("It ran but gave no result, so I can't confirm it went through");
     const result = { txHash: exec.txHash, explorerUrl: exec.explorerUrl };
-    settle(a, { result });
+    await settle(a, { result });
     await rememberSentRecipient(a.wallet, a.intentType, a.execution);
     return result;
   } catch (err: any) {
-    settle(a, { error: err.message });
+    await settle(a, { error: err.message });
     throw err;
   }
 }
@@ -59,7 +59,7 @@ export async function approveWithPasskeyFlow(wallet: string, approvalId: unknown
   a.challenge = undefined; // single-use, pass or fail
   if (!challenge) throw new ApprovalError(400, "Request passkey options for this approval first.");
   if (!(await deps.verify(challenge))) throw new ApprovalError(401, "That passkey check didn't work. Please try again.");
-  claim(a.id, wallet);
+  await claim(a.id, wallet); // saved as "executing" before anything runs
   return { a, result: await deps.execute(a) };
 }
 
@@ -78,14 +78,19 @@ export interface TelegramDecisionDeps {
 export function telegramDecisionFlow(deps: TelegramDecisionDeps) {
   return async ({ wallet, approvalId, approve }: { wallet: string; approvalId: string; approve: boolean }): Promise<string> => {
     const a = getApproval(approvalId);
-    if (!a || a.channel !== "telegram") return "I can't find that approval. It may have expired.";
+    if (!a || a.channel !== "telegram") return "This request expired. Ask me again.";
     if (a.wallet !== wallet) return "This approval belongs to another wallet.";
     if (a.status !== "pending") {
       await deps.refresh(a);
       return `Already ${a.status}.`;
     }
     if (!approve) {
-      reject(a.id, wallet);
+      try {
+        await reject(a.id, wallet);
+      } catch (e) {
+        if (e instanceof ApprovalError) return e.message; // couldn't save: still waiting
+        throw e;
+      }
       await deps.refresh(a);
       return "You said no. Nothing was done.";
     }
@@ -98,7 +103,12 @@ export function telegramDecisionFlow(deps: TelegramDecisionDeps) {
       if (deps.isPasskeyError(e)) return "Add a passkey in Orchestra first. Nothing was done.";
       throw e;
     }
-    claim(a.id, wallet);
+    try {
+      await claim(a.id, wallet); // saved as "executing" before anything runs
+    } catch (e) {
+      if (e instanceof ApprovalError) return e.message; // couldn't save: nothing was done
+      throw e;
+    }
     await deps.refresh(a); // "⏳ doing it…"
     deps.execute(a).catch(() => {}).finally(() => deps.refresh(a));
     return "Approved. Doing it now…";

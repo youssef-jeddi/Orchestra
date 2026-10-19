@@ -32,7 +32,7 @@ const executed: string[] = [];
 const execute = async (a: PendingApproval) => { executed.push(a.id); return { txHash: "0xabc", explorerUrl: "https://x" }; };
 
 test("decline: the wallet's own pending approval is rejected and its passkey challenge is dropped", async () => {
-  const a = createApproval(base());
+  const a = await createApproval(base());
   a.challenge = "abc";
   const r = await declineApproval(a.id, WALLET.toLowerCase());
   assert.equal(r.status, "rejected");
@@ -41,36 +41,36 @@ test("decline: the wallet's own pending approval is rejected and its passkey cha
 });
 
 test("decline twice → 409 with a plain sentence", async () => {
-  const a = createApproval(base());
+  const a = await createApproval(base());
   await declineApproval(a.id, WALLET);
   assert.equal(await status(declineApproval(a.id, WALLET)), 409);
   await assert.rejects(declineApproval(a.id, WALLET), /already rejected/);
 });
 
 test("attack: another wallet's approval can't be declined (403) and stays pending", async () => {
-  const a = createApproval(base());
+  const a = await createApproval(base());
   assert.equal(await status(declineApproval(a.id, OTHER)), 403);
   assert.equal(getApproval(a.id)!.status, "pending");
 });
 
 test("unknown, expired or after-a-restart → 404 'expired, nothing was sent'", async () => {
   assert.equal(await status(declineApproval("nope", WALLET)), 404);
-  await assert.rejects(declineApproval("nope", WALLET), /expired\. Nothing was sent/);
+  await assert.rejects(declineApproval("nope", WALLET), /This request expired\. Ask me again\./);
   const t0 = 1_000_000;
-  const a = createApproval(base(), t0);
+  const a = await createApproval(base(), t0);
   assert.equal(await status(declineApproval(a.id, WALLET, undefined, t0 + APPROVAL_TTL_MS + 1)), 404);
   assert.equal(await status(declineApproval(undefined, WALLET)), 404);
 });
 
 test("an already executed approval can't be declined", async () => {
-  const a = createApproval(base());
+  const a = await createApproval(base());
   a.status = "executed";
   assert.equal(await status(declineApproval(a.id, WALLET)), 409);
 });
 
 test("attack: a passkey approval after a decline is refused and nothing executes", async () => {
   executed.length = 0;
-  const a = createApproval(base());
+  const a = await createApproval(base());
   a.challenge = "challenge";
   await declineApproval(a.id, WALLET);
   let verified = false;
@@ -82,7 +82,7 @@ test("attack: a passkey approval after a decline is refused and nothing executes
 
 test("passkey approval still runs once, and not again", async () => {
   executed.length = 0;
-  const a = createApproval(base());
+  const a = await createApproval(base());
   a.challenge = "challenge";
   const { result } = await approveWithPasskeyFlow(WALLET, a.id, { verify: async () => true, execute });
   assert.equal(result.txHash, "0xabc");
@@ -90,8 +90,8 @@ test("passkey approval still runs once, and not again", async () => {
   assert.equal(await status(declineApproval(a.id, WALLET)), 409, "can't decline what already went through");
 });
 
-const telegramApproval = (over: Partial<PendingApproval> = {}) => {
-  const a = createApproval(base());
+const telegramApproval = async (over: Partial<PendingApproval> = {}) => {
+  const a = await createApproval(base());
   a.channel = "telegram";
   a.factor = "telegram-button";
   a.telegram = { chatId: 1, messageId: 2 };
@@ -105,21 +105,21 @@ const handler = (refreshed: string[]) => telegramDecisionFlow({
 });
 
 test("decline closes the matching Telegram request (the message is refreshed to the rejected outcome)", async () => {
-  const a = telegramApproval();
+  const a = await telegramApproval();
   const refreshed: string[] = [];
   await declineApproval(a.id, WALLET, async (x) => { refreshed.push(`${x.id}:${x.status}`); });
   assert.deepEqual(refreshed, [`${a.id}:rejected`]);
 });
 
 test("a Telegram failure never undoes the decline", async () => {
-  const a = telegramApproval();
+  const a = await telegramApproval();
   const r = await declineApproval(a.id, WALLET, async () => { throw new Error("telegram down"); });
   assert.equal(r.status, "rejected");
 });
 
 test("attack: pressing Approve in Telegram after a decline in the app is refused and nothing executes", async () => {
   executed.length = 0;
-  const a = telegramApproval();
+  const a = await telegramApproval();
   await declineApproval(a.id, WALLET);
   const refreshed: string[] = [];
   const answer = await handler(refreshed)({ wallet: WALLET.toLowerCase(), approvalId: a.id, approve: true });
@@ -130,7 +130,7 @@ test("attack: pressing Approve in Telegram after a decline in the app is refused
 
 test("Telegram yes still works when nothing was declined", async () => {
   executed.length = 0;
-  const a = telegramApproval();
+  const a = await telegramApproval();
   const answer = await handler([])({ wallet: WALLET.toLowerCase(), approvalId: a.id, approve: true });
   assert.match(answer, /Approved/);
   assert.deepEqual(executed, [a.id]);
