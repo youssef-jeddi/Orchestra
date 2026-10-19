@@ -16,6 +16,9 @@ export const RULE_HINTS = {
   'unknown-intent': "I don't recognise this kind of request.",
   malformed: "I couldn't make sense of this request.",
   denylist: 'This token is never allowed.',
+  'pressure-wording': 'Your message asked me to hurry or skip my checks.',
+  'unplanned-address': "Your message mentions an address that isn't part of this action.",
+  'pressure-refused': 'I refused this one because the message pushed me to skip my checks.',
 };
 
 /** A slug we have no sentence for still gets a calm one, never the raw slug. */
