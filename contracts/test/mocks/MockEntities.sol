@@ -38,6 +38,16 @@ contract MockERC20 is IERC20 {
         balanceOf[to] += amount;
         return true;
     }
+
+    function deposit() external payable {
+        balanceOf[msg.sender] += msg.value;
+    }
+
+    function withdraw(uint256 amount) external {
+        balanceOf[msg.sender] -= amount;
+        (bool ok,) = msg.sender.call{value: amount}("");
+        require(ok);
+    }
 }
 
 contract MockAggregator is AggregatorV3Interface {
@@ -59,32 +69,17 @@ contract MockAggregator is AggregatorV3Interface {
         revertOnRead = v;
     }
 
-    function latestRoundData()
-        external
-        view
-        override
-        returns (uint80, int256, uint256, uint256, uint80)
-    {
+    function latestRoundData() external view override returns (uint80, int256, uint256, uint256, uint80) {
         if (revertOnRead) revert("feed down");
         return (1, answer, updatedAt, updatedAt, 1);
     }
 }
 
-/// Minimal Safe stand-in: holds ETH/tokens and runs module calls. Not a real Safe.
 contract MockSafe {
     address public module;
-    bool public reenterOnExec;
-    address public reenterTo;
-    bytes public reenterData;
 
     function setModule(address module_) external {
         module = module_;
-    }
-
-    function setReenter(address to, bytes calldata data) external {
-        reenterOnExec = true;
-        reenterTo = to;
-        reenterData = data;
     }
 
     function execTransactionFromModule(address to, uint256 value, bytes calldata data, ISafe.Operation)
@@ -92,17 +87,10 @@ contract MockSafe {
         returns (bool)
     {
         require(msg.sender == module, "not module");
-        if (reenterOnExec) {
-            reenterOnExec = false;
-            SpendingLimitModule(module).exec(address(this), reenterTo, 0, reenterData, ISafe.Operation.Call);
-        }
         bytes memory ret;
         bool ok;
-        if (data.length == 0) {
-            (ok, ret) = to.call{value: value}("");
-        } else {
-            (ok, ret) = to.call{value: value}(data);
-        }
+        if (data.length == 0) (ok, ret) = to.call{value: value}("");
+        else (ok, ret) = to.call{value: value}(data);
         if (!ok) {
             assembly {
                 revert(add(ret, 32), mload(ret))
@@ -111,83 +99,165 @@ contract MockSafe {
         return true;
     }
 
+    // Minimal Safe config surface for attack tests (agent tries to call these via to==safe)
+    function addOwnerWithThreshold(address, uint256) external pure {
+        revert("should never run");
+    }
+
+    function enableModule(address) external pure {
+        revert("should never run");
+    }
+
+    function disableModule(address, address) external pure {
+        revert("should never run");
+    }
+
+    function setGuard(address) external pure {
+        revert("should never run");
+    }
+
+    function setFallbackHandler(address) external pure {
+        revert("should never run");
+    }
+
+    function changeThreshold(uint256) external pure {
+        revert("should never run");
+    }
+
     receive() external payable {}
 }
 
-/// Pulls USDC from the Safe via transferFrom after an approve — used as an allowlisted "router".
-contract MockRouter {
-    function pullUsdc(address token, address from, uint256 amount) external {
-        MockERC20(token).transferFrom(from, address(this), amount);
-    }
+contract MockPermit2 {
+    event Approved(address token, address spender, uint160 amount, uint48 expiration);
 
-    function pullEth() external payable {}
-
-    /// Calls back into the agent so it can reenter the module (reentrancy test).
-    function pullEthAndCallback(address agent) external payable {
-        SmartAgent(payable(agent)).reenter();
+    function approve(address token, address spender, uint160 amount, uint48 expiration) external {
+        emit Approved(token, spender, amount, expiration);
     }
 }
 
-/// Contract-wallet agent used to prove the reentrancy lock.
+contract MockUniversalRouter {
+    event Executed(bytes commands, uint256 value);
+    address public callbackAgent;
+
+    function setCallback(address agent) external {
+        callbackAgent = agent;
+    }
+
+    function execute(bytes calldata commands, bytes[] calldata, uint256) external payable {
+        emit Executed(commands, msg.value);
+        if (callbackAgent != address(0)) SmartAgent(payable(callbackAgent)).reenter();
+    }
+
+    function execute(bytes calldata commands, bytes[] calldata) external payable {
+        emit Executed(commands, msg.value);
+        if (callbackAgent != address(0)) SmartAgent(payable(callbackAgent)).reenter();
+    }
+
+    function pullUsdc(address token, address from, uint256 amount) external {
+        MockERC20(token).transferFrom(from, address(this), amount);
+    }
+}
+
+contract MockNpm {
+    event Minted(address recipient);
+    event Collected(address recipient);
+
+    struct MintParams {
+        address token0;
+        address token1;
+        uint24 fee;
+        int24 tickLower;
+        int24 tickUpper;
+        uint256 amount0Desired;
+        uint256 amount1Desired;
+        uint256 amount0Min;
+        uint256 amount1Min;
+        address recipient;
+        uint256 deadline;
+    }
+
+    function mint(MintParams calldata params) external payable returns (uint256, uint128, uint256, uint256) {
+        emit Minted(params.recipient);
+        return (1, 0, 0, 0);
+    }
+
+    struct CollectParams {
+        uint256 tokenId;
+        address recipient;
+        uint128 amount0Max;
+        uint128 amount1Max;
+    }
+
+    function collect(CollectParams calldata params) external payable returns (uint256, uint256) {
+        emit Collected(params.recipient);
+        return (0, 0);
+    }
+
+    struct DecreaseLiquidityParams {
+        uint256 tokenId;
+        uint128 liquidity;
+        uint256 amount0Min;
+        uint256 amount1Min;
+        uint256 deadline;
+    }
+
+    function decreaseLiquidity(DecreaseLiquidityParams calldata) external payable returns (uint256, uint256) {
+        return (0, 0);
+    }
+
+    function refundETH() external payable {}
+
+    function multicall(bytes[] calldata data) external payable returns (bytes[] memory results) {
+        results = new bytes[](data.length);
+        for (uint256 i = 0; i < data.length; i++) {
+            (bool ok, bytes memory ret) = address(this).delegatecall(data[i]);
+            if (!ok) {
+                assembly {
+                    revert(add(ret, 32), mload(ret))
+                }
+            }
+            results[i] = ret;
+        }
+    }
+
+    function safeTransferFrom(address, address, uint256) external pure {
+        revert("nft move");
+    }
+
+    function approve(address, uint256) external pure {
+        revert("nft approve");
+    }
+
+    function setApprovalForAll(address, bool) external pure {
+        revert("nft operator");
+    }
+}
+
 contract SmartAgent {
     SpendingLimitModule public module;
     address public safe;
-    address public to;
+    SpendingLimitModule.Call[] public reenterCalls;
     bool public doReenter;
 
     function setModule(SpendingLimitModule m) external {
         module = m;
     }
 
-    function arm(address safe_, address to_) external {
+    function arm(address safe_, SpendingLimitModule.Call[] calldata calls) external {
         safe = safe_;
-        to = to_;
+        delete reenterCalls;
+        for (uint256 i = 0; i < calls.length; i++) {
+            reenterCalls.push(calls[i]);
+        }
         doReenter = true;
-    }
-
-    function kick(uint256 value) external {
-        module.exec(safe, to, value, "", ISafe.Operation.Call);
     }
 
     function reenter() external {
         if (!doReenter) return;
         doReenter = false;
-        module.exec(safe, to, 0.001 ether, "", ISafe.Operation.Call);
+        module.exec(safe, reenterCalls);
     }
 
     receive() external payable {}
 }
 
-/// Target that transfers an unknown ERC20 out of the Safe (via prior approve).
-contract MockDrainer {
-    function pull(address token, address from, uint256 amount) external {
-        MockERC20(token).transferFrom(from, address(this), amount);
-    }
-}
-
-/// Packs Safe-style MultiSend and executes each inner call (Call only).
-contract MockMultiSend {
-    function multiSend(bytes memory transactions) external payable {
-        uint256 i;
-        while (i < transactions.length) {
-            address to;
-            uint256 value;
-            uint256 len;
-            assembly {
-                // skip op (1 byte) for this mock — always Call
-                to := shr(96, mload(add(add(transactions, 0x20), add(i, 1))))
-                value := mload(add(add(transactions, 0x20), add(i, 0x15)))
-                len := mload(add(add(transactions, 0x20), add(i, 0x35)))
-            }
-            bytes memory data = new bytes(len);
-            for (uint256 j; j < len; j++) {
-                data[j] = transactions[i + 0x55 + j];
-            }
-            (bool ok, bytes memory ret) = to.call{value: value}(data);
-            if (!ok) {
-                assembly { revert(add(ret, 32), mload(ret)) }
-            }
-            i += 0x55 + len;
-        }
-    }
-}

@@ -19,7 +19,9 @@ import {
   resolveMaxSwapShortfall,
   formatTokenAmount,
   DEFAULT_MAX_SWAP_SHORTFALL,
+  pricesUsable,
 } from "./index";
+import { _resetPriceFeedForTests } from "./priceFeed";
 import { WETH_SEPOLIA, USDC_SEPOLIA } from "../integrations/uniswap/types";
 
 let passed = 0;
@@ -30,6 +32,7 @@ function test(name: string, fn: () => void) {
 }
 
 console.log("policy");
+setPrices({ ETH: 2500, WETH: 2500, USDC: 1, USDT: 1 }); // no built-in prices: tests below value things in USD
 
 // ── detectIntentType ──
 test("detectIntentType: empty/unknown", () => {
@@ -59,7 +62,12 @@ test("resolveDailyLimit: 0 is honoured (\"always ask me\"); only missing or inva
 });
 
 // ── price feed / estimateUsd ──
-test("getPriceUsd: stub defaults before any refresh", () => {
+test("getPriceUsd: no built-in prices before any fetch", () => {
+  _resetPriceFeedForTests();
+  assert.equal(getPriceUsd("ETH"), 0);
+  assert.equal(getPriceUsd("WETH"), 0);
+  assert.equal(pricesUsable(), false);
+  setPrices({ ETH: 2500, WETH: 2500, USDC: 1, USDT: 1 }); // restore for other tests
   assert.equal(getPriceUsd("USDC"), 1);
   assert.equal(getPriceUsd("ETH"), 2500);
   assert.equal(getPriceUsd("WETH"), 2500);

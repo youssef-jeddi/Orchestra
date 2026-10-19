@@ -30,6 +30,7 @@ import { executePlan } from "../../executor";
 import {
   computeHabitProfile,
   refreshPrices,
+  pricesUsable,
   getPrices,
   type PolicyProfile,
 } from "../../policy";
@@ -40,7 +41,7 @@ import { verifyPrivyUser, importPrivyPasskeys, noteEmailSignIn, verifyEmailForPa
 import { getAdapter, type Balances } from "../../executor/adapters";
 import { interpretIntent, assessAction } from "../../intent/pipeline";
 import { sanitizeHistory } from "../../intent/planner";
-import { INTENT_FALLBACK_ERROR, LIMITS_UNREADABLE_REASON } from "../../intent/messages";
+import { INTENT_FALLBACK_ERROR, LIMITS_UNREADABLE_REASON, PRICE_UNAVAILABLE_REASON } from "../../intent/messages";
 import { injectFault } from "../../utils/faultInject";
 import { shortAddr, safeErr, requestId, logUserMessage, intentSummaryLine, intentOutcome, type IntentLogFields } from "../../utils/redact";
 import { fetchBalances, resolveEnsName } from "../../intent/context";
@@ -402,7 +403,14 @@ app.post("/intent", async (req, res) => {
         ? withTimeout(readPositions(provider, safe, tokenByAddress).catch(() => null), 10_000, null)
         : ([] as Position[]))),
       resolveEns: resolveEnsName,
-      valueGate: async () => (await inputsP).ok,
+      valueGate: async () => {
+        if (!(await inputsP).ok) return LIMITS_UNREADABLE_REASON;
+        if (!pricesUsable()) {
+          await refreshPrices().catch(() => {});
+          if (!pricesUsable()) return PRICE_UNAVAILABLE_REASON;
+        }
+        return null;
+      },
     });
     const timing = () => ({ totalMs: Date.now() - started, plannerMs: planner.latencyMs, model: planner.model });
     Object.assign(li, { kind: outcome.kind, plannerMs: planner.latencyMs, model: planner.model });
@@ -465,6 +473,12 @@ app.post("/intent", async (req, res) => {
     if (!inputs.ok) {
       console.log(`[intent ${rid}] ${intentType} held back: limits or activity unreadable`);
       res.json({ status: "unsupported", intentType, reason: LIMITS_UNREADABLE_REASON, reasoning: LIMITS_UNREADABLE_REASON, timing: timing() });
+      return;
+    }
+    // Same for the price: without a fresh one the dollar value (and the daily limit check) is a guess.
+    if (!pricesUsable()) {
+      console.log(`[intent ${rid}] ${intentType} held back: no fresh price`);
+      res.json({ status: "unsupported", intentType, reason: PRICE_UNAVAILABLE_REASON, reasoning: PRICE_UNAVAILABLE_REASON, timing: timing() });
       return;
     }
 

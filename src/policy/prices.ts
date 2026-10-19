@@ -1,6 +1,6 @@
 // ─── Policy — Market data & token helpers ───
 // Token metadata + USD estimation. `estimateUsd` reads live prices from the
-// cached price feed (falling back to stub prices when the cache is cold).
+// cached price feed (callers must check pricesUsable first, since a cold cache has no price).
 
 import { ethers } from "ethers";
 import { WETH_SEPOLIA, USDC_SEPOLIA } from "../integrations/uniswap/types";

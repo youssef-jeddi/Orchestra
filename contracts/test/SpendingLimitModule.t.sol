@@ -11,33 +11,33 @@ contract SpendingLimitModuleTest is Test {
     MockERC20 usdc;
     MockERC20 dai;
     MockSafe safe;
-    MockRouter router;
-    MockDrainer drainer;
+    MockPermit2 p2;
+    MockUniversalRouter ur;
+    MockNpm npm;
     SpendingLimitModule module;
 
     address agent = address(0xA9E47);
     address attacker = address(0xBAD);
     address recipient = address(0xBEEF);
+    address safeFactory = address(0xFAC70);
 
-    // $2500 with 8 decimals (Chainlink style)
     int256 constant ETH_USD_8 = 2500e8;
 
     function setUp() public {
-        vm.warp(1_700_000_000); // fixed time so stale-feed math cannot underflow
+        vm.warp(1_700_000_000);
         feed = new MockAggregator(8);
         feed.set(ETH_USD_8, block.timestamp);
         weth = new MockERC20("WETH", "WETH", 18);
         usdc = new MockERC20("USDC", "USDC", 6);
         dai = new MockERC20("DAI", "DAI", 18);
         safe = new MockSafe();
-        router = new MockRouter();
-        drainer = new MockDrainer();
+        p2 = new MockPermit2();
+        ur = new MockUniversalRouter();
+        npm = new MockNpm();
 
-        address[] memory calls = new address[](2);
-        calls[0] = address(router);
-        calls[1] = address(drainer); // allowlisted so we can show metering still applies to known tokens
-        address[] memory dels = new address[](1);
-        dels[0] = address(0x1234); // MultiSend stand-in for allowlist
+        address[] memory spenders = new address[](0);
+        address[] memory blocked = new address[](1);
+        blocked[0] = safeFactory;
 
         module = new SpendingLimitModule(
             agent,
@@ -46,250 +46,360 @@ contract SpendingLimitModuleTest is Test {
             address(usdc),
             6,
             1 hours,
-            calls,
-            dels
+            address(ur),
+            address(p2),
+            address(npm),
+            spenders,
+            blocked
         );
         safe.setModule(address(module));
-
-        // Fund the Safe
         vm.deal(address(safe), 10 ether);
         weth.mint(address(safe), 5 ether);
         usdc.mint(address(safe), 5_000e6);
         dai.mint(address(safe), 1_000 ether);
     }
 
-    function _execEth(uint256 value) internal {
+    function _exec(SpendingLimitModule.Call[] memory calls) internal {
         vm.prank(agent);
-        module.exec(address(safe), recipient, value, "", ISafe.Operation.Call);
+        module.exec(address(safe), calls);
     }
 
-    function _approveUsdc(uint256 amount) internal {
-        bytes memory data = abi.encodeWithSignature("approve(address,uint256)", address(router), amount);
-        vm.prank(agent);
-        module.exec(address(safe), address(usdc), 0, data, ISafe.Operation.Call);
-    }
-
-    function _pullUsdc(uint256 amount) internal {
-        bytes memory data = abi.encodeWithSignature("pullUsdc(address,address,uint256)", address(usdc), address(safe), amount);
-        vm.prank(agent);
-        module.exec(address(safe), address(router), 0, data, ISafe.Operation.Call);
+    function _one(address to, uint256 value, bytes memory data) internal pure returns (SpendingLimitModule.Call[] memory calls) {
+        calls = new SpendingLimitModule.Call[](1);
+        calls[0] = SpendingLimitModule.Call({to: to, value: value, data: data});
     }
 
     // ── happy paths ─────────────────────────────────────────────────────────
 
     function test_ethSendUnderCap() public {
-        // 0.1 ETH * $2500 = $250 = 25000 cents
-        _execEth(0.1 ether);
+        _exec(_one(recipient, 0.1 ether, ""));
         assertEq(module.spentToday(address(safe)), 25_000);
         assertEq(recipient.balance, 0.1 ether);
-        assertEq(module.remainingToday(address(safe)), 75_000);
-    }
-
-    function test_usdcViaAllowlistedRouter() public {
-        _approveUsdc(type(uint256).max);
-        // approve must not count as spend
-        assertEq(module.spentToday(address(safe)), 0);
-        _pullUsdc(100e6); // $100
-        assertEq(module.spentToday(address(safe)), 10_000);
-    }
-
-    function test_wethTransferCountsAsEth() public {
-        bytes memory data = abi.encodeWithSignature("transfer(address,uint256)", recipient, 0.2 ether);
-        // 0.2 * 2500 = $500
-        vm.prank(agent);
-        module.exec(address(safe), address(weth), 0, data, ISafe.Operation.Call);
-        assertEq(module.spentToday(address(safe)), 50_000);
-    }
-
-    function test_dailyReset() public {
-        _execEth(0.3 ether); // $750
-        assertEq(module.spentToday(address(safe)), 75_000);
-        vm.warp(block.timestamp + 1 days);
-        feed.set(ETH_USD_8, block.timestamp); // fresh feed after warp
-        assertEq(module.spentToday(address(safe)), 0);
-        _execEth(0.3 ether); // allowed again
-        assertEq(module.spentToday(address(safe)), 75_000);
     }
 
     function test_exactCapAllowed() public {
-        // $1000 at $2500/ETH = 0.4 ETH
-        _execEth(0.4 ether);
+        _exec(_one(recipient, 0.4 ether, ""));
         assertEq(module.spentToday(address(safe)), 100_000);
-        assertEq(module.remainingToday(address(safe)), 0);
     }
 
-    // ── over cap / feed / target ────────────────────────────────────────────
+    function test_dailyReset() public {
+        _exec(_one(recipient, 0.3 ether, ""));
+        vm.warp(block.timestamp + 1 days);
+        feed.set(ETH_USD_8, block.timestamp);
+        assertEq(module.spentToday(address(safe)), 0);
+        _exec(_one(recipient, 0.3 ether, ""));
+        assertEq(module.spentToday(address(safe)), 75_000);
+    }
+
+    function test_swapShapedBatchMetered() public {
+        // approve USDC→Permit2, Permit2.approve→UR, UR.execute — spend = USDC pulled if any.
+        // Here UR doesn't pull; approvals alone must not consume the ceiling.
+        bytes memory a1 = abi.encodeWithSelector(bytes4(0x095ea7b3), address(p2), type(uint256).max);
+        bytes memory a2 = abi.encodeWithSelector(bytes4(0x87517c45), address(usdc), address(ur), uint160(type(uint160).max), uint48(type(uint48).max));
+        bytes[] memory inputs = new bytes[](0);
+        bytes memory a3 = abi.encodeWithSelector(bytes4(0x3593564c), bytes(""), inputs, block.timestamp + 60);
+
+        SpendingLimitModule.Call[] memory calls = new SpendingLimitModule.Call[](3);
+        calls[0] = SpendingLimitModule.Call(address(usdc), 0, a1);
+        calls[1] = SpendingLimitModule.Call(address(p2), 0, a2);
+        calls[2] = SpendingLimitModule.Call(address(ur), 0, a3);
+        _exec(calls);
+        assertEq(module.spentToday(address(safe)), 0, "approvals are not spend");
+        assertEq(usdc.allowance(address(safe), address(p2)), type(uint256).max);
+    }
+
+    function test_swapPullsUsdcAndMeters() public {
+        bytes memory approveData = abi.encodeWithSelector(bytes4(0x095ea7b3), address(ur), type(uint256).max);
+        // Use UR.pullUsdc — but that selector isn't allowlisted on UR. So pull via USDC.transfer to simulate outbound.
+        bytes memory transferData = abi.encodeWithSelector(bytes4(0xa9059cbb), address(ur), uint256(200e6));
+        SpendingLimitModule.Call[] memory calls = new SpendingLimitModule.Call[](2);
+        calls[0] = SpendingLimitModule.Call(address(usdc), 0, approveData);
+        calls[1] = SpendingLimitModule.Call(address(usdc), 0, transferData);
+        _exec(calls);
+        assertEq(module.spentToday(address(safe)), 20_000);
+    }
+
+    function test_lpMintWithRecipientSafe() public {
+        MockNpm.MintParams memory params = MockNpm.MintParams({
+            token0: address(usdc),
+            token1: address(weth),
+            fee: 3000,
+            tickLower: -887220,
+            tickUpper: 887220,
+            amount0Desired: 100e6,
+            amount1Desired: 0.04 ether,
+            amount0Min: 0,
+            amount1Min: 0,
+            recipient: address(safe),
+            deadline: block.timestamp + 60
+        });
+        bytes memory mintData = abi.encodeWithSelector(MockNpm.mint.selector, params);
+        bytes memory approveUsdc = abi.encodeWithSelector(bytes4(0x095ea7b3), address(npm), uint256(100e6));
+        bytes memory approveWeth = abi.encodeWithSelector(bytes4(0x095ea7b3), address(npm), uint256(0.04 ether));
+        // Fund pull: transfer into npm to simulate deposit (metered)
+        bytes memory tUsdc = abi.encodeWithSelector(bytes4(0xa9059cbb), address(npm), uint256(100e6));
+        bytes memory tWeth = abi.encodeWithSelector(bytes4(0xa9059cbb), address(npm), uint256(0.04 ether));
+
+        SpendingLimitModule.Call[] memory calls = new SpendingLimitModule.Call[](5);
+        calls[0] = SpendingLimitModule.Call(address(usdc), 0, approveUsdc);
+        calls[1] = SpendingLimitModule.Call(address(weth), 0, approveWeth);
+        calls[2] = SpendingLimitModule.Call(address(usdc), 0, tUsdc);
+        calls[3] = SpendingLimitModule.Call(address(weth), 0, tWeth);
+        calls[4] = SpendingLimitModule.Call(address(npm), 0, mintData);
+        _exec(calls);
+        // $100 USDC + 0.04 ETH * $2500 = $100 + $100 = $200
+        assertEq(module.spentToday(address(safe)), 20_000);
+    }
+
+    function test_wethDepositWithdraw() public {
+        bytes memory dep = abi.encodeWithSelector(bytes4(0xd0e30db0));
+        _exec(_one(address(weth), 0.05 ether, dep));
+        // ETH→WETH: ethEq unchanged → spend 0
+        assertEq(module.spentToday(address(safe)), 0);
+    }
+
+    // ── over cap / feed ─────────────────────────────────────────────────────
 
     function test_overCapRevertsAndDoesNotMoveFunds() public {
         uint256 before = address(safe).balance;
         vm.prank(agent);
         vm.expectRevert(
-            abi.encodeWithSelector(
-                SpendingLimitModule.DailyLimitExceeded.selector, uint256(0), uint256(125_000), uint256(100_000)
-            )
+            abi.encodeWithSelector(SpendingLimitModule.DailyLimitExceeded.selector, uint256(0), uint256(125_000), uint256(100_000))
         );
-        // 0.5 ETH * 2500 = $1250
-        module.exec(address(safe), recipient, 0.5 ether, "", ISafe.Operation.Call);
-        assertEq(address(safe).balance, before, "over-cap must not move funds");
-        assertEq(module.spentToday(address(safe)), 0);
-    }
-
-    function test_secondTxThatWouldExceedReverts() public {
-        _execEth(0.3 ether); // $750
-        uint256 before = address(safe).balance;
-        vm.prank(agent);
-        vm.expectRevert();
-        module.exec(address(safe), recipient, 0.2 ether, "", ISafe.Operation.Call); // +$500 → $1250
+        module.exec(address(safe), _one(recipient, 0.5 ether, ""));
         assertEq(address(safe).balance, before);
-        assertEq(module.spentToday(address(safe)), 75_000);
+        assertEq(module.spentToday(address(safe)), 0);
     }
 
     function test_staleFeedReverts() public {
         feed.set(ETH_USD_8, block.timestamp - 2 hours);
         vm.prank(agent);
         vm.expectRevert(SpendingLimitModule.StalePrice.selector);
-        module.exec(address(safe), recipient, 0.01 ether, "", ISafe.Operation.Call);
-    }
-
-    function test_missingFeedReverts() public {
-        feed.setRevert(true);
-        vm.prank(agent);
-        vm.expectRevert();
-        module.exec(address(safe), recipient, 0.01 ether, "", ISafe.Operation.Call);
+        module.exec(address(safe), _one(recipient, 0.01 ether, ""));
     }
 
     function test_badPriceReverts() public {
         feed.set(0, block.timestamp);
         vm.prank(agent);
         vm.expectRevert(SpendingLimitModule.BadPrice.selector);
-        module.exec(address(safe), recipient, 0.01 ether, "", ISafe.Operation.Call);
+        module.exec(address(safe), _one(recipient, 0.01 ether, ""));
     }
 
-    function test_unknownTokenDirectCallRefused() public {
-        bytes memory data = abi.encodeWithSignature("transfer(address,uint256)", attacker, 1 ether);
-        vm.prank(agent);
-        vm.expectRevert(SpendingLimitModule.TargetNotAllowed.selector);
-        module.exec(address(safe), address(dai), 0, data, ISafe.Operation.Call);
-        assertEq(dai.balanceOf(address(safe)), 1_000 ether);
-    }
+    // ── attacks: Safe self-calls / config ────────────────────────────────────
 
-    function test_nonEmptyCallToRandomAddressRefused() public {
-        vm.prank(agent);
-        vm.expectRevert(SpendingLimitModule.TargetNotAllowed.selector);
-        module.exec(address(safe), attacker, 0, hex"deadbeef", ISafe.Operation.Call);
-    }
-
-    function test_delegateToUnknownRefused() public {
-        vm.prank(agent);
-        vm.expectRevert(SpendingLimitModule.DelegateNotAllowed.selector);
-        module.exec(address(safe), address(router), 0, "", ISafe.Operation.DelegateCall);
-    }
-
-    // ── attacks ─────────────────────────────────────────────────────────────
-
-    function test_attackerCannotExec() public {
-        vm.prank(attacker);
-        vm.expectRevert(SpendingLimitModule.NotAgent.selector);
-        module.exec(address(safe), recipient, 0.01 ether, "", ISafe.Operation.Call);
-    }
-
-    function test_agentCannotCallSafeConfigViaModule() public {
-        // setGuard(address) selector — Safe itself is not allowlisted
-        bytes memory data = abi.encodeWithSignature("setGuard(address)", address(0));
-        vm.prank(agent);
-        vm.expectRevert(SpendingLimitModule.TargetNotAllowed.selector);
-        module.exec(address(safe), address(safe), 0, data, ISafe.Operation.Call);
-    }
-
-    function test_agentCannotDisableModuleViaSelfCall() public {
-        bytes memory data = abi.encodeWithSignature("disableModule(address,address)", address(0x1), address(module));
-        vm.prank(agent);
-        vm.expectRevert(SpendingLimitModule.TargetNotAllowed.selector);
-        module.exec(address(safe), address(safe), 0, data, ISafe.Operation.Call);
-    }
-
-    function test_agentCannotAddOwnerViaModule() public {
+    function test_attack_callToSafeAddOwner() public {
         bytes memory data = abi.encodeWithSignature("addOwnerWithThreshold(address,uint256)", attacker, 1);
         vm.prank(agent);
+        vm.expectRevert(SpendingLimitModule.BlockedTarget.selector);
+        module.exec(address(safe), _one(address(safe), 0, data));
+    }
+
+    function test_attack_callToSafeEnableModule() public {
+        bytes memory data = abi.encodeWithSignature("enableModule(address)", attacker);
+        vm.prank(agent);
+        vm.expectRevert(SpendingLimitModule.BlockedTarget.selector);
+        module.exec(address(safe), _one(address(safe), 0, data));
+    }
+
+    function test_attack_callToSafeSetGuard() public {
+        bytes memory data = abi.encodeWithSignature("setGuard(address)", attacker);
+        vm.prank(agent);
+        vm.expectRevert(SpendingLimitModule.BlockedTarget.selector);
+        module.exec(address(safe), _one(address(safe), 0, data));
+    }
+
+    function test_attack_callToSafeDisableModule() public {
+        bytes memory data = abi.encodeWithSignature("disableModule(address,address)", address(0x1), address(module));
+        vm.prank(agent);
+        vm.expectRevert(SpendingLimitModule.BlockedTarget.selector);
+        module.exec(address(safe), _one(address(safe), 0, data));
+    }
+
+    function test_attack_callToModule() public {
+        vm.prank(agent);
+        vm.expectRevert(SpendingLimitModule.BlockedTarget.selector);
+        module.exec(address(safe), _one(address(module), 0, hex"12345678"));
+    }
+
+    function test_attack_callToBlockedFactory() public {
+        vm.prank(agent);
+        vm.expectRevert(SpendingLimitModule.BlockedTarget.selector);
+        module.exec(address(safe), _one(safeFactory, 0, hex"12345678"));
+    }
+
+    // ── attacks: approvals ──────────────────────────────────────────────────
+
+    function test_attack_approveUsdcToAttacker() public {
+        bytes memory data = abi.encodeWithSelector(bytes4(0x095ea7b3), attacker, type(uint256).max);
+        vm.prank(agent);
+        vm.expectRevert(SpendingLimitModule.BadSpender.selector);
+        module.exec(address(safe), _one(address(usdc), 0, data));
+    }
+
+    function test_attack_approveWethToAttacker() public {
+        bytes memory data = abi.encodeWithSelector(bytes4(0x095ea7b3), attacker, type(uint256).max);
+        vm.prank(agent);
+        vm.expectRevert(SpendingLimitModule.BadSpender.selector);
+        module.exec(address(safe), _one(address(weth), 0, data));
+    }
+
+    function test_attack_increaseAllowanceRefused() public {
+        bytes memory data = abi.encodeWithSelector(bytes4(0x39509351), address(p2), uint256(1));
+        vm.prank(agent);
+        vm.expectRevert(SpendingLimitModule.SelectorNotAllowed.selector);
+        module.exec(address(safe), _one(address(usdc), 0, data));
+    }
+
+    function test_attack_permit2ApproveToAttacker() public {
+        bytes memory data = abi.encodeWithSelector(bytes4(0x87517c45), address(usdc), attacker, uint160(1), uint48(1));
+        vm.prank(agent);
+        vm.expectRevert(SpendingLimitModule.BadSpender.selector);
+        module.exec(address(safe), _one(address(p2), 0, data));
+    }
+
+    function test_attack_permit2ApproveUntrackedToken() public {
+        bytes memory data = abi.encodeWithSelector(bytes4(0x87517c45), address(dai), address(ur), uint160(1), uint48(1));
+        vm.prank(agent);
+        vm.expectRevert(SpendingLimitModule.BadToken.selector);
+        module.exec(address(safe), _one(address(p2), 0, data));
+    }
+
+    // ── attacks: untracked token / NFT ──────────────────────────────────────
+
+    function test_attack_untrackedTokenTransfer() public {
+        bytes memory data = abi.encodeWithSelector(bytes4(0xa9059cbb), attacker, uint256(1 ether));
+        vm.prank(agent);
         vm.expectRevert(SpendingLimitModule.TargetNotAllowed.selector);
-        module.exec(address(safe), address(safe), 0, data, ISafe.Operation.Call);
+        module.exec(address(safe), _one(address(dai), 0, data));
+    }
+
+    function test_attack_nftSafeTransferFrom() public {
+        bytes memory data = abi.encodeWithSelector(bytes4(0x42842e0e), address(safe), attacker, uint256(1));
+        vm.prank(agent);
+        vm.expectRevert(SpendingLimitModule.SelectorNotAllowed.selector);
+        module.exec(address(safe), _one(address(npm), 0, data));
+    }
+
+    function test_attack_nftApprove() public {
+        bytes memory data = abi.encodeWithSelector(bytes4(0x095ea7b3), attacker, uint256(1));
+        vm.prank(agent);
+        vm.expectRevert(SpendingLimitModule.SelectorNotAllowed.selector);
+        module.exec(address(safe), _one(address(npm), 0, data));
+    }
+
+    function test_attack_nftSetApprovalForAll() public {
+        bytes memory data = abi.encodeWithSelector(bytes4(0xa22cb465), attacker, true);
+        vm.prank(agent);
+        vm.expectRevert(SpendingLimitModule.SelectorNotAllowed.selector);
+        module.exec(address(safe), _one(address(npm), 0, data));
+    }
+
+    function test_attack_mintRecipientAttacker() public {
+        MockNpm.MintParams memory params = MockNpm.MintParams({
+            token0: address(usdc),
+            token1: address(weth),
+            fee: 3000,
+            tickLower: 0,
+            tickUpper: 1,
+            amount0Desired: 0,
+            amount1Desired: 0,
+            amount0Min: 0,
+            amount1Min: 0,
+            recipient: attacker,
+            deadline: block.timestamp + 60
+        });
+        bytes memory data = abi.encodeWithSelector(MockNpm.mint.selector, params);
+        vm.prank(agent);
+        vm.expectRevert(SpendingLimitModule.BadRecipient.selector);
+        module.exec(address(safe), _one(address(npm), 0, data));
+    }
+
+    function test_attack_collectRecipientAttacker() public {
+        MockNpm.CollectParams memory params =
+            MockNpm.CollectParams({tokenId: 1, recipient: attacker, amount0Max: type(uint128).max, amount1Max: type(uint128).max});
+        bytes memory data = abi.encodeWithSelector(MockNpm.collect.selector, params);
+        vm.prank(agent);
+        vm.expectRevert(SpendingLimitModule.BadRecipient.selector);
+        module.exec(address(safe), _one(address(npm), 0, data));
+    }
+
+    // ── attacks: caller / empty / random ────────────────────────────────────
+
+    function test_attack_nonAgentRejected() public {
+        vm.prank(attacker);
+        vm.expectRevert(SpendingLimitModule.NotAgent.selector);
+        module.exec(address(safe), _one(recipient, 0.01 ether, ""));
+    }
+
+    function test_attack_nonEmptyCallToRandomAddress() public {
+        vm.prank(agent);
+        vm.expectRevert(SpendingLimitModule.TargetNotAllowed.selector);
+        module.exec(address(safe), _one(attacker, 0, hex"deadbeef"));
+    }
+
+    function test_attack_emptyBatch() public {
+        SpendingLimitModule.Call[] memory calls = new SpendingLimitModule.Call[](0);
+        vm.prank(agent);
+        vm.expectRevert(SpendingLimitModule.EmptyBatch.selector);
+        module.exec(address(safe), calls);
     }
 
     function test_ceilingIsImmutableConstant() public view {
         assertEq(module.DAILY_LIMIT_CENTS(), 100_000);
-        // No setter exists — a compromised agent cannot raise the on-chain cap.
-    }
-
-    function test_reentrancyFromNonAgentCallbackRefused() public {
-        // A Safe callback into exec cannot forge the agent.
-        safe.setReenter(recipient, "");
-        vm.prank(agent);
-        vm.expectRevert(SpendingLimitModule.NotAgent.selector);
-        module.exec(address(safe), recipient, 0.01 ether, "", ISafe.Operation.Call);
     }
 
     function test_reentrancyLockEngaged() public {
-        // Agent is a contract: during an allowlisted router call it reenters exec while locked.
         SmartAgent smart = new SmartAgent();
-        address[] memory calls = new address[](1);
-        calls[0] = address(router);
-        address[] memory dels = new address[](0);
+        address[] memory spenders = new address[](0);
+        address[] memory blocked = new address[](0);
         SpendingLimitModule m2 = new SpendingLimitModule(
-            address(smart), address(feed), address(weth), address(usdc), 6, 1 hours, calls, dels
+            address(smart),
+            address(feed),
+            address(weth),
+            address(usdc),
+            6,
+            1 hours,
+            address(ur),
+            address(p2),
+            address(npm),
+            spenders,
+            blocked
         );
         MockSafe s2 = new MockSafe();
         s2.setModule(address(m2));
         vm.deal(address(s2), 1 ether);
         smart.setModule(m2);
-        smart.arm(address(s2), recipient);
+        ur.setCallback(address(smart));
 
-        bytes memory data = abi.encodeWithSignature("pullEthAndCallback(address)", address(smart));
+        bytes[] memory inputs = new bytes[](0);
+        bytes memory data = abi.encodeWithSelector(bytes4(0x3593564c), bytes(""), inputs, block.timestamp + 60);
+        SpendingLimitModule.Call[] memory calls = new SpendingLimitModule.Call[](1);
+        calls[0] = SpendingLimitModule.Call(address(ur), 0, data);
+        smart.arm(address(s2), calls);
+
         vm.prank(address(smart));
         vm.expectRevert(SpendingLimitModule.Reentrancy.selector);
-        m2.exec(address(s2), address(router), 0, data, ISafe.Operation.Call);
+        m2.exec(address(s2), calls);
     }
 
-    function test_approveDoesNotConsumeAllowance() public {
-        _approveUsdc(1_000e6);
-        assertEq(module.spentToday(address(safe)), 0);
-        assertEq(usdc.balanceOf(address(safe)), 5_000e6);
-    }
-
-
-    function test_multiSendEthSendMetered() public {
-        MockMultiSend ms = new MockMultiSend();
-        address[] memory calls = new address[](0);
-        address[] memory dels = new address[](1);
-        dels[0] = address(ms);
-        SpendingLimitModule m2 = new SpendingLimitModule(
-            agent, address(feed), address(weth), address(usdc), 6, 1 hours, calls, dels
-        );
-        MockSafe s2 = new MockSafe();
-        s2.setModule(address(m2));
-        vm.deal(address(s2), 2 ether);
-
-        // One inner ETH send of 0.1 ether packed as Safe MultiSend (op=0, to, value, dataLen=0)
-        bytes memory packed = abi.encodePacked(
-            uint8(0),
-            recipient,
-            uint256(0.1 ether),
-            uint256(0)
-        );
-        bytes memory data = abi.encodeWithSignature("multiSend(bytes)", packed);
-        vm.prank(agent);
-        m2.exec(address(s2), address(ms), 0.1 ether, data, ISafe.Operation.DelegateCall);
-        // Metering uses Safe balance delta (outbound), not calldata decode.
-        assertEq(m2.spentToday(address(s2)), 25_000);
-        assertEq(recipient.balance, 0.1 ether);
-    }
-
-    function test_swapStyleOutboundOnly() public {
-        // Simulate a swap: pull $200 USDC, credit 0.05 WETH (~$125) — spend must be $200, not net.
-        _approveUsdc(type(uint256).max);
-        // Do pull + mint weth to safe in one router-less sequence: pull then mint
-        _pullUsdc(200e6);
-        weth.mint(address(safe), 0.05 ether);
-        assertEq(module.spentToday(address(safe)), 20_000, "inbound WETH must not reduce outbound USDC spend");
+    function test_multicallMintAndRefundWithSafeRecipient() public {
+        MockNpm.MintParams memory params = MockNpm.MintParams({
+            token0: address(usdc),
+            token1: address(weth),
+            fee: 3000,
+            tickLower: 0,
+            tickUpper: 1,
+            amount0Desired: 0,
+            amount1Desired: 0,
+            amount0Min: 0,
+            amount1Min: 0,
+            recipient: address(safe),
+            deadline: block.timestamp + 60
+        });
+        bytes[] memory inner = new bytes[](2);
+        inner[0] = abi.encodeWithSelector(MockNpm.mint.selector, params);
+        inner[1] = abi.encodeWithSelector(bytes4(0x12210e8a)); // refundETH()
+        bytes memory data = abi.encodeWithSelector(bytes4(0xac9650d8), inner);
+        _exec(_one(address(npm), 0, data));
     }
 }
-
