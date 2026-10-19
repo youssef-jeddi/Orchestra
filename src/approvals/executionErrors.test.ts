@@ -23,17 +23,17 @@ let passed = 0;
 const tests: [string, () => Promise<void>][] = [];
 const test = (name: string, fn: () => Promise<void>) => tests.push([name, fn]);
 
-const newApproval = (): PendingApproval => {
-  const a = createApproval({
+const newApproval = async (): Promise<PendingApproval> => {
+  const a = await createApproval({
     wallet: WALLET, safeAddress: "0x933f48ed12e2de3da82cc69c7a4f95c2adece3d1", intentType: "send",
     summary: "s", valueUsd: 5, reason: "r", triggered: [], execution: { sendData: { unsignedTx: { to: WALLET, value: "1", data: "0x" } } },
   });
-  claim(a.id, WALLET);
+  await claim(a.id, WALLET);
   return a;
 };
 
 test("attack: an unexpected error with an RPC URL and key in it never reaches the record, the view or Telegram", async () => {
-  const a = newApproval();
+  const a = await newApproval();
   await assert.rejects(executeApprovalFlow(a, async () => { throw new Error(`503 from ${SECRET}`); }), /SECRETKEY/, "the caller still gets the error to log");
   assert.equal(a.status, "failed");
   assert.equal(a.error, EXECUTION_FAILED_REASON);
@@ -50,7 +50,7 @@ test("the fixed sentence doesn't claim nothing was sent, and doesn't invite a bl
 });
 
 test("a guard's own message is kept", async () => {
-  const a = newApproval();
+  const a = await newApproval();
   await assert.rejects(executeApprovalFlow(a, async () => { throw new UserFacingError(WOULD_FAIL_TEXT); }));
   assert.equal(a.error, WOULD_FAIL_TEXT);
   assert.equal(approvalView(a).error, WOULD_FAIL_TEXT);
@@ -64,7 +64,7 @@ test("the /intent auto-execute answer uses the same mapping: guards keep their s
 });
 
 test("an action that gives no result is still explained in its own words", async () => {
-  const a = newApproval();
+  const a = await newApproval();
   await assert.rejects(executeApprovalFlow(a, async () => null), /no result/);
   assert.match(a.error!, /gave no result/);
 });
