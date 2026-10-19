@@ -6,6 +6,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { LocalStorage } from "./memoryStorage";
+import { loadIndexFile } from "./storage";
 
 console.log = ((orig) => (...a: unknown[]) => { if (!String(a[0]).startsWith("[LocalStorage]")) orig(...a); })(console.log);
 console.warn = () => {};
@@ -44,11 +45,56 @@ test("returns copies: mutating a read value doesn't change the store", async () 
   assert.deepEqual(await a.read("k"), { n: 1 });
 });
 
-test("an unreadable file is set aside, not overwritten", async () => {
-  fs.writeFileSync(file, "{ not json");
-  const a = new LocalStorage(file);
-  assert.equal(await a.read("k"), null);
-  assert.ok(fs.readdirSync(path.dirname(file)).some((f) => f.startsWith("storage.json.unreadable-")));
+test("a missing file is a first run: starts empty", async () => {
+  const none = path.join(dir, "first-run", "storage.json");
+  assert.equal(await new LocalStorage(none).read("k"), null);
+  assert.equal(fs.existsSync(none), false, "nothing is written until something is saved");
+  assert.equal(loadIndexFile(path.join(dir, "no-index.json")).size, 0);
+});
+
+// Unreadable storage must stop the bridge, and must leave the file exactly as it was.
+const BAD_FILES: [string, string][] = [
+  ["corrupt JSON", "{ not json"],
+  ["an empty file", ""],
+  ["the wrong shape (an object)", '{"a":1}'],
+  ["the wrong shape (pairs with a non-string key)", "[[1,2]]"],
+  ["the wrong shape (an entry that isn't a pair)", '[["a"]]'],
+];
+for (const [label, content] of BAD_FILES) {
+  test(`${label}: refuses to start and leaves the file untouched`, async () => {
+    const bad = path.join(dir, "bad.json");
+    fs.writeFileSync(bad, content);
+    assert.throws(() => new LocalStorage(bad), /Can't read .*Refusing to start so no data is overwritten/);
+    assert.throws(() => loadIndexFile(bad), /Can't read .*Refusing to start/);
+    assert.equal(fs.readFileSync(bad, "utf-8"), content);
+    assert.deepEqual(fs.readdirSync(dir).filter((f) => f.startsWith("bad.json")), ["bad.json"], "no backup or rename");
+  });
+}
+
+test("an index of non-string root hashes is refused (the local store keeps any value)", async () => {
+  const idx = path.join(dir, "index.json");
+  fs.writeFileSync(idx, '[["k",5]]');
+  assert.throws(() => loadIndexFile(idx), /not a list of \[key, root hash\] pairs/);
+  fs.writeFileSync(idx, '[["k","0xabc"]]');
+  assert.deepEqual([...loadIndexFile(idx)], [["k", "0xabc"]]);
+});
+
+test("an unreadable path (a directory where the file should be): refuses to start", async () => {
+  const asDir = path.join(dir, "is-a-dir.json");
+  fs.mkdirSync(asDir);
+  assert.throws(() => new LocalStorage(asDir), /Can't read .*Refusing to start/);
+  assert.throws(() => loadIndexFile(asDir), /Can't read .*Refusing to start/);
+  assert.ok(fs.statSync(asDir).isDirectory());
+});
+
+test("a file without read permission: refuses to start and leaves it untouched (skipped as root)", async () => {
+  if (process.getuid?.() === 0) return; // root reads anything, so the test can't make the file unreadable
+  const locked = path.join(dir, "locked.json");
+  fs.writeFileSync(locked, '[["k",1]]', { mode: 0o000 });
+  assert.throws(() => new LocalStorage(locked), /Can't read .*Refusing to start/);
+  assert.throws(() => loadIndexFile(locked), /Can't read .*Refusing to start/);
+  fs.chmodSync(locked, 0o600);
+  assert.equal(fs.readFileSync(locked, "utf-8"), '[["k",1]]');
 });
 
 test("memory mode (no file) writes nothing to disk", async () => {

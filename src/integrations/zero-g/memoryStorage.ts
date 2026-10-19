@@ -10,6 +10,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { shortKey } from '../../utils/redact';
 
+function unreadable(file: string, reason: string): Error {
+  return new Error(`[LocalStorage] Can't read ${file} (${reason}). Refusing to start so no data is overwritten. Fix or restore the file, or move it away to start with empty storage.`);
+}
+
 export class LocalStorage {
   private store = new Map<string, unknown>();
 
@@ -62,19 +66,30 @@ export class LocalStorage {
     this.persist();
   }
 
+  /**
+   * A missing file is a first run and starts empty. Anything else that goes wrong throws and leaves
+   * the file alone: starting empty would let the next write replace real data (passkeys, limits,
+   * pending approvals) with nothing, and that must be a decision the owner makes.
+   */
   private load(file: string): void {
+    let raw: string;
     try {
-      const entries = JSON.parse(fs.readFileSync(file, 'utf-8')) as [string, unknown][];
-      this.store = new Map(entries);
-      console.log(`[LocalStorage] loaded ${this.store.size} record(s) from ${file}`);
+      raw = fs.readFileSync(file, 'utf-8');
     } catch (err: any) {
-      if (err?.code !== 'ENOENT') {
-        // Don't overwrite a file we couldn't parse: keep it for inspection.
-        const backup = `${file}.unreadable-${Date.now()}`;
-        try { fs.renameSync(file, backup); } catch { /* ignore */ }
-        console.warn(`[LocalStorage] couldn't read ${file} (${err.message}); moved it to ${backup} and started empty`);
-      }
+      if (err?.code === 'ENOENT') return;
+      throw unreadable(file, err?.message ?? String(err));
     }
+    let entries: unknown;
+    try {
+      entries = JSON.parse(raw);
+    } catch (err: any) {
+      throw unreadable(file, raw.trim() === '' ? 'the file is empty' : `not valid JSON: ${err.message}`);
+    }
+    if (!Array.isArray(entries) || !entries.every((e) => Array.isArray(e) && e.length === 2 && typeof e[0] === 'string')) {
+      throw unreadable(file, 'not a list of [key, value] pairs');
+    }
+    this.store = new Map(entries as [string, unknown][]);
+    console.log(`[LocalStorage] loaded ${this.store.size} record(s) from ${file}`);
   }
 
   private persist(): void {

@@ -6,11 +6,8 @@ import { ethers } from "ethers";
 import { makeSepoliaProvider } from "../../utils/rpc";
 import { read, write, deleteKey } from "../zero-g/storage";
 import { readUserProfile } from "../../policy/store";
-import Safe from "@safe-global/protocol-kit";
 import { deploySafe, predictSafeAddress } from "./deploy";
 import { getAgentAddress } from "./agentWallet";
-import { enableAllowanceModule, addAgentDelegate, setAgentAllowances, isAgentDelegate, tokensWithoutAllowance } from "./spendingLimit";
-import { ALLOWANCE_MODULE_ADDRESS } from "../../types/safe";
 import { OnboardingError, OnboardingLimiter, OnboardingQueue, accountReady } from "./onboarding";
 import { type InflightRecord, type InflightStore, type TxTracker, chainProbes, makeTracker } from "./inflight";
 import { type SetupInspection, type SetupStep } from "./setupSteps";
@@ -39,7 +36,6 @@ async function accountReads(wallet: string): Promise<AccountReads> {
   const safeAddress = await predictSafeAddress(user, agent);
   const provider = makeSepoliaProvider();
   const policyAddress = configuredPolicy();
-  const rpc = process.env.SEPOLIA_RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com";
   return {
     safeAddress,
     policyAddress,
@@ -48,9 +44,6 @@ async function accountReads(wallet: string): Promise<AccountReads> {
     storedAccount: async () => (await read(`safe:${user.toLowerCase()}`)) as { safeAddress?: string } | null,
     profile: async () => (await readUserProfile(user)) as { safeAddress?: string },
     hasCode: async () => (await provider.getCode(safeAddress)) !== "0x",
-    moduleEnabled: async () => (await Safe.init({ provider: rpc, safeAddress })).isModuleEnabled(ALLOWANCE_MODULE_ADDRESS),
-    agentIsDelegate: () => isAgentDelegate(safeAddress, agent),
-    allowancesMissing: async () => (await tokensWithoutAllowance(safeAddress, agent)).length,
     registryIsCurrent: () => isPerAccountRegistry(provider, policyAddress!, agent),
     registeredOnChain: async () => new ethers.Contract(policyAddress!, POLICY_ABI, provider).hasPolicy(safeAddress),
     now: () => new Date().toISOString(),
@@ -106,18 +99,13 @@ async function registerFinishedAccount(wallet: string): Promise<void> {
 async function finishAccount(wallet: string, isCancelled: () => boolean): Promise<void> {
   const user = ethers.getAddress(wallet);
   const agent = await agentAddress();
-  const agentKey = process.env.AGENT_PRIVATE_KEY!;
   const provider = makeSepoliaProvider();
-  const limit = DEFAULT_SPENDING_LIMIT_USD;
   const reads = await accountReads(user);
   const { safeAddress } = reads;
   const track = trackerFor(user, agent, isCancelled);
 
   const ran = await finishWith(reads, {
     deploy: async () => { await deploySafe(user, agent, provider, track("deploy")); },
-    module: () => enableAllowanceModule(safeAddress, agentKey, track("module")),
-    delegate: () => addAgentDelegate(safeAddress, agent, agentKey, track("delegate")),
-    allowances: async () => setAgentAllowances(safeAddress, agent, limit, agentKey, await tokensWithoutAllowance(safeAddress, agent), track("allowances")),
     // The chain is asked first (a registration from an earlier run may have confirmed since this run read it).
     register: () => registerOnPolicy(user, reads, track),
     // The only writer of `safe:<wallet>`, and the last step: an unfinished account is never recorded as the user's own.
@@ -134,12 +122,6 @@ export const onboarding = new OnboardingQueue({
   registerFinished: registerFinishedAccount,
   limiter: new OnboardingLimiter(),
 });
-
-/** The spending limit stored for a wallet's account (the default if none). */
-export async function storedSpendingLimit(wallet: string): Promise<number> {
-  const stored = ((await read(`safe:${wallet.toLowerCase()}`)) as any)?.spendingLimitUSD;
-  return typeof stored === "number" && Number.isFinite(stored) && stored >= 0 ? stored : DEFAULT_SPENDING_LIMIT_USD; // 0 is a real limit ("always ask")
-}
 
 // A "yes" is remembered briefly so a chat of several messages doesn't re-read the chain each time;
 // a "no" is never remembered, so a finished setup is noticed at once.

@@ -9,7 +9,7 @@ import { OnboardingError } from "../safe/onboarding";
 import { ApprovalError } from "../../approvals";
 import { AuthError } from "../../auth";
 import { LimitsError } from "../../policy/limits";
-import { INTENT_FALLBACK_ERROR } from "../../intent/messages";
+import { INTENT_FALLBACK_ERROR, EXECUTION_FAILED_REASON } from "../../intent/messages";
 import { UserFacingError } from "../../utils/userFacing";
 
 /** The sentence for an error nobody wrote a message for. */
@@ -27,4 +27,9 @@ export function errorResponse(err: any): { status: number; body: Record<string, 
   if (err instanceof PasskeyError || err instanceof OnboardingError) return { status: err.status, body: { error: err.message, code: err.code } };
   if (err instanceof ApprovalError || err instanceof AuthError || err instanceof UserFacingError) return { status: err.status, body: { error: err.message } };
   return { status: 500, body: { error: UNEXPECTED_ERROR } };
+}
+
+/** What the user reads when an account action fails: the guard's own sentence, or the fixed "can't confirm" one. */
+export function executionErrorMessage(err: any): string {
+  return isUserFacing(err) ? err.message : EXECUTION_FAILED_REASON;
 }

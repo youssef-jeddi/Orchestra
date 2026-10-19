@@ -1,12 +1,14 @@
 // ─── Utils — dev-only fault injection ───
 // Lets a developer make the limit reads fail or hang to see how the app behaves when storage is
 // down (ORCHESTRA_FAULT_INJECT=profile-read,activity-read,profile-timeout,activity-timeout).
+// `execute` makes an account action fail with a raw, internal-looking error right before it runs
+// (nothing executes), to check the user only ever sees a plain sentence.
 // Never usable in production: ignored unless NODE_ENV isn't "production" and the storage is local
 // or in memory, and the bridge refuses to start with it set in production (faultInjectProblem).
 
-export type Fault = "profile-read" | "activity-read" | "profile-timeout" | "activity-timeout";
+export type Fault = "profile-read" | "activity-read" | "profile-timeout" | "activity-timeout" | "execute";
 
-const FAULTS: readonly string[] = ["profile-read", "activity-read", "profile-timeout", "activity-timeout"];
+const FAULTS: readonly string[] = ["profile-read", "activity-read", "profile-timeout", "activity-timeout", "execute"];
 
 function requested(env: NodeJS.ProcessEnv): string[] {
   return (env.ORCHESTRA_FAULT_INJECT ?? "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -31,5 +33,6 @@ export function faultOn(fault: Fault, env: NodeJS.ProcessEnv = process.env): boo
 export async function injectFault(fault: Fault): Promise<void> {
   if (!faultOn(fault)) return;
   if (fault.endsWith("-timeout")) return new Promise<void>(() => {}); // never answers: the caller's timeout fires
+  if (fault === "execute") throw new Error("injected fault: execute (rpc https://rpc.internal.example/v3/SECRETKEY)");
   throw new Error(`injected fault: ${fault}`);
 }

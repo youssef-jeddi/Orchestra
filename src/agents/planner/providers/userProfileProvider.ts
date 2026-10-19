@@ -5,9 +5,9 @@ import { Provider } from '../../../types/agents';
 // this provider has no wallet to ask for, so it gives the defaults and never the shared record.
 const userProfileProvider: Provider = {
   name: 'userProfileProvider',
-  description: 'The default user profile (settings are per wallet and checked by the policy, not by this agent)',
+  description: 'The default user profile (currency and known addresses only; spending limits are decided by the server policy, not by this agent)',
   handler: async (): Promise<string> => {
-    return JSON.stringify({ autoApproveLimit: 100, currency: 'USD', knownAddresses: [] });
+    return JSON.stringify({ currency: 'USD', knownAddresses: [] });
   },
 };
 

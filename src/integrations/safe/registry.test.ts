@@ -25,7 +25,6 @@ function setup(opts: { policy: string | null; registeredOn?: string; fail?: () =
     safeAddress: SAFE, policyAddress: opts.policy,
     setupRecord: async () => record, saveSetupRecord: async (r) => { record = r; },
     storedAccount: async () => null, profile: async () => null, hasCode: async () => { throw new Error("must not read the chain"); },
-    moduleEnabled: async () => true, agentIsDelegate: async () => true, allowancesMissing: async () => 0,
     registryIsCurrent: async () => !opts.oldStyle, registeredOnChain: async () => false, now: () => "t2",
   };
   const calls = { registered: 0, finished: 0, sent: 0 };

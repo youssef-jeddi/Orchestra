@@ -74,7 +74,7 @@ test("recording or removing a recipient copies nothing from the shared record", 
   await sharedUntouched();
 });
 
-test("the account-record setup step copies nothing from the shared record and writes the default limit", async () => {
+test("the account-record setup step copies nothing from the shared record and stores no limit", async () => {
   await seedShared();
   const w = fresh();
   await writeAccountRecord({ user: w, safeAddress: SAFE, agent: AGENT, now: () => "2026-01-01T00:00:00.000Z" });
@@ -85,8 +85,11 @@ test("the account-record setup step copies nothing from the shared record and wr
   assert.deepEqual(own.preferredTokens, ["USDC", "WETH", "ETH"]);
   assert.equal(own.safeAddress, SAFE, "its own account, not the shared record's");
   assert.equal(own.createdAt, "2026-01-01T00:00:00.000Z");
-  assert.equal(((await storage.read(`safe:${w.toLowerCase()}`)) as any).spendingLimitUSD, 100);
+  const record = (await storage.read(`safe:${w.toLowerCase()}`)) as any;
+  assert.equal(record.safeAddress, SAFE);
+  assert.equal("spendingLimitUSD" in record, false, "the daily limit lives only in the policy");
   assert.equal(resolveDailyLimit((await getPolicyProfile(w)).dailyLimitUsd), 100);
+  assert.equal("autoApproveLimit" in (await readUserProfile(w)), false, "the unenforced field is not written");
   await sharedUntouched();
 });
 
@@ -101,7 +104,8 @@ test("a wallet's own settings are kept when its account record is written", asyn
 test("the old planner's profile provider ignores the shared record", async () => {
   await seedShared();
   const profile = JSON.parse(await userProfileProvider.handler());
-  assert.equal(profile.autoApproveLimit, 100);
+  assert.equal("autoApproveLimit" in profile, false, "the planner is told no limit; the policy decides");
+  assert.equal(Object.keys(profile).some((k) => /limit/i.test(k)), false);
   assert.deepEqual(profile.knownAddresses, []);
   assert.equal(JSON.stringify(profile).includes("1000"), false);
   assert.equal(JSON.stringify(profile).includes("aggressive"), false);

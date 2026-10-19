@@ -3,12 +3,11 @@ import { UserFacingError } from "../../utils/userFacing";
 import Safe from '@safe-global/protocol-kit';
 import { ethers } from 'ethers';
 import { PERMIT2, UNIVERSAL_ROUTER } from '../uniswap/types';
-
-const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
+import { makeSepoliaProvider, sepoliaRpcUrl } from '../../utils/rpc';
 
 export async function initSafe(safeAddress: string, signerPrivateKey: string): Promise<InstanceType<typeof Safe>> {
   return Safe.init({
-    provider: SEPOLIA_RPC,
+    provider: sepoliaRpcUrl(),
     signer: signerPrivateKey,
     safeAddress,
   });
@@ -103,7 +102,7 @@ export async function executeBatchViaSafe(
   const tx = await safe.createTransaction({ transactions });
   const signedTx = await safe.signTransaction(tx);
 
-  const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC);
+  const provider = makeSepoliaProvider();
   const from = new ethers.Wallet(signerPrivateKey).address;
   const data = await safe.getEncodedTransaction(signedTx);
   // The Safe pays any value from its own balance, so the outer call carries none.
@@ -135,7 +134,7 @@ export async function getApprovalTxsForSwap(
   amount: bigint,
   routerAddress: string
 ): Promise<Array<{ to: string; value: string; data: string }>> {
-  const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC);
+  const provider = makeSepoliaProvider();
   const txs: Array<{ to: string; value: string; data: string }> = [];
 
   // Step 1: Check ERC20 → Permit2 allowance
