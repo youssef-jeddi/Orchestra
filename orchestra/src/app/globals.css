@@ -50,6 +50,7 @@ section {
 /* ── Tokens ── */
 :root {
   --bg:        #0F0F12;
+  --bg-deep:   #0A0A0E;
   --bg-card:   #141418;
   --border:    #222228;
   --border-hi: #333333;
@@ -57,6 +58,10 @@ section {
   --text-2:    #666666;
   --text-3:    #444444;
   --accent:    #C084FC;
+  --gold:      #D4AF37;
+  --green:     #4ADE80;
+  --blue:      #007AFF;
+  --red:       #FF453A;
 }
 
 /* ── Shiny metallic text ── */

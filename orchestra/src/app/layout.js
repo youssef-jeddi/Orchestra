@@ -12,8 +12,8 @@ const inter = Inter({
 });
 
 export const metadata = {
-  title: "Orchestra",
-  description: "Your AI-Powered DeFi Conductor",
+  title: "Orchestra — Join the Waitlist",
+  description: "Your AI-Powered DeFi Conductor. Join the waitlist for early access.",
 };
 
 export default function RootLayout({ children }) {
