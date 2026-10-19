@@ -39,8 +39,8 @@ test("the recipient is read from the transaction that will run — ERC-20 transf
 });
 
 test("an approved send that executed records its recipient (lowercased); the next send to it no longer asks", async () => {
-  const a = newApproval(usdcSend(FRIEND));
-  claim(a.id, WALLET);
+  const a = await newApproval(usdcSend(FRIEND));
+  await claim(a.id, WALLET);
   await executeApprovalFlow(a, ok);
   assert.deepEqual(await getKnownRecipients(WALLET), [FRIEND.toLowerCase()]);
   const profile = await getPolicyProfile(WALLET);
@@ -49,26 +49,26 @@ test("an approved send that executed records its recipient (lowercased); the nex
 });
 
 test("not recorded: a failed execution, a decline, an expired approval or a non-send", async () => {
-  const failed = newApproval(usdcSend(FRIEND));
-  claim(failed.id, WALLET);
+  const failed = await newApproval(usdcSend(FRIEND));
+  await claim(failed.id, WALLET);
   await assert.rejects(executeApprovalFlow(failed, async () => { throw new Error("reverted"); }), /reverted/);
   assert.equal(failed.status, "failed");
 
-  const empty = newApproval(usdcSend(FRIEND));
-  claim(empty.id, WALLET);
+  const empty = await newApproval(usdcSend(FRIEND));
+  await claim(empty.id, WALLET);
   await assert.rejects(executeApprovalFlow(empty, async () => null), /no result/);
 
-  const declined = newApproval(usdcSend(FRIEND));
+  const declined = await newApproval(usdcSend(FRIEND));
   await declineApproval(declined.id, WALLET);
-  const expired = newApproval(usdcSend(FRIEND));
+  const expired = await newApproval(usdcSend(FRIEND));
   expired.status = "expired";
   await rememberSentRecipient(WALLET, "swap", usdcSend(FRIEND)); // not a send
   assert.deepEqual(await getKnownRecipients(WALLET), []);
 });
 
 test("an executed swap or liquidity action records nothing", async () => {
-  const swap = newApproval({ quoteData: { tokenIn: USDC_SEPOLIA } }, "swap");
-  claim(swap.id, WALLET);
+  const swap = await newApproval({ quoteData: { tokenIn: USDC_SEPOLIA } }, "swap");
+  await claim(swap.id, WALLET);
   await executeApprovalFlow(swap, ok);
   assert.deepEqual(await getKnownRecipients(WALLET), []);
 });

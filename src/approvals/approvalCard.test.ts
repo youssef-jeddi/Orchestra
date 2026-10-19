@@ -145,6 +145,15 @@ test("an error while the approval is still waiting (prompt cancelled, check fail
   }
 });
 
+test("the server no longer has the approval (404 and the lookup finds nothing): the card settles as expired", () => {
+  const gone = Object.assign(new Error("This request expired. Ask me again."), { status: 404 });
+  const outcome = card.outcomeAfterError(gone, null, "send");
+  assert.equal(outcome.text, "This request expired. Nothing was sent.");
+  assert.equal(card.cardView({ ...open, intentType: "send", outcome }).pill.label, "Expired");
+  // Any other error with nothing found keeps the card open.
+  assert.equal(card.outcomeAfterError(Object.assign(new Error("x"), { status: 500 }), null, "send"), null);
+});
+
 test("the server's state wins when the approval call errors: executed → Done, declined/expired → the plain ended line", () => {
   const done = card.outcomeAfterError(new Error("timeout"), { status: "executed", txHash: "0x1", explorerUrl: "https://x" }, "send");
   assert.equal(card.cardView({ ...open, outcome: done }).line, "Done.");

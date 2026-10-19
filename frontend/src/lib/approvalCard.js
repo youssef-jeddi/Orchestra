@@ -100,7 +100,8 @@ export function outcomeAfterError(err, approval, intentType) {
     case 'failed': return { status: 'failed', text: failedText(approval.error || err?.message) };
     case 'rejected': return { status: 'ended', kind: 'declined', text: declinedText(intentType) };
     case 'expired': return { status: 'ended', kind: 'expired', text: expiredText(intentType) };
-    default: return null;
+    // The server no longer has it at all (it lapsed, or was cleared after a long wait): nothing to approve.
+    default: return !approval && err?.status === 404 ? { status: 'ended', kind: 'expired', text: expiredText(intentType) } : null;
   }
 }
 

@@ -6,10 +6,17 @@
 // the client, so a compromised frontend can't swap the transaction after the
 // user approved what they were shown.
 //
-// In-memory on purpose: approvals live ~10 minutes, and a restart simply
-// cancels the pending ones (fail-closed).
+// The in-memory Map is the source of truth inside the process (so the
+// pending → executing claim is atomic), and every state change that matters is
+// written through to storage (`approvals/<id>`) and awaited, so a pending
+// approval survives a bridge restart. The order is what keeps it safe: a payload
+// runs only after "executing" was saved, so a restart can never run it twice, and
+// a record found "executing" after a restart is failed, never re-run. Passkey
+// challenges and the plain review token are never written.
 
 import crypto from "crypto";
+import { write as storageWrite, readMany as storageReadMany, deleteKey as storageDelete } from "../integrations/zero-g/storage";
+import { safeErr } from "../utils/redact";
 
 export const APPROVAL_TTL_MS = 10 * 60_000;
 
@@ -49,8 +56,11 @@ export interface PendingApproval {
    * review page + the phone's passkey (the Approve button is then refused).
    */
   factor?: "telegram-button" | "phone-passkey";
-  /** Secret in the review-page link, sent only to Telegram (the page is useless without it). */
-  reviewToken?: string;
+  /**
+   * sha256 of the secret in the review-page link (the link goes only to Telegram; the page is
+   * useless without it). Only the hash is kept, so the stored record can't be used to approve.
+   */
+  reviewTokenHash?: string;
   result?: { txHash: string; explorerUrl: string };
   error?: string;
 }
@@ -68,6 +78,43 @@ export interface NewApproval {
 
 const approvals = new Map<string, PendingApproval>();
 
+/** Where approvals are persisted. Swappable in tests to simulate a failing disk. */
+export interface ApprovalStore {
+  write(key: string, data: unknown): Promise<void>;
+  readMany(collection: string): Promise<unknown[]>;
+  delete(key: string): Promise<void>;
+}
+const defaultStore: ApprovalStore = { write: storageWrite, readMany: storageReadMany, delete: storageDelete };
+let store: ApprovalStore = defaultStore;
+
+const SAVE_CLAIM_FAILED = "I couldn't save your OK, so nothing was done. Please try again in a moment.";
+const SAVE_DECLINE_FAILED = "I couldn't save that, so the request is still waiting. Please try again.";
+export const APPROVAL_GONE = "This request expired. Ask me again.";
+
+/** The record as stored: a passkey challenge is single-use and a fresh one is issued after a restart. */
+function persistable(a: PendingApproval): Omit<PendingApproval, "challenge" | "passkeyOptions"> {
+  const { challenge: _c, passkeyOptions: _p, ...rest } = a;
+  return rest;
+}
+
+function save(a: PendingApproval): Promise<void> {
+  return store.write(`approvals/${a.id}`, persistable(a));
+}
+
+/**
+ * Save the record, undoing the in-memory change if that fails: the caller has already moved
+ * `a.status`, and a decision that wasn't saved must not count (a restart would forget it).
+ */
+async function saveOrRevert(a: PendingApproval, revertTo: ApprovalStatus, message: string): Promise<void> {
+  try {
+    await save(a);
+  } catch (err) {
+    console.error(`[approval] ${a.id} couldn't be saved: ${safeErr(err)}`);
+    a.status = revertTo;
+    throw new ApprovalError(503, message);
+  }
+}
+
 /** JSON with sorted object keys, so the same payload always hashes the same. */
 export function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
@@ -82,7 +129,8 @@ export function hashExecution(execution: Record<string, unknown>): string {
   return "0x" + crypto.createHash("sha256").update(canonicalJson(execution)).digest("hex");
 }
 
-export function createApproval(input: NewApproval, now = Date.now()): PendingApproval {
+/** Hold a new pending approval. Saved before it is returned: if that fails nothing is held and this throws. */
+export async function createApproval(input: NewApproval, now = Date.now()): Promise<PendingApproval> {
   sweep(now);
   const approval: PendingApproval = {
     ...input,
@@ -93,8 +141,59 @@ export function createApproval(input: NewApproval, now = Date.now()): PendingApp
     expiresAt: now + APPROVAL_TTL_MS,
     status: "pending",
   };
+  await save(approval);
   approvals.set(approval.id, approval);
   return approval;
+}
+
+/**
+ * Save the approval's current fields (Telegram channel, factor, message ids, review token hash).
+ * Throws if it can't be saved; `required: false` logs instead (the message ids are best effort).
+ */
+export async function persistApproval(a: PendingApproval, { required = true } = {}): Promise<void> {
+  try {
+    await save(a);
+  } catch (err) {
+    if (required) throw err;
+    console.warn(`[approval] ${a.id} couldn't be saved: ${safeErr(err)}`);
+  }
+}
+
+/**
+ * Load the saved approvals into memory; call once at startup, before serving. A read failure throws
+ * (the bridge must not start as if nothing were pending). Records that can't be trusted are dropped
+ * or failed, never run: a payload that no longer matches its hash, and anything that was mid-execution
+ * (we can't know whether it went out).
+ */
+export async function loadApprovals(now = Date.now()): Promise<number> {
+  const rows = await store.readMany("approvals");
+  let loaded = 0;
+  for (const row of rows) {
+    const a = row as PendingApproval | null;
+    if (!a || typeof a.id !== "string" || typeof a.wallet !== "string" || typeof a.hash !== "string"
+      || !a.execution || typeof a.execution !== "object" || typeof a.expiresAt !== "number") {
+      console.warn("[approval] ignored a saved approval that is incomplete");
+      continue;
+    }
+    a.wallet = a.wallet.toLowerCase();
+    let changed = false;
+    // Only an open request is failed: an executed or declined one keeps its (final) outcome.
+    if ((a.status === "pending" || a.status === "executing") && hashExecution(a.execution) !== a.hash) {
+      a.status = "failed";
+      a.error = "This request was changed after it was made, so it was cancelled. Nothing was done.";
+      changed = true;
+    } else if (a.status === "executing") {
+      a.status = "failed";
+      a.error = "The server restarted while this was running. Check your activity before asking again.";
+      changed = true;
+    } else if (a.status === "pending" && a.expiresAt <= now) {
+      a.status = "expired";
+    }
+    approvals.set(a.id, a);
+    loaded++;
+    if (changed) await persistApproval(a, { required: false });
+  }
+  return loaded;
 }
 
 /** The approval, with a lapsed pending one marked expired. */
@@ -111,7 +210,7 @@ export function getApproval(id: string, now = Date.now()): PendingApproval | nul
 /** A pending approval owned by `wallet`, or an Error explaining why not. */
 export function requirePending(id: unknown, wallet: unknown, now = Date.now()): PendingApproval {
   const a = typeof id === "string" ? getApproval(id, now) : null;
-  if (!a) throw new ApprovalError(404, "I can't find that approval — it may have expired or the server restarted. Ask again.");
+  if (!a) throw new ApprovalError(404, APPROVAL_GONE);
   if (typeof wallet !== "string" || a.wallet !== wallet.toLowerCase()) throw new ApprovalError(403, "This approval belongs to another wallet.");
   if (a.status !== "pending") throw new ApprovalError(409, `This approval is already ${a.status}.`);
   return a;
@@ -128,33 +227,42 @@ export function challengeBytes(a: PendingApproval): Uint8Array {
 
 /** Create the review-page secret for a phone-passkey approval. */
 export function issueReviewToken(a: PendingApproval): string {
-  a.reviewToken = crypto.randomBytes(24).toString("base64url");
-  return a.reviewToken;
+  const token = crypto.randomBytes(24).toString("base64url");
+  a.reviewTokenHash = hashToken(token);
+  return token;
 }
+
+const hashToken = (token: string) => crypto.createHash("sha256").update(token).digest("hex");
 
 /** The approval behind a review-page link, if the link's secret matches (any status). */
 export function approvalForReview(id: unknown, token: unknown, now = Date.now()): PendingApproval {
   const a = typeof id === "string" ? getApproval(id, now) : null;
-  const given = Buffer.from(typeof token === "string" ? token : "");
-  const expected = Buffer.from(a?.reviewToken ?? "");
-  if (!a || !a.reviewToken || given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) {
+  const given = Buffer.from(hashToken(typeof token === "string" ? token : ""));
+  const expected = Buffer.from(a?.reviewTokenHash ?? "");
+  if (!a || !a.reviewTokenHash || given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) {
     throw new ApprovalError(404, "This approval link is invalid or has expired.");
   }
   return a;
 }
 
-/** Atomically move pending → executing. Only one approver can ever win. */
-export function claim(id: string, wallet: string, now = Date.now()): PendingApproval {
+/**
+ * Atomically move pending → executing. Only one approver can ever win: the status flips in memory
+ * before the first await. "executing" is then saved, and if that fails the claim is undone and the
+ * caller must not run the payload (otherwise a restart could run it a second time).
+ */
+export async function claim(id: string, wallet: string, now = Date.now()): Promise<PendingApproval> {
   const a = requirePending(id, wallet, now);
   a.status = "executing";
   a.challenge = undefined;
+  await saveOrRevert(a, "pending", SAVE_CLAIM_FAILED);
   return a;
 }
 
-export function reject(id: string, wallet: string, now = Date.now()): PendingApproval {
+export async function reject(id: string, wallet: string, now = Date.now()): Promise<PendingApproval> {
   const a = requirePending(id, wallet, now);
   a.status = "rejected";
   a.challenge = undefined;
+  await saveOrRevert(a, "pending", SAVE_DECLINE_FAILED);
   return a;
 }
 
@@ -172,12 +280,13 @@ export async function declineApproval(
   now = Date.now(),
 ): Promise<PendingApproval> {
   const a = typeof id === "string" ? getApproval(id, now) : null;
-  if (!a || a.status === "expired") throw new ApprovalError(404, "This request expired. Nothing was sent.");
+  if (!a || a.status === "expired") throw new ApprovalError(404, APPROVAL_GONE);
   if (typeof wallet !== "string" || a.wallet !== wallet.toLowerCase()) throw new ApprovalError(403, "This approval belongs to another wallet.");
   if (a.status !== "pending") throw new ApprovalError(409, `This request is already ${a.status}, so it can't be declined.`);
   a.status = "rejected";
   a.challenge = undefined;
   a.passkeyOptions = undefined;
+  await saveOrRevert(a, "pending", SAVE_DECLINE_FAILED);
   try {
     await afterReject?.(a);
   } catch {
@@ -186,7 +295,11 @@ export async function declineApproval(
   return a;
 }
 
-export function settle(a: PendingApproval, outcome: { result: { txHash: string; explorerUrl: string } } | { error: string }): void {
+/**
+ * Record how a claimed approval ended. A failed save is logged and swallowed: the payload already
+ * ran, and the record on disk stays "executing", which a restart turns into failed, never pending.
+ */
+export async function settle(a: PendingApproval, outcome: { result: { txHash: string; explorerUrl: string } } | { error: string }): Promise<void> {
   if ("result" in outcome) {
     a.status = "executed";
     a.result = outcome.result;
@@ -194,6 +307,7 @@ export function settle(a: PendingApproval, outcome: { result: { txHash: string; 
     a.status = "failed";
     a.error = outcome.error;
   }
+  await persistApproval(a, { required: false });
 }
 
 /** What the API exposes about an approval (no execution payload). */
@@ -214,10 +328,19 @@ export class ApprovalError extends Error {
 
 /** Drop records well past their expiry so the map doesn't grow unbounded. */
 function sweep(now: number): void {
-  for (const [id, a] of approvals) if (a.expiresAt + APPROVAL_TTL_MS < now) approvals.delete(id);
+  for (const [id, a] of approvals) {
+    if (a.expiresAt + APPROVAL_TTL_MS >= now) continue;
+    approvals.delete(id);
+    store.delete(`approvals/${id}`).catch((err) => console.warn(`[approval] couldn't delete ${id}: ${safeErr(err)}`));
+  }
 }
 
-/** Test hook. */
+/** Test hook: forget what's in memory, as a restart does (storage is untouched). */
 export function _resetApprovals(): void {
   approvals.clear();
+}
+
+/** Test hook: use another store (e.g. one whose writes fail); no argument restores the real one. */
+export function _setApprovalStore(s?: ApprovalStore): void {
+  store = s ?? defaultStore;
 }

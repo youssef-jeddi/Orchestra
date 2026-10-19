@@ -56,6 +56,8 @@ import {
   reject,
   issueReviewToken,
   approvalForReview,
+  persistApproval,
+  loadApprovals,
   ApprovalError,
   type PendingApproval,
 } from "../../approvals";
@@ -594,11 +596,18 @@ app.post("/intent", async (req, res) => {
     let approval: PendingApproval | null = null;
     const execution = approvalExecution(intentType, result.payload);
     if (verdict === "NEEDS_APPROVAL" && adapter.execute && safeAddress && wallet && execution) {
-      approval = createApproval({
-        wallet, safeAddress, intentType: intentType as PendingApproval["intentType"],
-        summary: plan.summary, valueUsd: action.valueUsd,
-        reason: decision.reason, triggered: decision.triggered, execution,
-      });
+      try {
+        approval = await createApproval({
+          wallet, safeAddress, intentType: intentType as PendingApproval["intentType"],
+          summary: plan.summary, valueUsd: action.valueUsd,
+          reason: decision.reason, triggered: decision.triggered, execution,
+        });
+      } catch (err: any) {
+        // Not saved means not held: nothing can be approved or executed.
+        console.error(`[intent ${rid}] couldn't save the approval: ${safeErr(err)}`);
+        res.status(503).json({ error: "I couldn't save that request, so nothing was done. Please try again in a moment." });
+        return;
+      }
       console.log(`[intent ${rid}] [approval] ${approval.id} pending (hash ${approval.hash.slice(0, 18)}…)`);
 
       // A linked Telegram chat becomes the only way to approve it: the phone shows
@@ -615,14 +624,18 @@ app.post("/intent", async (req, res) => {
             const t = issueReviewToken(approval);
             reviewUrl = `${rp!.origin}/phone/approve/${approval.id}?t=${encodeURIComponent(t)}`;
           }
-          const messageId = await sendApprovalMessage(link.chatId, approval.id, describeApproval(approval, { phonePasskey }), reviewUrl);
+          // Saved before the message goes out: after a restart this must still be a Telegram
+          // approval, never one the desktop passkey could approve.
           approval.channel = "telegram";
           approval.factor = phonePasskey ? "phone-passkey" : "telegram-button";
+          await persistApproval(approval);
+          const messageId = await sendApprovalMessage(link.chatId, approval.id, describeApproval(approval, { phonePasskey }), reviewUrl);
           approval.telegram = { chatId: link.chatId, messageId };
+          await persistApproval(approval, { required: false });
           console.log(`[intent ${rid}] [approval] ${approval.id} sent to Telegram (${approval.factor})`);
         } catch (err: any) {
           // Fail closed: never fall back to a weaker factor because the phone was unreachable.
-          settle(approval, { error: `I couldn't send the approval to Telegram: ${err.message}` });
+          await settle(approval, { error: `I couldn't send the approval to Telegram: ${err.message}` });
           const reason = "I couldn't deliver the approval to your Telegram, so nothing will execute. Try again in a moment.";
           res.json({ status: "unsupported", intentType, reason, reasoning: reason, plan, timing: timing() });
           return;
@@ -886,7 +899,7 @@ app.post("/passkey/approve", requireSession, async (req, res) => {
 app.get("/approvals/:id", requireSession, (req, res) => {
   const a = getApproval(String(req.params.id));
   // Someone else's approval looks exactly like one that doesn't exist.
-  if (!a || !approvalBelongsTo(a, res.locals.wallet)) { res.status(404).json({ error: "I can't find that approval. It may have expired." }); return; }
+  if (!a || !approvalBelongsTo(a, res.locals.wallet)) { res.status(404).json({ error: "This request expired. Ask me again." }); return; }
   res.json(approvalView(a));
 });
 
@@ -1009,7 +1022,7 @@ app.post("/phone/approvals/:id/approve", async (req, res) => {
     const ok = await verifyAuthentication(a.wallet, req.body?.response, challenge, rp);
     if (!ok) { res.status(401).json({ error: "That passkey check didn't work. Please try again." }); return; }
 
-    claim(a.id, a.wallet);
+    await claim(a.id, a.wallet);
     console.log(`[passkey] ${a.id} approved with the phone passkey — executing`);
     await refreshTelegramMessage(a); // "⏳ doing it…"
     try {
@@ -1024,7 +1037,7 @@ app.post("/phone/approvals/:id/approve", async (req, res) => {
 app.post("/phone/approvals/:id/reject", async (req, res) => {
   try {
     const a = approvalForReview(req.params.id, req.body?.t);
-    reject(a.id, a.wallet);
+    await reject(a.id, a.wallet);
     console.log(`[passkey] ${a.id} rejected on the phone`);
     await refreshTelegramMessage(a);
     res.json({ status: "rejected" });
@@ -1228,7 +1241,9 @@ app.get("/health", (_req, res) => {
 });
 
 // ─── Start ───
-server.listen(PORT, "0.0.0.0", () => {
+// Saved approvals are loaded first; if storage can't be read the bridge refuses to start
+// rather than pretend nothing is pending.
+loadApprovals().then(() => server.listen(PORT, "0.0.0.0", () => {
   const addr = server.address();
   console.log(`\n  ⚡ SafeSwarm Ledger Bridge`);
   console.log(`  ─────────────────────────`);
@@ -1240,6 +1255,9 @@ server.listen(PORT, "0.0.0.0", () => {
   // Warm the price cache at startup.
   refreshPrices().catch(() => {});
   startTelegramBot(onTelegramDecision);
+})).catch((err) => {
+  console.error(`[approval] couldn't read the saved approvals, so the bridge won't start: ${safeErr(err)}`);
+  process.exit(1);
 });
 
 server.on("error", (err) => {
