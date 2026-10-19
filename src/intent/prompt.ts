@@ -20,10 +20,10 @@ STEP is one of:
 {"action":"balance"}  or  {"action":"balance","token":TOKEN}
 {"action":"price","token":TOKEN}
 {"action":"add_liquidity","tokenA":TOKEN,"amountA":AMOUNT,"tokenB":TOKEN,"amountB":AMOUNT}
-{"action":"deposit","token":TOKEN,"amount":AMOUNT,"unit":"token"|"usd"}   move funds from the user's wallet into their own Safe
+{"action":"deposit","token":TOKEN,"amount":AMOUNT,"unit":"token"|"usd"}   move funds from the user's wallet into their own account
 {"action":"remove_liquidity","amount":"all"|PERCENT,"tokenA":TOKEN,"tokenB":TOKEN,"positionId":"<number>"}   withdraw from a liquidity position; tokenA, tokenB and positionId are optional
 {"action":"positions"}   list the user's liquidity positions
-{"action":"address"}   show the user's own wallet and Safe addresses ("what's my address", "where do I send funds to my account")
+{"action":"address"}   show the user's own wallet and account addresses ("what's my address", "where do I send funds to my account")
 
 Rules:
 - AMOUNT is a plain decimal string ("0.5", no commas or symbols), "all" for the whole balance, or a percentage ("50%").

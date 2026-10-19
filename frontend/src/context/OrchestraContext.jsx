@@ -21,6 +21,10 @@ export function useOrchestra() {
 export function OrchestraProvider({ children }) {
   const app = <OrchestraState>{children}</OrchestraState>;
   if (!PRIVY_APP_ID) return app;
+  // React may log "Each child in a list should have a unique key" with this line as the visible
+  // frame once the sign-in window opens for someone whose last login was a wallet. That comes from
+  // inside Privy's landing screen (@privy-io/react-auth 3.48–3.50: the "Last used" wallet row has no
+  // key), not from a list of ours, and it is harmless. Nothing here can fix it.
   return <PrivyProvider appId={PRIVY_APP_ID} config={privyConfig}>{app}</PrivyProvider>;
 }
 
