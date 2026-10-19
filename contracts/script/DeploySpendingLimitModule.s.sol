@@ -18,9 +18,9 @@ contract DeploySpendingLimitModule is Script {
     address constant SEPOLIA_NPM = 0x1238536071E1c677A632429e3655c799b22cDA52;
     // Safe 1.4.1 / 1.3.0 singletons & factories (never callable as `to`)
     address constant SAFE_SINGLETON_141 = 0x41675C099F32341bf84BFc5382aF534df5C7461a;
-    address constant SAFE_L2_SINGLETON_141 = 0x29fcB43b46531BcA003ddC8FCB67FFE919727160;
+    address constant SAFE_L2_SINGLETON_141 = 0x29fcB43b46531BcA003ddC8FCB67FFE91900C762;
     address constant SAFE_PROXY_FACTORY_141 = 0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67;
-    address constant SAFE_SINGLETON_130 = 0xd9Db270c1B5E3Bd161E8c8503c55cEABeE70981e;
+    address constant SAFE_SINGLETON_130 = 0x69f4D1788e39c87893C980c06EdF4b7f686e2938;
     address constant SAFE_PROXY_FACTORY_130 = 0xa6B71E26C5e0845f74c812102Ca7114b6a896AB2;
 
     function run() external {
