@@ -3,12 +3,14 @@
 // down (ORCHESTRA_FAULT_INJECT=profile-read,activity-read,profile-timeout,activity-timeout).
 // `execute` makes an account action fail with a raw, internal-looking error right before it runs
 // (nothing executes), to check the user only ever sees a plain sentence.
+// `price-read` makes the price refresh fail; `price-stale` makes the cached prices count as too old
+// (checked by pricesUsable), to see that spends are refused when no fresh price exists.
 // Never usable in production: ignored unless NODE_ENV isn't "production" and the storage is local
 // or in memory, and the bridge refuses to start with it set in production (faultInjectProblem).
 
-export type Fault = "profile-read" | "activity-read" | "profile-timeout" | "activity-timeout" | "execute";
+export type Fault = "profile-read" | "activity-read" | "profile-timeout" | "activity-timeout" | "execute" | "price-read" | "price-stale";
 
-const FAULTS: readonly string[] = ["profile-read", "activity-read", "profile-timeout", "activity-timeout", "execute"];
+const FAULTS: readonly string[] = ["profile-read", "activity-read", "profile-timeout", "activity-timeout", "execute", "price-read", "price-stale"];
 
 function requested(env: NodeJS.ProcessEnv): string[] {
   return (env.ORCHESTRA_FAULT_INJECT ?? "").split(",").map((s) => s.trim()).filter(Boolean);
