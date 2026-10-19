@@ -13,7 +13,7 @@ import net from "node:net";
 import fs from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { WebSocket } from "ws";
-import { isOriginAllowed, originPermitted, parseAllowedOrigins, mockTradeEnabled, DEFAULT_ALLOWED_ORIGINS } from "./origins";
+import { isOriginAllowed, originPermitted, wsOriginPermitted, parseAllowedOrigins, assertOriginConfig, mockTradeEnabled, DEFAULT_ALLOWED_ORIGINS } from "./origins";
 import { ethers } from "ethers";
 import { isOwnAddress, approvalBelongsTo, broadcastSenderProblem } from "./access";
 import { issueToken, verifyToken, _setSecret } from "../../auth";
@@ -28,6 +28,9 @@ _setSecret(SECRET);
 const ALICE = "0x00000000000000000000000000000000000A11CE";
 const BOB = "0x0000000000000000000000000000000000000B0B";
 const ALICE_SAFE = "0x00000000000000000000000000000000005AFE01";
+// An example deployment list (nothing like it is built in): a production site with subdomains,
+// local dev, and a Vercel preview pattern. Tests that need those origins set it explicitly.
+const TEST_ORIGINS = "https://getorchestra.xyz,https://*.getorchestra.xyz,http://localhost:*,http://127.0.0.1:*,https://orchestra-*-youssefs-projects-822ed3d0.vercel.app";
 const PREVIEW = "https://orchestra-git-fix-setup-recov-6b8d8b-youssefs-projects-822ed3d0.vercel.app";
 
 const ENV_KEYS = ["ALLOWED_ORIGINS", "PUBLIC_APP_URL", "ENABLE_MOCK_TRADE", "NODE_ENV"] as const;
@@ -42,18 +45,34 @@ function withEnv(env: Partial<Record<(typeof ENV_KEYS)[number], string>>, fn: ()
 
 // ── The origin allowlist (pure) ──
 
-test("default allowlist: the production site, its subdomains, localhost on any port, this project's previews", () => {
+test("default (ALLOWED_ORIGINS unset, not production): localhost on any port only — no domain or preview is built in", () => {
   withEnv({}, () => {
+    for (const ok of ["http://localhost:3000", "http://localhost:3011", "http://localhost", "http://127.0.0.1:3000"]) {
+      assert.equal(isOriginAllowed(ok), true, ok);
+    }
+    for (const bad of [
+      "https://getorchestra.xyz", "https://app.getorchestra.xyz", PREVIEW,
+      "https://orchestra-q7h8rnuv4-youssefs-projects-822ed3d0.vercel.app", "https://localhost:3000", "https://evil.com",
+    ]) assert.equal(isOriginAllowed(bad), false, `${bad} must come from ALLOWED_ORIGINS`);
+  });
+  assert.equal(DEFAULT_ALLOWED_ORIGINS, "http://localhost:*,http://127.0.0.1:*");
+});
+
+test("an origin is allowed only when ALLOWED_ORIGINS lists it: sites, subdomains and the preview pattern", () => {
+  withEnv({ ALLOWED_ORIGINS: TEST_ORIGINS }, () => {
     for (const ok of [
       "https://getorchestra.xyz", "https://app.getorchestra.xyz", "https://a.b.getorchestra.xyz",
-      "http://localhost:3000", "http://localhost:3011", "http://localhost", "http://127.0.0.1:3000",
-      PREVIEW, "https://orchestra-q7h8rnuv4-youssefs-projects-822ed3d0.vercel.app",
+      "http://localhost:3000", PREVIEW, "https://orchestra-q7h8rnuv4-youssefs-projects-822ed3d0.vercel.app",
     ]) assert.equal(isOriginAllowed(ok), true, ok);
+  });
+  withEnv({ ALLOWED_ORIGINS: "https://orchestra-*-newteam.vercel.app" }, () => {
+    assert.equal(isOriginAllowed("https://orchestra-abc12-newteam.vercel.app"), true);
+    assert.equal(isOriginAllowed(PREVIEW), false, "the old team's previews are not allowed unless listed");
   });
 });
 
 test("attack: lookalike and unlisted origins are refused", () => {
-  withEnv({}, () => {
+  withEnv({ ALLOWED_ORIGINS: TEST_ORIGINS }, () => {
     for (const bad of [
       "https://getorchestra.xyz.evil.com", "https://evilgetorchestra.xyz", "https://evil.com/getorchestra.xyz",
       "https://getorchestra.xyz@evil.com", "https://evil.com#.getorchestra.xyz", "https://xgetorchestra.xyz",
@@ -77,7 +96,7 @@ test("ALLOWED_ORIGINS replaces the defaults; exact entries, wildcards and ports 
     assert.equal(isOriginAllowed("http://localhost:3000"), false, "a port that isn't listed");
     assert.equal(isOriginAllowed("https://two.example.com"), false, "*. needs a subdomain");
     assert.equal(isOriginAllowed("https://one.example.com.evil.com"), false);
-    assert.equal(isOriginAllowed("https://getorchestra.xyz"), false, "defaults no longer apply");
+    assert.equal(isOriginAllowed("http://127.0.0.1:3000"), false, "the local default no longer applies");
   });
 });
 
@@ -95,13 +114,58 @@ test("invalid ALLOWED_ORIGINS entries are dropped, never widened", () => {
   withEnv({ ALLOWED_ORIGINS: "*" }, () => assert.equal(isOriginAllowed("https://anything.com"), false));
 });
 
-test("a missing Origin is not refused by the origin check; a bad one is", () => {
-  withEnv({}, () => {
+test("a missing Origin is not refused on plain HTTP; a bad one is; a WebSocket upgrade needs an allowed one", () => {
+  withEnv({ ALLOWED_ORIGINS: TEST_ORIGINS }, () => {
     assert.equal(originPermitted(undefined), true);
     assert.equal(originPermitted("https://evil.com"), false);
     assert.equal(originPermitted("https://app.getorchestra.xyz"), true);
+    assert.equal(wsOriginPermitted(undefined), false, "no Origin on a WebSocket upgrade");
+    assert.equal(wsOriginPermitted("https://evil.com"), false);
+    assert.equal(wsOriginPermitted("https://app.getorchestra.xyz"), true);
   });
-  assert.ok(DEFAULT_ALLOWED_ORIGINS.includes("getorchestra.xyz"));
+});
+
+// ── Production: the allowlist must be explicit ──
+
+test("attack: in production an unset, empty or all-invalid ALLOWED_ORIGINS stops the bridge starting, and says what to set", () => {
+  for (const ALLOWED_ORIGINS of [undefined, "", "   "]) {
+    withEnv({ NODE_ENV: "production", ...(ALLOWED_ORIGINS === undefined ? {} : { ALLOWED_ORIGINS }) }, () => {
+      assert.throws(() => assertOriginConfig(), /ALLOWED_ORIGINS must be set when NODE_ENV=production.*e\.g\. ALLOWED_ORIGINS=https:\/\/getorchestra\.xyz,https:\/\/www\.getorchestra\.xyz/);
+    });
+  }
+  for (const ALLOWED_ORIGINS of ["*", "evil.com, ftp://x.com", "https://*"]) {
+    withEnv({ NODE_ENV: "production", ALLOWED_ORIGINS }, () => {
+      assert.throws(() => assertOriginConfig(), /None of the entries in ALLOWED_ORIGINS is a valid origin/);
+    });
+  }
+  // PUBLIC_APP_URL alone doesn't count as an allowlist
+  withEnv({ NODE_ENV: "production", PUBLIC_APP_URL: "https://app.example.com" }, () => assert.throws(() => assertOriginConfig()));
+});
+
+test("production: explicit origins start fine; localhost is honoured only when listed (with a warning); PUBLIC_APP_URL is added", () => {
+  withEnv({ NODE_ENV: "production", ALLOWED_ORIGINS: "https://getorchestra.xyz,https://www.getorchestra.xyz", PUBLIC_APP_URL: "https://phone.example.com" }, () => {
+    assert.deepEqual(assertOriginConfig(), []);
+    assert.equal(isOriginAllowed("https://www.getorchestra.xyz"), true);
+    assert.equal(isOriginAllowed("https://phone.example.com"), true);
+    for (const bad of ["http://localhost:3000", "http://127.0.0.1:3000", PREVIEW, "https://app.getorchestra.xyz"]) {
+      assert.equal(isOriginAllowed(bad), false, `${bad} is not listed`);
+    }
+  });
+  withEnv({ NODE_ENV: "production", ALLOWED_ORIGINS: "https://getorchestra.xyz,http://localhost:*" }, () => {
+    const warnings = assertOriginConfig();
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /localhost/);
+    assert.equal(isOriginAllowed("http://localhost:3000"), true, "explicit config is honoured");
+  });
+  withEnv({ ALLOWED_ORIGINS: "http://localhost:*" }, () => assert.deepEqual(assertOriginConfig(), [])); // not production: no warning
+});
+
+test("attack: production never allows localhost or previews by default", () => {
+  withEnv({ NODE_ENV: "production" }, () => {
+    for (const bad of ["http://localhost:3000", "http://127.0.0.1:3000", PREVIEW, "https://getorchestra.xyz"]) {
+      assert.equal(isOriginAllowed(bad), false, bad);
+    }
+  });
 });
 
 test("/mock-trade: off by default, on only with the opt-in, never in production mode", () => {
@@ -140,7 +204,7 @@ async function startBridge(env: Record<string, string>): Promise<{ child: ChildP
   const c = spawn(process.execPath, ["--import", "tsx", "src/integrations/ledger/serve.ts"], { // node directly: kill() reaches the bridge itself, no wrapper left behind
     env: {
       ...process.env, STORAGE_BACKEND: "memory", TELEGRAM_BOT_TOKEN: "", PORT: String(p), SESSION_SECRET: SECRET,
-      ALLOWED_ORIGINS: "", PUBLIC_APP_URL: "", ENABLE_MOCK_TRADE: "", NODE_ENV: "", ...env,
+      ALLOWED_ORIGINS: TEST_ORIGINS, PUBLIC_APP_URL: "", ENABLE_MOCK_TRADE: "", NODE_ENV: "", ...env,
     },
     stdio: "ignore",
   });
@@ -266,14 +330,107 @@ test("allowed websites work and get their own origin back (never *)", async () =
   assert.equal(noOrigin.headers["access-control-allow-origin"], undefined);
 });
 
-test("WebSocket: a disallowed origin is rejected at the upgrade; allowed or no origin connects", async () => {
+test("Vary: Origin is on every response through the origin guard; the exact origin is echoed, never *; no credentials header", async () => {
+  const seen: Res[] = [];
+  for (const origin of ["http://localhost:3000", "https://app.getorchestra.xyz", undefined, "https://evil.com", "null"]) {
+    for (const [m, p] of [["GET", "/health"], ["OPTIONS", "/intent"], ["POST", "/auth/login-request"]] as const) {
+      const r = await call(m, p, { origin, body: m === "POST" ? { walletAddress: ALICE } : undefined });
+      seen.push(r);
+      assert.match(String(r.headers.vary), /Origin/i, `${m} ${p} from ${origin}: Vary`);
+      const acao = r.headers["access-control-allow-origin"];
+      assert.notEqual(acao, "*");
+      if (origin && r.status < 400) assert.equal(acao, origin, "exact echo");
+      else assert.equal(acao, undefined, "none for refused or no-origin requests");
+      assert.equal(r.headers["access-control-allow-credentials"], undefined, "credentials mode is never enabled");
+    }
+  }
+  assert.ok(seen.some((r) => r.status === 403) && seen.some((r) => r.status === 204));
+});
+
+test("the session travels in the Authorization header: the bridge never sets a cookie", async () => {
+  const nonce = await call("POST", "/auth/login-request", { origin: "http://localhost:3000", body: { walletAddress: ALICE } });
+  const responses = [
+    nonce,
+    await call("POST", "/auth/login", { origin: "http://localhost:3000", body: { walletAddress: ALICE, nonce: "x", signature: "0x00" } }),
+    await call("POST", "/auth/privy", { origin: "http://localhost:3000", body: { walletAddress: ALICE, identityToken: "x" } }),
+    await call("GET", "/auth/session", { origin: "http://localhost:3000", token: alice() }),
+    await call("GET", "/auth/session", { origin: "http://localhost:3000" }),
+    await call("GET", "/health"),
+    await call("OPTIONS", "/intent", { origin: "http://localhost:3000" }),
+    await call("GET", "/health", { origin: "https://evil.com" }),
+  ];
+  for (const r of responses) assert.equal(r.headers["set-cookie"], undefined);
+  // and a cookie sent by a browser is not a session
+  const withCookie = await call("GET", "/auth/session", { origin: "http://localhost:3000", headers: { Cookie: `session=${alice()}; token=${alice()}` } });
+  assert.equal(withCookie.status, 401);
+});
+
+/** Starts serve.ts the way a deployed bridge would, and reports how it ended (it must never listen). */
+function startAndWatch(env: Record<string, string>): Promise<{ code: number | null; output: string; listened: boolean }> {
+  return freePort().then((p) => new Promise((resolve) => {
+    const c = spawn(process.execPath, ["--import", "tsx", "src/integrations/ledger/serve.ts"], {
+      env: { ...process.env, STORAGE_BACKEND: "memory", TELEGRAM_BOT_TOKEN: "", PORT: String(p), SESSION_SECRET: SECRET, ALLOWED_ORIGINS: "", PUBLIC_APP_URL: "", ENABLE_MOCK_TRADE: "", ...env },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    let listened = false;
+    c.stdout!.on("data", (d) => { output += d; if (String(d).includes("Ledger Bridge")) listened = true; });
+    c.stderr!.on("data", (d) => (output += d));
+    c.on("exit", (code) => resolve({ code, output, listened }));
+    setTimeout(() => c.kill(), 30_000); // only reached if it (wrongly) kept running
+  }));
+}
+
+test("attack: the real bridge refuses to start in production without ALLOWED_ORIGINS, before listening", async () => {
+  for (const ALLOWED_ORIGINS of ["", "*"]) {
+    const r = await startAndWatch({ NODE_ENV: "production", ALLOWED_ORIGINS });
+    assert.equal(r.listened, false, "never listened");
+    assert.notEqual(r.code, 0);
+    assert.notEqual(r.code, null, "it exited by itself");
+    assert.match(r.output, /\[origins\] .*ALLOWED_ORIGINS/);
+  }
+  const unset = await startAndWatch({ NODE_ENV: "production" });
+  assert.match(unset.output, /ALLOWED_ORIGINS must be set when NODE_ENV=production: list the exact https origins of your frontend, comma-separated, e\.g\. ALLOWED_ORIGINS=https:\/\/getorchestra\.xyz,https:\/\/www\.getorchestra\.xyz/);
+});
+
+test("production with explicit origins starts, honours exactly those, warns about a listed localhost", async () => {
+  const prod = await startBridge({ NODE_ENV: "production", ALLOWED_ORIGINS: "https://getorchestra.xyz,http://localhost:*" });
+  const keep = port;
+  port = prod.port;
+  try {
+    assert.equal((await call("GET", "/health", { origin: "https://getorchestra.xyz" })).status, 200);
+    assert.equal((await call("GET", "/health", { origin: "https://app.getorchestra.xyz" })).status, 403);
+    assert.equal(await wsConnect("https://getorchestra.xyz"), "open");
+  } finally { port = keep; prod.child.kill(); }
+});
+
+test("local dev: with ALLOWED_ORIGINS unset, localhost and PUBLIC_APP_URL (the phone proxy) work over HTTP and WebSocket", async () => {
+  const dev = await startBridge({ ALLOWED_ORIGINS: "", PUBLIC_APP_URL: "https://phone.example.com" });
+  const keep = port;
+  port = dev.port;
+  try {
+    for (const origin of ["http://localhost:3000", "http://127.0.0.1:3000", "https://phone.example.com"]) {
+      const r = await call("GET", "/health", { origin });
+      assert.equal(r.status, 200, origin);
+      assert.equal(r.headers["access-control-allow-origin"], origin);
+      assert.equal(await wsConnect(origin), "open", `ws ${origin}`);
+    }
+    assert.equal((await call("GET", "/health", { origin: "https://getorchestra.xyz" })).status, 403);
+    assert.equal((await call("GET", "/health", { origin: PREVIEW })).status, 403);
+    assert.equal(await wsConnect(), 403);
+    assert.equal((await call("GET", "/health")).status, 200, "plain HTTP without Origin is still fine");
+  } finally { port = keep; dev.child.kill(); }
+});
+
+test("WebSocket: a disallowed or missing origin is rejected at the upgrade; an allowed one connects", async () => {
   assert.equal(await wsConnect("https://evil.com"), 403);
   assert.equal(await wsConnect("https://getorchestra.xyz.evil.com"), 403);
   assert.equal(await wsConnect("https://something-else.vercel.app"), 403);
   assert.equal(await wsConnect("http://localhost:3000"), "open");
   assert.equal(await wsConnect("https://app.getorchestra.xyz"), "open");
   assert.equal(await wsConnect(PREVIEW), "open");
-  assert.equal(await wsConnect(), "open");
+  assert.equal(await wsConnect(), 403, "an upgrade with no Origin is refused too");
+  assert.equal(await wsConnect("null"), 403);
 });
 
 test("attack: /mock-trade is absent (404) by default and in production mode, even with the opt-in", async () => {
@@ -294,7 +451,7 @@ test("/mock-trade works on a local dev bridge that opts in; ALLOWED_ORIGINS and 
     assert.equal((await call("POST", "/mock-trade", { token: alice(), body: {} })).status, 200);
     assert.equal((await call("GET", "/health", { origin: "https://only.example.com" })).status, 200);
     assert.equal((await call("GET", "/health", { origin: "https://phone.example.com" })).status, 200);
-    assert.equal((await call("GET", "/health", { origin: "https://getorchestra.xyz" })).status, 403, "defaults are replaced");
+    assert.equal((await call("GET", "/health", { origin: "https://getorchestra.xyz" })).status, 403, "the list is replaced, not extended");
     assert.equal(await wsConnect("https://getorchestra.xyz"), 403);
   } finally { port = keep; dev.child.kill(); }
 });
@@ -527,7 +684,7 @@ test("end to end on the real bridge: sign in → mock trade → receive → answ
 });
 
 test("the real bridge closes a socket that never signs in (default window)", async () => {
-  const idle = new Probe(`ws://127.0.0.1:${port}/ws`);
+  const idle = new Probe(`ws://127.0.0.1:${port}/ws`, "http://localhost:3000");
   await idle.opened();
   assert.equal(await idle.waitClosed(8000), 4401);
   assert.deepEqual(idle.got.map((m) => m.type), ["ERROR"]);

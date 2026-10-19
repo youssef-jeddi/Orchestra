@@ -90,7 +90,7 @@ test("LOG_USER_MESSAGES=1 logs the message in development", async () => {
 
 test("LOG_USER_MESSAGES=1 is ignored when NODE_ENV=production", async () => {
   replay(CHAT_MESSAGE, { type: "reply", text: "I'm Orchestra." });
-  const bridge = await startBridge({ LOG_USER_MESSAGES: "1", NODE_ENV: "production" });
+  const bridge = await startBridge({ LOG_USER_MESSAGES: "1", NODE_ENV: "production", ALLOWED_ORIGINS: "https://app.example.com" }); // production must list its origins
   try {
     await post(bridge.port, { message: CHAT_MESSAGE });
     await wait(300);
