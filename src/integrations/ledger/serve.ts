@@ -40,6 +40,7 @@ import { verifyPrivyUser, importPrivyPasskeys, noteEmailSignIn, verifyEmailForPa
 import { getAdapter, type Balances } from "../../executor/adapters";
 import { interpretIntent, assessAction } from "../../intent/pipeline";
 import { sanitizeHistory } from "../../intent/planner";
+import { shortAddr, safeErr, requestId, logUserMessage, intentSummaryLine, intentOutcome, type IntentLogFields } from "../../utils/redact";
 import { fetchBalances, resolveEnsName } from "../../intent/context";
 import { describeAddresses, describeBalances } from "../../intent/replies";
 import { makeSepoliaProvider, withTimeout } from "../../utils/rpc";
@@ -147,7 +148,7 @@ app.post("/mock-trade", (_req, res, next) => {
       );
     })
     .catch((err) => {
-      console.error(`[serve] trade error: ${err.message}`);
+      console.error(`[serve] trade error: ${safeErr(err)}`);
     });
 
   res.json({ ok: true, tradeId: request.tradeId });
@@ -174,7 +175,7 @@ app.post("/quote", requireSession, async (req, res) => {
     const tokenInAddr = tokenIn || WETH_SEPOLIA;
     const tokenOutAddr = tokenOut || USDC_SEPOLIA;
 
-    console.log(`[serve] /quote request:`, { walletAddress, tokenIn: tokenInAddr, tokenOut: tokenOutAddr, amount });
+    console.log(`[serve] /quote request (${shortAddr(walletAddress)})`);
 
     // Check if Permit2 approval is needed
     const approvalTx = await checkApproval({
@@ -225,7 +226,7 @@ app.post("/quote", requireSession, async (req, res) => {
       approvalTx,
     });
   } catch (err: any) {
-    console.error("[serve] /quote error:", err.message);
+    console.error("[serve] /quote error:", safeErr(err));
     res.status(500).json({ error: err.message });
   }
 });
@@ -267,7 +268,7 @@ app.post("/swap", requireSession, async (req, res) => {
       unsignedTx: swapTx, // { to, data, value, gasLimit, ... }
     });
   } catch (err: any) {
-    console.error("[serve] /swap error:", err.message);
+    console.error("[serve] /swap error:", safeErr(err));
     res.status(500).json({ error: err.message });
   }
 });
@@ -300,7 +301,7 @@ app.post("/broadcast", requireSession, async (req, res) => {
       explorerUrl: `https://sepolia.etherscan.io/tx/${txResponse.hash}`,
     });
   } catch (err: any) {
-    console.error("[serve] /broadcast error:", err.message);
+    console.error("[serve] /broadcast error:", safeErr(err));
     res.status(500).json({ error: err.message });
   }
 });
@@ -317,14 +318,14 @@ app.get("/nonce/:address", requireSession, async (req, res) => {
     const maxFee = feeData.maxFeePerGas ?? ethers.parseUnits("20", "gwei");
     const maxPriority = feeData.maxPriorityFeePerGas ?? ethers.parseUnits("2", "gwei");
 
-    console.log(`[serve] nonce for ${req.params.address}: ${nonce}, maxFee: ${maxFee}, maxPriority: ${maxPriority}`);
+    console.log(`[serve] nonce for ${shortAddr(String(req.params.address))}: ${nonce}, maxFee: ${maxFee}, maxPriority: ${maxPriority}`);
     res.json({
       nonce,
       maxFeePerGas: maxFee.toString(),
       maxPriorityFeePerGas: maxPriority.toString(),
     });
   } catch (err: any) {
-    console.error("[serve] /nonce error:", err.message);
+    console.error("[serve] /nonce error:", safeErr(err));
     res.status(500).json({ error: err.message });
   }
 });
@@ -340,6 +341,17 @@ app.get("/nonce/:address", requireSession, async (req, res) => {
 // questions (price, help, clarifications) never wait on the network.
 app.post("/intent", async (req, res) => {
   const started = Date.now();
+  // One summary line per request (kind, outcome, risk, timings, model) and a short id on the others.
+  // Never the message, plan summaries, recipients or full addresses (see utils/redact.ts).
+  const rid = requestId();
+  const li: Partial<IntentLogFields> = {};
+  let sentBody: unknown;
+  const sendJson = res.json.bind(res);
+  res.json = (body?: any) => { sentBody = body; return sendJson(body); };
+  res.on("finish", () => console.log(intentSummaryLine({
+    rid, kind: li.kind ?? "none", intentType: li.intentType, outcome: intentOutcome(res.statusCode, sentBody),
+    riskScore: li.riskScore, plannerMs: li.plannerMs, totalMs: Date.now() - started, model: li.model,
+  })));
   try {
     const { message, walletAddress, history } = req.body || {};
     if (typeof message !== "string" || !message.trim()) {
@@ -363,7 +375,7 @@ app.post("/intent", async (req, res) => {
     }
     const wallet = session ? ethers.getAddress(session) : undefined;
 
-    console.log(`\n[intent] "${message}" (wallet: ${wallet || "none"})`);
+    logUserMessage(rid, message);
     refreshPrices().catch(() => {});
 
     // Storage first, then the deterministic on-chain address (survives restarts
@@ -393,9 +405,9 @@ app.post("/intent", async (req, res) => {
       resolveEns: resolveEnsName,
     });
     const timing = () => ({ totalMs: Date.now() - started, plannerMs: planner.latencyMs, model: planner.model });
-    console.log(`[intent] planner ${planner.latencyMs}ms (${planner.model}, ${planner.attempts} call(s)) → ${outcome.kind}`);
+    Object.assign(li, { kind: outcome.kind, plannerMs: planner.latencyMs, model: planner.model });
     // The cause is logged once by the planner; this marks the request so it isn't mistaken for a normal clarification.
-    if (planner.failed) console.error(`[intent] planner failed → answered with the fallback message (${planner.model || "no model"})`);
+    if (planner.failed) console.error(`[intent ${rid}] planner failed → answered with the fallback message (${planner.model})`);
 
     // ── Conversational outcomes: answered straight from the planner ──
     if (outcome.kind === "reply") {
@@ -444,6 +456,7 @@ app.post("/intent", async (req, res) => {
     // ── Value-bearing action: deterministic verdict ──
     const action = outcome.action;
     const intentType = action.intentType;
+    li.intentType = intentType;
 
     // A wallet that signed in with an email can't move funds, even small auto-executed amounts,
     // until it holds a passkey: say so now, in the chat, before anything is built or held.
@@ -453,7 +466,7 @@ app.post("/intent", async (req, res) => {
         await requirePasskeyToMoveFunds(wallet);
       } catch (e: any) {
         if (!(e instanceof PasskeyError)) throw e;
-        console.log(`[intent] ${intentType} held back: ${wallet} has no passkey yet`);
+        console.log(`[intent ${rid}] ${intentType} held back: no passkey yet (${shortAddr(wallet)})`);
         res.json({ status: "passkey_required", code: e.code, intentType, reason: e.message, reasoning: e.message, timing: timing() });
         return;
       }
@@ -469,8 +482,8 @@ app.post("/intent", async (req, res) => {
     };
     const decision = assessAction(action, { profile, history: activity });
     const { verdict, riskScore } = decision;
-    if (decision.typicalMaxUsd != null) console.log(`[intent] Habit baseline: typicalMaxUsd=$${decision.typicalMaxUsd}`);
-    console.log(`[intent] ${action.summary} → ${verdict} (risk ${riskScore}) — ${decision.reason}`);
+    li.riskScore = riskScore;
+    console.log(`[intent ${rid}] ${intentType} → ${verdict} (risk ${riskScore}) rules: ${decision.triggered.length ? decision.triggered.join(",") : "none"}`);
 
     append("plans", { ...action, flagId: "user-message", createdAt: new Date().toISOString() }).catch(() => {});
     append("assessments", {
@@ -518,7 +531,7 @@ app.post("/intent", async (req, res) => {
 
     // The adapter refused (e.g. the quote is far below market): nothing to sign or execute.
     if (result.refusal) {
-      console.log(`[intent] ${intentType} refused by adapter: ${result.refusal}`);
+      console.log(`[intent ${rid}] ${intentType} refused by the adapter`);
       res.json({
         status: "unsupported", intentType, reason: result.refusal, reasoning: result.refusal,
         plan, assessment: { ...assessment, verdict: "BLOCKED", requiresLedger: false, approvalMethod: "none" },
@@ -532,7 +545,7 @@ app.post("/intent", async (req, res) => {
       try {
         const exec = await adapter.execute(ctx, result);
         if (exec) {
-          console.log(`[intent] ✓ ${intentType} auto-executed: ${exec.txHash}`);
+          console.log(`[intent ${rid}] ✓ ${intentType} auto-executed: ${exec.txHash}`);
           // Only value that actually moved counts toward the daily limit / velocity / habit rules.
           if (wallet) {
             recordActivity(wallet, {
@@ -554,7 +567,7 @@ app.post("/intent", async (req, res) => {
           return;
         }
       } catch (err: any) {
-        console.error(`[intent] ${intentType} auto-execute failed: ${err.message}`);
+        console.error(`[intent ${rid}] ${intentType} auto-execute failed: ${safeErr(err)}`);
         res.status(502).json({
           error: err.message,
           intentType,
@@ -576,7 +589,7 @@ app.post("/intent", async (req, res) => {
         summary: plan.summary, valueUsd: action.valueUsd,
         reason: decision.reason, triggered: decision.triggered, execution,
       });
-      console.log(`[approval] ${approval.id} pending — ${plan.summary} (hash ${approval.hash.slice(0, 18)}…)`);
+      console.log(`[intent ${rid}] [approval] ${approval.id} pending (hash ${approval.hash.slice(0, 18)}…)`);
 
       // A linked Telegram chat becomes the only way to approve it: the phone shows
       // what will actually execute, decoded from the stored payload.
@@ -596,7 +609,7 @@ app.post("/intent", async (req, res) => {
           approval.channel = "telegram";
           approval.factor = phonePasskey ? "phone-passkey" : "telegram-button";
           approval.telegram = { chatId: link.chatId, messageId };
-          console.log(`[approval] ${approval.id} sent to Telegram chat ${link.chatId} (${approval.factor})`);
+          console.log(`[intent ${rid}] [approval] ${approval.id} sent to Telegram (${approval.factor})`);
         } catch (err: any) {
           // Fail closed: never fall back to a weaker factor because the phone was unreachable.
           settle(approval, { error: `I couldn't send the approval to Telegram: ${err.message}` });
@@ -630,7 +643,7 @@ app.post("/intent", async (req, res) => {
       timing: timing(),
     });
   } catch (err: any) {
-    console.error("[intent] Pipeline error:", err);
+    console.error(`[intent ${rid}] Pipeline error: ${err?.name ?? "Error"}: ${safeErr(err)}`);
     res.status(500).json({ error: err.message });
   }
 });
@@ -659,7 +672,7 @@ async function executeApproval(a: PendingApproval): Promise<{ txHash: string; ex
     console.log(`[approval] ${a.id} executed: ${result.txHash}`);
     return result;
   } catch (err: any) {
-    console.error(`[approval] ${a.id} failed: ${err.message}`);
+    console.error(`[approval] ${a.id} failed: ${safeErr(err)}`);
     throw err;
   }
 }
@@ -679,7 +692,7 @@ const onTelegramDecision: DecisionHandler = telegramDecisionFlow({
   isPasskeyError: (e) => e instanceof PasskeyError,
   refresh: refreshTelegramMessage,
   execute: (a) => {
-    console.log(`[telegram] ${a.id} approved — executing via Safe`);
+    console.log(`[telegram] ${a.id} approved — executing`);
     return executeApproval(a);
   },
 });
@@ -767,7 +780,7 @@ app.post("/passkey/email-verify", requireSession, async (req, res) => {
   try {
     const walletAddress = res.locals.wallet as string;
     const { expiresAt } = await verifyEmailForPasskey(req.body?.identityToken, walletAddress);
-    console.log(`[passkey] email code checked for ${walletAddress}`);
+    console.log(`[passkey] email code checked for ${shortAddr(walletAddress)}`);
     res.json({ status: "ok", verified: true, expiresAt });
   } catch (e: any) {
     if (e instanceof AuthError) { res.status(e.status).json({ error: e.message, code: "email_verification_failed" }); return; }
@@ -791,7 +804,7 @@ app.post("/passkey/register", requireSession, async (req, res) => {
     if (!response) { res.status(400).json({ error: "response required" }); return; }
     const rp = desktopRp(req);
     await verifyRegistration(walletAddress, response, { rp });
-    console.log(`[passkey] registered for ${walletAddress}`);
+    console.log(`[passkey] registered for ${shortAddr(walletAddress)}`);
     notifyNewPasskey(walletAddress, describePasskey({ label: "browser", rpID: rp.rpID }));
     res.json({ status: "ok", registered: true });
   } catch (e: any) { sendError(res, e, 400); }
@@ -812,7 +825,7 @@ app.post("/passkey/remove", requireSession, async (req, res) => {
     if (typeof id !== "string" || !id) { res.status(400).json({ error: "id required" }); return; }
     await verifyOwner(walletAddress, assertion, desktopRp(req));
     const removed = await removePasskey(walletAddress, id);
-    console.log(`[passkey] removed ${removed.label} passkey on ${removed.rpID} for ${walletAddress}`);
+    console.log(`[passkey] removed ${removed.label} passkey on ${removed.rpID} for ${shortAddr(walletAddress)}`);
     notifyPasskeyChange(walletAddress,
       `🗑 A passkey was removed from your Orchestra account (${describePasskey(removed)}). It can no longer approve transactions.`).catch(() => {});
     res.json({ status: "ok", passkeys: await listPasskeys(walletAddress) });
@@ -844,7 +857,7 @@ app.post("/passkey/approve", requireSession, async (req, res) => {
     const { a, result } = await approveWithPasskeyFlow(walletAddress, approvalId, {
       verify: (challenge) => verifyAuthentication(walletAddress, response, challenge, rp),
       execute: (a) => {
-        console.log(`[passkey] ${a.id} approved by ${walletAddress} — executing via Safe`);
+        console.log(`[passkey] ${a.id} approved by ${shortAddr(walletAddress)} — executing`);
         return executeApproval(a);
       },
     });
@@ -865,7 +878,7 @@ app.get("/approvals/:id", requireSession, (req, res) => {
 app.post("/approvals/:id/reject", requireSession, async (req, res) => {
   try {
     const a = await declineApproval(req.params.id, res.locals.wallet, refreshTelegramMessage);
-    console.log(`[approval] ${a.id} declined by ${a.wallet} in the app`);
+    console.log(`[approval] ${a.id} declined by ${shortAddr(a.wallet)} in the app`);
     res.json(approvalView(a));
   } catch (e: any) { sendError(res, e); }
 });
@@ -913,7 +926,7 @@ app.post("/passkey/phone-setup", requireSession, async (req, res) => {
       "📱 Set up phone passkey",
       `${rp.origin}/phone/setup?token=${encodeURIComponent(token)}`,
     );
-    console.log(`[passkey] phone setup link sent to ${wallet}'s Telegram`);
+    console.log(`[passkey] phone setup link sent to Telegram for ${shortAddr(wallet)}`);
     res.json({ sent: true });
   } catch (e: any) { sendError(res, e); }
 });
@@ -939,7 +952,7 @@ app.post("/phone/setup/verify", async (req, res) => {
     if (!entry || !entry.challenge) { res.status(404).json({ error: "This setup link is invalid, used or expired. Ask for a new one in Orchestra." }); return; }
     consumeSetup(token); // single-use, pass or fail
     await verifyRegistration(entry.wallet, response, { rp, challenge: entry.challenge, ownerChecked: entry.ownerChecked, label: "phone" });
-    console.log(`[passkey] phone passkey registered for ${entry.wallet}`);
+    console.log(`[passkey] phone passkey registered for ${shortAddr(entry.wallet)}`);
     const link = await getLink(entry.wallet);
     if (link) sendText(link.chatId, "✅ Phone passkey set up. From now on, risky transactions are confirmed on this phone with it.").catch(() => {});
     res.json({ status: "ok" });
@@ -980,7 +993,7 @@ app.post("/phone/approvals/:id/approve", async (req, res) => {
     if (!ok) { res.status(401).json({ error: "That passkey check didn't work. Please try again." }); return; }
 
     claim(a.id, a.wallet);
-    console.log(`[passkey] ${a.id} approved with the phone passkey — executing via Safe`);
+    console.log(`[passkey] ${a.id} approved with the phone passkey — executing`);
     await refreshTelegramMessage(a); // "⏳ doing it…"
     try {
       const result = await executeApproval(a);
@@ -1036,7 +1049,7 @@ app.post("/auth/login", (req, res) => {
   try {
     const { walletAddress, nonce, signature } = req.body || {};
     const session = login(walletAddress, nonce, signature);
-    console.log(`[auth] session issued for ${session.wallet}`);
+    console.log(`[auth] session issued for ${shortAddr(session.wallet)}`);
     res.json(session);
   } catch (e: any) { res.status(e instanceof AuthError ? e.status : 400).json({ error: e.message }); }
 });
@@ -1050,15 +1063,15 @@ app.post("/auth/privy", async (req, res) => {
     const user = await verifyPrivyUser(identityToken, walletAddress);
     const emailWallet = await noteEmailSignIn(user, walletAddress); // before the passkey import: it checks the flag
     const session = issueToken(walletAddress);
-    console.log(`[auth] session issued for ${session.wallet} (Privy${emailWallet ? ", email" : ""})`);
+    console.log(`[auth] session issued for ${shortAddr(session.wallet)} (Privy${emailWallet ? ", email" : ""})`);
     const rp = rpForOrigin(req.headers.origin);
     if (rp) {
       try {
         const { held, added } = await importPrivyPasskeys(user, walletAddress, rp.rpID);
-        if (held) console.log(`[passkey] sign-in passkey ready for approvals on ${rp.rpID} (${session.wallet})`);
+        if (held) console.log(`[passkey] sign-in passkey ready for approvals on ${rp.rpID} (${shortAddr(session.wallet)})`);
         if (added) notifyNewPasskey(session.wallet, describePasskey({ label: "browser", rpID: rp.rpID, source: "privy" }));
       } catch (e: any) {
-        console.warn(`[passkey] couldn't load the Privy passkey for ${session.wallet}: ${e.message}`);
+        console.warn(`[passkey] couldn't load the Privy passkey for ${shortAddr(session.wallet)}: ${safeErr(e)}`);
       }
     }
     res.json({ ...session, emailWallet });
@@ -1110,7 +1123,7 @@ app.post("/policy", requireSession, async (req, res) => {
   try {
     const wallet = res.locals.wallet as string;
     const result = await applyChange(wallet, req.body, desktopRp(req), notifyPasskeyChange);
-    console.log(`[policy] Updated for ${wallet}${result.loosened ? " (raised, confirmed)" : ""}: ${JSON.stringify(result.policy)}`);
+    console.log(`[policy] Updated for ${shortAddr(wallet)}${result.loosened ? " (raised, confirmed)" : ""}`);
     res.json({ status: "ok", ...result });
   } catch (e: any) { sendLimitsError(res, e); }
 });
@@ -1135,7 +1148,7 @@ app.post("/onboard", requireSession, async (req, res) => {
       spendingLimitUSD: await storedSpendingLimit(wallet),
     });
   } catch (err: any) {
-    if (!(err instanceof OnboardingError)) console.error("[onboard] Error:", err.message);
+    if (!(err instanceof OnboardingError)) console.error("[onboard] Error:", safeErr(err));
     sendError(res, err);
   }
 });
@@ -1212,10 +1225,10 @@ app.post("/prepare-limit-update", requireSession, async (req, res) => {
 
     const unsignedTx = buildLimitUpdateTx(safeAddress, ledgerAddress, agentAddr, newLimitUSD);
 
-    console.log(`[prepare-limit-update] Built tx for $${newLimitUSD} limit (Safe: ${safeAddress})`);
+    console.log(`[prepare-limit-update] Built tx for $${newLimitUSD} limit (${shortAddr(safeAddress)})`);
     res.json({ unsignedTx });
   } catch (err: any) {
-    console.error("[prepare-limit-update] Error:", err.message);
+    console.error("[prepare-limit-update] Error:", safeErr(err));
     res.status(500).json({ error: err.message });
   }
 });
@@ -1276,14 +1289,14 @@ app.post("/finalize-limit-update", requireSession, async (req, res) => {
         await policyTx.wait();
         console.log(`[finalize-limit-update] OrchestraPolicy updated: ${policyTx.hash}`);
       } catch (policyErr: any) {
-        console.warn(`[finalize-limit-update] OrchestraPolicy update failed (non-critical): ${policyErr.message}`);
+        console.warn(`[finalize-limit-update] OrchestraPolicy update failed (non-critical): ${safeErr(policyErr)}`);
       }
     }
 
     console.log(`[finalize-limit-update] Limit updated to $${newLimitUSD}, on-chain tx: ${txHash}`);
     res.json({ success: true });
   } catch (err: any) {
-    console.error("[finalize-limit-update] Error:", err.message);
+    console.error("[finalize-limit-update] Error:", safeErr(err));
     res.status(500).json({ error: err.message });
   }
 });
@@ -1313,5 +1326,5 @@ server.listen(PORT, "0.0.0.0", () => {
 });
 
 server.on("error", (err) => {
-  console.error("Server error:", err);
+  console.error("Server error:", safeErr(err));
 });

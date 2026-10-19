@@ -167,6 +167,7 @@ cp .env.example .env
 | `LP_MAX_PRICE_DEVIATION` | Liquidity price guard (default `0.05`; `off` for testnet demos, where pools are far from market) |
 | `ALLOWED_ORIGINS` | Websites that may call the bridge (HTTP and WebSocket), comma-separated; `*` works in a host (`https://*.example.com`) or a port (`http://localhost:*`). Setting it replaces the default: `https://getorchestra.xyz,https://*.getorchestra.xyz,http://localhost:*,http://127.0.0.1:*,https://orchestra-*-youssefs-projects-822ed3d0.vercel.app` (`PUBLIC_APP_URL`'s origin is always allowed too) |
 | `ENABLE_MOCK_TRADE=1` | Local dev only: enables `POST /mock-trade`. Off by default and ignored when `NODE_ENV=production` |
+| `LOG_USER_MESSAGES=1` | Local dev only: also logs the text of each chat message. Off by default and ignored when `NODE_ENV=production`; the log otherwise holds no message text, no plan summaries, no recipients and only shortened wallet addresses (`0x5879…5723`), with a short request id, outcome, risk score and timings per `/intent` request |
 | `SESSION_SECRET`, `SESSION_TTL_HOURS` | Only to share sessions across instances / change the 8h lifetime |
 
 ### Run

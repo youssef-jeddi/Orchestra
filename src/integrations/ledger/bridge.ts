@@ -68,7 +68,7 @@ export class BridgeServer {
           const msg: BridgeMessage | { type: "AUTH"; token?: unknown } = JSON.parse(raw.toString());
           this.handleMessage(ws, client, msg);
         } catch (err) {
-          console.error("[bridge] bad message:", err);
+          console.error(`[bridge] bad message (${(err as Error)?.name ?? "error"})`); // the parse error quotes the text
         }
       });
 
@@ -114,7 +114,7 @@ export class BridgeServer {
         if (ws.readyState === WebSocket.OPEN && this.walletOf(ws, client) === owner) ws.send(data);
       }
 
-      console.log(`[bridge] approval requested: ${request.tradeId} — "${request.summary}"`);
+      console.log(`[bridge] approval requested: ${request.tradeId}`);
     });
   }
 

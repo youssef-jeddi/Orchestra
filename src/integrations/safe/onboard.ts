@@ -15,6 +15,7 @@ import { OnboardingError, OnboardingLimiter, OnboardingQueue, accountReady } fro
 import { type InflightRecord, type InflightStore, chainProbes, makeTracker } from "./inflight";
 import { type SetupInspection, type SetupStep } from "./setupSteps";
 import { type AccountReads, type SetupRecord, finishWith, inspectWith } from "./inspect";
+import { shortAddr } from "../../utils/redact";
 
 export const DEFAULT_SPENDING_LIMIT_USD = 100;
 
@@ -125,7 +126,7 @@ async function finishAccount(wallet: string, isCancelled: () => boolean): Promis
   }, isCancelled, async () => {
     await deleteKey(inflightKey(user)); // everything is done: nothing can still be in flight
   });
-  if (ran.length) console.log(`[onboard] Account ready: ${safeAddress} (ran: ${ran.join(", ")})`);
+  if (ran.length) console.log(`[onboard] Account ready: ${shortAddr(safeAddress)} (ran: ${ran.join(", ")})`);
 }
 
 export const onboarding = new OnboardingQueue({

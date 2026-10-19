@@ -6,6 +6,7 @@
 // Pure and injectable (clock, deploy function) so the rules are tested without network.
 
 import { type SetupInspection, type SetupStep, type SetupSteps, isSetupComplete, needsDeployment, remainingSteps } from "./setupSteps";
+import { shortAddr, safeErr } from "../../utils/redact";
 
 export class OnboardingError extends Error {
   constructor(public status: number, message: string, public code?: string) {
@@ -174,7 +175,7 @@ export class OnboardingQueue {
     run.then(
       () => { if (this.jobs.get(key) === fresh) this.jobs.delete(key); },
       (err) => {
-        console.error(`[onboard] Setup failed for ${wallet}:`, err?.message);
+        console.error(`[onboard] Setup failed for ${shortAddr(wallet)}: ${safeErr(err)}`);
         // Our own plain sentences (e.g. "still finishing") are shown as they are; anything else is not.
         fresh.failed = err instanceof OnboardingError ? err.message : "We couldn't finish setting up your account. Please try again.";
         if (err instanceof OnboardingError && err.code) fresh.failedCode = err.code;

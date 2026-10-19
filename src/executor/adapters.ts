@@ -23,6 +23,7 @@ import { tokenByAddress } from "../intent/tokens";
 import { requirePasskeyToMoveFunds } from "../integrations/passkey";
 import { isTopUpToOwnAccount } from "./topUp";
 import { TOKEN_DECIMALS, toTokenWei, symbolFromAddress, estimateUsd, checkSwapQuote, formatTokenAmount, type QuoteCheck } from "../policy";
+import { safeErr } from "../utils/redact";
 
 /** Uniswap's native-ETH sentinel. A WETH address would pull ERC-20 the Safe may not hold. */
 const NATIVE_ETH = "0x0000000000000000000000000000000000000000";
@@ -139,7 +140,7 @@ const balanceAdapter: IntentAdapter = {
         balances = { eth, weth: 0, usdc: 0, totalUsd: estimateUsd("ETH", eth) };
       } catch (err: any) {
         // RPC unavailable — degrade gracefully instead of a raw 500.
-        console.warn(`[adapter:balance] balance read failed: ${err.message}`);
+        console.warn(`[adapter:balance] balance read failed: ${safeErr(err)}`);
         return {
           plan: { id: crypto.randomUUID(), summary: "Couldn't read your balance — the RPC endpoint is unavailable.", steps: [], totalEstimatedValueUsd: 0 },
           assessment: { verdict: "INFO", riskScore: 0, reasons: ["Balance read failed"], requiresLedger: false, triggered: [], approvalMethod: "none" },
@@ -180,7 +181,7 @@ const sendAdapter: IntentAdapter = {
       unsignedTx = { to: token, data: erc20Iface.encodeFunctionData("transfer", [to, amountWei]), value: "0" };
     }
 
-    console.log(`[adapter:send] ${amount} ${symbol} → ${to}`);
+    console.log("[adapter:send] built a transfer");
     return { payload: { sendData: { unsignedTx, token, symbol, amount, to } } };
   },
 
@@ -193,7 +194,7 @@ const sendAdapter: IntentAdapter = {
 
     const { executeBatchViaSafe } = await import("../integrations/safe/transaction");
     const tx = sendData.unsignedTx;
-    console.log(`[adapter:send] AUTO_EXECUTE via Safe ${ctx.safeAddress}`);
+    console.log("[adapter:send] AUTO_EXECUTE via your account");
     const txHash = await executeBatchViaSafe(ctx.safeAddress, agentKey, [{ to: tx.to, value: tx.value || "0", data: tx.data || "0x" }], "150000");
 
     const tradeId = crypto.randomUUID();
@@ -259,7 +260,7 @@ const addLiquidityAdapter: IntentAdapter = {
     const [t0, t1] = orderSides(a, b);
     const problem = lpPriceProblem(state.sqrtPriceX96, t0, t1);
     if (problem) {
-      console.warn(`[adapter:add_liquidity] refused: ${problem}`);
+      console.warn("[adapter:add_liquidity] refused: pool price too far from market");
       return { refusal: problem };
     }
 
@@ -271,7 +272,7 @@ const addLiquidityAdapter: IntentAdapter = {
     const leftover = usedOf(a) < a.amount || usedOf(b) < b.amount;
     const summary = `Add liquidity (lend to the ${pair} trading pool to earn fees): ≈${formatTokenAmount(usedA, a.symbol)} ${a.symbol} + ≈${formatTokenAmount(usedB, b.symbol)} ${b.symbol}` +
       (leftover ? " at the pool's ratio; the rest stays in your account" : "");
-    console.log(`[adapter:add_liquidity] ${summary} (pool ${state.pool})`);
+    console.log("[adapter:add_liquidity] built a liquidity position");
 
     const lpData = {
       tokenA: a.address, symbolA: a.symbol, amountA: a.amount.toString(),
@@ -301,7 +302,7 @@ const addLiquidityAdapter: IntentAdapter = {
 
     const plan = planMint(a, b, fee, state.sqrtPriceX96);
     const batch = buildMintBatch(plan, ctx.safeAddress, Math.floor(Date.now() / 1000) + 20 * 60);
-    console.log(`[adapter:add_liquidity] EXECUTE via Safe ${ctx.safeAddress}: ${batch.length} op(s)`);
+    console.log(`[adapter:add_liquidity] EXECUTE via your account: ${batch.length} op(s)`);
     const { executeBatchViaSafe } = await import("../integrations/safe/transaction");
     const txHash = await executeBatchViaSafe(ctx.safeAddress, agentKey, batch, "900000");
 
@@ -349,7 +350,7 @@ const removeLiquidityAdapter: IntentAdapter = {
 
     const plan = planRemove(position, d.percent);
     const batch = buildRemoveBatch(position, plan, ctx.safeAddress, Math.floor(Date.now() / 1000) + 20 * 60, WETH_SEPOLIA);
-    console.log(`[adapter:remove_liquidity] EXECUTE via Safe ${ctx.safeAddress}: ${d.percent}% of #${d.tokenId}${plan.burn ? " (+ burn)" : ""}`);
+    console.log(`[adapter:remove_liquidity] EXECUTE via your account: ${d.percent}%${plan.burn ? " (+ burn)" : ""}`);
     const { executeBatchViaSafe } = await import("../integrations/safe/transaction");
     const txHash = await executeBatchViaSafe(ctx.safeAddress, agentKey, batch, "600000");
 
@@ -377,7 +378,7 @@ const swapAdapter: IntentAdapter = {
       ? rawAmount
       : toTokenWei(rawAmount, tokenIn).toString();
 
-    console.log(`[adapter:swap] ${rawAmount} ${symbolIn} → ${symbolOut} (${amountWei} wei)`);
+    console.log("[adapter:swap] quoting");
 
     let quoteData: Record<string, any> | null = null;
     let summary = ctx.planSummary;
@@ -394,7 +395,7 @@ const swapAdapter: IntentAdapter = {
         const assessed = assessQuote(quoteResult.quote, { tokenIn, symbolIn, amountIn: amountWei, tokenOut, symbolOut });
         refusal = assessed.refusal;
         if (assessed.amountOut != null) summary = swapSummary(rawAmount, symbolIn, assessed.amountOut, symbolOut, assessed.check);
-        if (refusal) console.warn(`[adapter:swap] quote refused: ${refusal}`);
+        if (refusal) console.warn("[adapter:swap] quote refused");
 
         quoteData = {
           tradeId: crypto.randomUUID(),
@@ -406,7 +407,7 @@ const swapAdapter: IntentAdapter = {
           expectedOut: assessed.amountOut,
         };
       } catch (err: any) {
-        console.error(`[adapter:swap] quote error: ${err.message}`);
+        console.error(`[adapter:swap] quote error: ${safeErr(err)}`);
       }
     }
 
@@ -442,7 +443,7 @@ const swapAdapter: IntentAdapter = {
     });
     if (refusal) throw new Error(refusal);
     const swapTx = await submitSwap(freshQuote.quote, null, undefined);
-    console.log(`[adapter:swap] AUTO_EXECUTE swap tx: to=${swapTx.to}, value=${swapTx.value}`);
+    console.log("[adapter:swap] AUTO_EXECUTE: swap tx built");
 
     const batch: Array<{ to: string; value: string; data: string }> = [];
     const ETH_ADDRESS = "0x0000000000000000000000000000000000000000";
@@ -465,7 +466,7 @@ const swapAdapter: IntentAdapter = {
     // only sets the fallback, with a floor, for when the RPC can't estimate.
     const uniswapGas = parseInt(freshQuote.quote?.gasUseEstimate || "300000", 10);
     const fallbackGasLimit = String(Math.max(uniswapGas + 150000, 600000));
-    console.log(`[adapter:swap] AUTO_EXECUTE — executing ${batch.length} op(s) via Safe…`);
+    console.log(`[adapter:swap] AUTO_EXECUTE — executing ${batch.length} op(s) via your account…`);
     const txHash = await executeBatchViaSafe(ctx.safeAddress, agentKey, batch, fallbackGasLimit);
 
     const { logTradeResult } = await import("./logResult");

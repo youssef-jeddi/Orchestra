@@ -1,3 +1,4 @@
+import { safeErr } from "../../utils/redact";
 import Safe from '@safe-global/protocol-kit';
 import { ethers } from 'ethers';
 import { PERMIT2, UNIVERSAL_ROUTER } from '../uniswap/types';
@@ -66,7 +67,7 @@ export async function safeGasLimit(estimate: () => Promise<bigint>, fallbackGasL
         `This transaction would fail${reason ? ` (${reason}${reason === "GS013" ? " — the inner call failed" : ""})` : ""}, so it wasn't sent. Nothing was spent.`
       );
     }
-    console.warn(`[safe] couldn't estimate gas (${err?.shortMessage ?? err?.message}); using ${fallbackGasLimit ?? "the SDK's default"}`);
+    console.warn(`[safe] couldn't estimate gas (${safeErr(err)}); using ${fallbackGasLimit ?? "the SDK's default"}`);
     return fallbackGasLimit;
   }
 }
@@ -138,7 +139,7 @@ export async function getApprovalTxsForSwap(
 
   const permit2Allowance: bigint = await erc20.allowance(safeAddress, PERMIT2);
   if (permit2Allowance < amount) {
-    console.log(`[Safe] Batch will include: approve ${tokenAddress} → Permit2`);
+    console.log(`[Safe] Batch will include: approve → Permit2`);
     const iface = new ethers.Interface(['function approve(address spender, uint256 amount) returns (bool)']);
     txs.push({
       to: tokenAddress,
@@ -158,7 +159,7 @@ export async function getApprovalTxsForSwap(
   const now = Math.floor(Date.now() / 1000);
 
   if (currentAmount < amount || expiration <= now) {
-    console.log(`[Safe] Batch will include: Permit2.approve → Router ${routerAddress}`);
+    console.log(`[Safe] Batch will include: Permit2.approve → Router`);
     const iface = new ethers.Interface(['function approve(address token, address spender, uint160 amount, uint48 expiration)']);
     const maxUint160 = (1n << 160n) - 1n;
     const maxUint48 = (1n << 48n) - 1n;

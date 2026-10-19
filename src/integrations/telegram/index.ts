@@ -12,6 +12,7 @@ import crypto from "crypto";
 import https from "https";
 import { ethers } from "ethers";
 import { read, write, deleteKey } from "../zero-g/storage";
+import { safeErr } from "../../utils/redact";
 
 const API = "https://api.telegram.org";
 const LINK_TTL_MS = 10 * 60_000;
@@ -251,7 +252,7 @@ export async function settleApprovalMessage(chatId: number, messageId: number, o
     text: `${originalHtml}\n\n${outcomeHtml}`,
     parse_mode: "HTML",
     link_preview_options: { is_disabled: true },
-  }).catch((err) => console.warn(`[telegram] edit failed: ${err.message}`));
+  }).catch((err) => console.warn(`[telegram] edit failed: ${safeErr(err)}`));
 }
 
 // ── Update loop ──
@@ -309,7 +310,7 @@ export async function startTelegramBot(onDecision: DecisionHandler): Promise<voi
     await call("deleteWebhook", { drop_pending_updates: false });
     console.log(`[telegram] bot @${await getBotUsername()} polling for updates`);
   } catch (err: any) {
-    console.error(`[telegram] startup failed: ${err.message}`);
+    console.error(`[telegram] startup failed: ${safeErr(err)}`);
   }
 
   let offset = 0;
@@ -321,10 +322,10 @@ export async function startTelegramBot(onDecision: DecisionHandler): Promise<voi
         }, 35_000);
         for (const u of updates) {
           offset = u.update_id + 1;
-          await handleUpdate(u, onDecision).catch((err) => console.error(`[telegram] update error: ${err.message}`));
+          await handleUpdate(u, onDecision).catch((err) => console.error(`[telegram] update error: ${safeErr(err)}`));
         }
       } catch (err: any) {
-        if (err?.name !== "AbortError") console.warn(`[telegram] polling error: ${err.message}`);
+        if (err?.name !== "AbortError") console.warn(`[telegram] polling error: ${safeErr(err)}`);
         await new Promise((r) => setTimeout(r, 5_000));
       }
     }

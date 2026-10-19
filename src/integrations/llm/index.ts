@@ -220,7 +220,7 @@ function retryAfterMs(res: Response): number | null {
 }
 
 // ── Disk cache (eval only) ──
-function cacheKeyFor(provider: string, model: string, opts: CompleteOptions): string {
+export function cacheKeyFor(provider: string, model: string, opts: CompleteOptions): string {
   const payload = JSON.stringify([provider, model, opts.system, opts.messages, opts.json, opts.temperature, opts.maxTokens]);
   return crypto.createHash("sha256").update(payload).digest("hex").slice(0, 32);
 }

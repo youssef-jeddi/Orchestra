@@ -16,6 +16,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { ethers } from "ethers";
 import type { Request, Response, NextFunction } from "express";
+import { safeErr } from "../utils/redact";
 
 const CHAIN_ID = 11155111;
 const NONCE_TTL_MS = 5 * 60_000;
@@ -46,7 +47,7 @@ export function loadOrCreateSecretFile(file = process.env.SESSION_SECRET_FILE ||
     console.log(`[auth] generated a session secret in ${file}`);
   } catch (err: any) {
     // Read-only filesystem (some hosts): still works, sessions just reset on restart.
-    console.warn(`[auth] couldn't save the session secret (${err.message}) — sessions will reset on restart`);
+    console.warn(`[auth] couldn't save the session secret (${safeErr(err)}) — sessions will reset on restart`);
   }
   return fresh;
 }

@@ -23,7 +23,7 @@ function getHeaders(): Record<string, string> {
 }
 
 async function post<T>(path: string, body: Record<string, any>): Promise<T> {
-  console.log(`[uniswap] POST ${path}`, JSON.stringify(body, null, 2));
+  console.log(`[uniswap] POST ${path}`); // the body holds the wallet and amounts: not logged
   const res = await fetch(`${UNISWAP_API_BASE}${path}`, {
     method: "POST",
     headers: getHeaders(),

@@ -8,6 +8,7 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
+import { shortKey } from '../../utils/redact';
 
 export class LocalStorage {
   private store = new Map<string, unknown>();
@@ -17,14 +18,14 @@ export class LocalStorage {
   }
 
   async write(key: string, data: unknown): Promise<void> {
-    console.log(`[LocalStorage] WRITE ${key}`);
+    console.log(`[LocalStorage] WRITE ${shortKey(key)}`);
     this.store.set(key, structuredClone(data));
     this.persist();
   }
 
   async read(key: string): Promise<unknown | null> {
     const val = this.store.get(key) ?? null;
-    console.log(`[LocalStorage] READ ${key} → ${val ? 'found' : 'null'}`);
+    console.log(`[LocalStorage] READ ${shortKey(key)} → ${val ? 'found' : 'null'}`);
     return val ? structuredClone(val) : null;
   }
 
