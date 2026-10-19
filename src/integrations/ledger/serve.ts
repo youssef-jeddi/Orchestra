@@ -19,11 +19,8 @@ import { executeSwap } from "../uniswap/execution";
 import { WETH_SEPOLIA, USDC_SEPOLIA, CHAIN_ID } from "../uniswap/types";
 import { write, read, append } from "../zero-g/storage";
 import { detectExistingSafe } from "../safe/detect";
-import { updateRegistryLimit } from "../safe/policyContract";
-import { onboarding, storedSpendingLimit, isAccountReady } from "../safe/onboard";
+import { onboarding, isAccountReady } from "../safe/onboard";
 import { OnboardingError, ACCOUNT_NOT_READY_REASON } from "../safe/onboarding";
-import { setInitialSpendingLimits, updateSpendingLimit, buildLimitUpdateTx } from "../safe/spendingLimit";
-import { getAgentAddress } from "../safe/agentWallet";
 import { errorResponse, isUserFacing, executionErrorMessage } from "./errors";
 import { UserFacingError } from "../../utils/userFacing";
 import { readPositions, type Position } from "../uniswap/liquidity";
@@ -36,8 +33,7 @@ import {
   type PolicyProfile,
 } from "../../policy";
 import { getRecentActivity, recordActivity, readPolicyInputs } from "../../policy/store";
-import { readLimits, requestConfirmation, applyChange } from "../../policy/limits";
-import { prepareLimitUpdate, finalizeLimitUpdate, readLimitTx, type LimitUpdateDeps } from "../../policy/limitUpdate";
+import { readLimits, requestConfirmation, applyChange, dailyLimitFor } from "../../policy/limits";
 import { loginRequest, login, issueToken, requireSession, sessionWallet, verifyToken, AuthError } from "../../auth";
 import { verifyPrivyUser, importPrivyPasskeys, noteEmailSignIn, verifyEmailForPasskey } from "../../auth/privy";
 import { getAdapter, type Balances } from "../../executor/adapters";
@@ -48,7 +44,7 @@ import { injectFault } from "../../utils/faultInject";
 import { shortAddr, safeErr, requestId, logUserMessage, intentSummaryLine, intentOutcome, type IntentLogFields } from "../../utils/redact";
 import { fetchBalances, resolveEnsName } from "../../intent/context";
 import { describeAddresses, describeBalances } from "../../intent/replies";
-import { makeSepoliaProvider, withTimeout, withDeadline } from "../../utils/rpc";
+import { makeSepoliaProvider, withTimeout } from "../../utils/rpc";
 import {
   createApproval,
   requirePending,
@@ -1148,6 +1144,12 @@ app.post("/policy", requireSession, async (req, res) => {
 
 const sendLimitsError = sendError; // LimitsError is one of the errors errors.ts passes through
 
+/** The wallet's daily limit as `spendingLimitUSD`; left out when it can't be read, so setup status still answers. */
+async function limitField(wallet: string): Promise<{ spendingLimitUSD?: number }> {
+  const usd = await dailyLimitFor(wallet);
+  return usd === null ? {} : { spendingLimitUSD: usd };
+}
+
 // ─── Safe onboarding ───
 // Called automatically at sign-in. Starts (or joins) the wallet's one deployment and returns at
 // once with the account address; the client polls /onboard/status. The body is ignored: the
@@ -1160,7 +1162,7 @@ app.post("/onboard", requireSession, async (req, res) => {
     res.json({
       ...result,
       isNewUser: !!result.started && !result.resumed, // finishing an older account's setup is not a new user
-      spendingLimitUSD: await storedSpendingLimit(wallet),
+      ...(await limitField(wallet)),
     });
   } catch (err: any) {
     if (!(err instanceof OnboardingError)) console.error("[onboard] Error:", safeErr(err));
@@ -1184,7 +1186,7 @@ app.get("/check-safe", requireSession, async (req, res) => {
     if (req.query.address !== undefined && !(await requireOwnAddress(res, req.query.address, storedSafeOf))) return;
     const status = await onboarding.status(wallet);
     if (status.status === "ready") {
-      res.json({ ...status, hasSafe: true, spendingLimitUSD: await storedSpendingLimit(wallet) });
+      res.json({ ...status, hasSafe: true, ...(await limitField(wallet)) });
     } else {
       res.json({ ...status, hasSafe: false });
     }
@@ -1216,57 +1218,6 @@ app.get("/safe-balances", requireSession, async (req, res) => {
     });
   } catch (err: any) { sendError(res, err); }
 });
-
-// Step 1: Build unsigned tx for Ledger to sign (MultiSend of 3 setAllowance calls through Safe)
-app.post("/prepare-limit-update", requireSession, async (req, res) => {
-  try {
-    const ledgerAddress = ethers.getAddress(res.locals.wallet);
-    if (!sameWalletOrAbsent(req.body?.ledgerAddress, res)) return;
-    // { unsignedTx, confirmation: "none" | "passkey" } — rules in src/policy/limitUpdate.ts
-    const prepared = await prepareLimitUpdate(ledgerAddress, req.body, limitUpdateDeps(req));
-    console.log(`[prepare-limit-update] Built tx for ${shortAddr(ledgerAddress)}`);
-    res.json(prepared);
-  } catch (err: any) { sendError(res, err); }
-});
-
-// Step 2: After Ledger signs and tx is broadcast, update storage + OrchestraPolicy.
-// Only once the chain shows that exact limit-update tx succeeded, sent by this
-// wallet to its Safe — a session alone can't raise the limit.
-app.post("/finalize-limit-update", requireSession, async (req, res) => {
-  try {
-    const ledgerAddress = ethers.getAddress(res.locals.wallet);
-    if (!sameWalletOrAbsent(req.body?.ledgerAddress, res)) return;
-    // { success, limitUsd, raised, notice? }, or 403 confirmation_required with a passkey challenge
-    // for a raise; repeat the call with `confirmation: { nonce, response }` — rules in src/policy/limitUpdate.ts
-    const result = await finalizeLimitUpdate(ledgerAddress, req.body, limitUpdateDeps(req));
-    console.log(`[finalize-limit-update] Limit ${result.raised ? "raised" : "lowered"} for ${shortAddr(ledgerAddress)}`);
-    res.json(result);
-  } catch (err: any) { sendError(res, err); }
-});
-
-/** The real reads, storage and chain calls behind the two limit-update endpoints. */
-function limitUpdateDeps(req: express.Request): LimitUpdateDeps {
-  const accountKey = (w: string) => `safe:${w.toLowerCase()}`;
-  const txKey = (h: string) => `limittx:${h.toLowerCase()}`;
-  return {
-    isReady: isAccountReady,
-    account: async (w) => (await read(accountKey(w))) as any,
-    saveAccount: (w, rec) => write(accountKey(w), rec),
-    buildTx: (safe, w, usd) => buildLimitUpdateTx(safe, w, getAgentAddress(), usd),
-    fetchTx: (hash) => readLimitTx({
-      tx: () => withDeadline(provider.getTransaction(hash), 10_000),
-      receipt: () => withDeadline(provider.getTransactionReceipt(hash), 10_000),
-      blockTimeMs: async (n) => { const b = await withDeadline(provider.getBlock(n), 10_000); return b ? b.timestamp * 1000 : null; },
-    }),
-    txUsed: async (h) => !!(await read(txKey(h))),
-    markTxUsed: (h, w) => write(txKey(h), { wallet: w, at: new Date().toISOString() }),
-    updateRegistry: (safe, usd) => updateRegistryLimit(provider, safe, usd),
-    notify: notifyPasskeyChange,
-    // Not desktopRp: lowering must work from any allowed page (the Ledger UI); a raise from a page
-    // the passkey doesn't belong to fails at the passkey prompt.
-    rp: rpForOrigin(req.headers.origin) ?? browserRp(),
-  };
-}
 
 // ─── Health check ───
 app.get("/health", (_req, res) => {

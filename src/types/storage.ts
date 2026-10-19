@@ -66,7 +66,6 @@ export interface UserProfile {
   address: string;
   safeAddress: string;
   riskTolerance: 'conservative' | 'moderate' | 'aggressive';
-  autoApproveLimit: number;
   preferredTokens: string[];
   createdAt: string;
   updatedAt: string;
