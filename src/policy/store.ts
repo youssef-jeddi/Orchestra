@@ -11,6 +11,9 @@
 
 import { read, write, readMany, append } from "../integrations/zero-g/storage";
 import type { PolicyProfile, ActivityRecord } from "./index";
+import { injectFault } from "../utils/faultInject";
+import { withTimeout } from "../utils/rpc";
+import { safeErr } from "../utils/redact";
 
 const PROFILE_TTL_MS = 30_000;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -18,25 +21,23 @@ const ACTIVITY_RETENTION_MS = 2 * DAY_MS; // keep a little more than the 24h win
 
 const profileCache = new Map<string, { value: PolicyProfile; expires: number }>();
 const activityCache = new Map<string, ActivityRecord[]>();
+/** Spend recorded while the history couldn't be loaded; merged in on the next successful load. */
+const unsynced = new Map<string, ActivityRecord[]>();
 
-/** Before policies were per wallet, one global record held everyone's. */
-const LEGACY_PROFILE_KEY = "user:profile";
 const profileKey = (wallet: string) => `user:profile:${wallet.toLowerCase()}`;
 
 /**
- * A wallet's stored profile (`user:profile:<wallet>`), falling back to the
- * legacy global record until the wallet saves its own. Read-only fallback:
- * writes always go to the wallet's own key.
+ * A wallet's stored profile (`user:profile:<wallet>`); `{}` until it has one, which means the
+ * safe defaults. A storage error is NOT "no profile": it throws, so no caller falls back to the
+ * $100 default for a wallet that lowered its limit, or saves an empty profile over the real one.
+ * Before policies were per wallet, one shared `user:profile` record held everyone's;
+ * it is never read here: a new wallet must not start with someone else's daily limit or recipients,
+ * and nothing is copied from it into a wallet's own record.
  */
 export async function readUserProfile(wallet: string): Promise<Record<string, any>> {
-  try {
-    const own = (await read(profileKey(wallet))) as any;
-    if (own && typeof own === "object") return own;
-    const legacy = (await read(LEGACY_PROFILE_KEY)) as any;
-    return legacy && typeof legacy === "object" ? legacy : {};
-  } catch {
-    return {};
-  }
+  await injectFault("profile-read");
+  const own = (await read(profileKey(wallet))) as any; // null only when nothing was ever saved
+  return own && typeof own === "object" ? own : {};
 }
 
 export async function writeUserProfile(wallet: string, profile: Record<string, any>): Promise<void> {
@@ -101,6 +102,8 @@ export async function removeKnownRecipient(wallet: string, address: string): Pro
  */
 export async function getPolicyProfile(wallet?: string): Promise<PolicyProfile> {
   if (!wallet) return {};
+  await injectFault("profile-read");
+  await injectFault("profile-timeout");
   const key = wallet.toLowerCase();
   const now = Date.now();
   const hit = profileCache.get(key);
@@ -120,14 +123,16 @@ export async function getRecentActivity(wallet: string): Promise<ActivityRecord[
   const key = wallet.toLowerCase();
   let list = activityCache.get(key);
   if (!list) {
-    try {
-      const rows = (await readMany(`activity:${key}`)) as any[];
-      list = (rows || []).filter(
-        (r) => r && typeof r.at === "string" && typeof r.valueUsd === "number"
-      );
-    } catch {
-      list = [];
-    }
+    await injectFault("activity-read");
+    await injectFault("activity-timeout");
+    // A failed load throws and is not cached: an empty list would read as "nothing spent today".
+    const rows = (await readMany(`activity:${key}`)) as any[];
+    const loaded = (rows || []).filter(
+      (r) => r && typeof r.at === "string" && typeof r.valueUsd === "number"
+    );
+    const missed = (unsynced.get(key) ?? []).filter((u) => !loaded.some((r) => r.at === u.at && r.valueUsd === u.valueUsd));
+    list = [...loaded, ...missed];
+    unsynced.delete(key);
     activityCache.set(key, list);
   }
   const cutoff = Date.now() - DAY_MS;
@@ -140,8 +145,14 @@ export async function getRecentActivity(wallet: string): Promise<ActivityRecord[
 /** Record an auto-approved action (write-through: memory now, 0G async). */
 export async function recordActivity(wallet: string, rec: ActivityRecord): Promise<void> {
   const key = wallet.toLowerCase();
-  if (!activityCache.has(key)) await getRecentActivity(key); // seed from 0G first
-  const list = activityCache.get(key) || [];
+  if (!activityCache.has(key)) await getRecentActivity(key).catch(() => {}); // seed from storage first
+  const list = activityCache.get(key);
+  if (!list) {
+    // The history can't be read right now: keep this spend aside so it still counts once it can.
+    unsynced.set(key, [...(unsynced.get(key) ?? []), rec]);
+    append(`activity:${key}`, rec).catch(() => {});
+    return;
+  }
 
   list.push(rec);
 
@@ -156,8 +167,26 @@ export async function recordActivity(wallet: string, rec: ActivityRecord): Promi
   append(`activity:${key}`, rec).catch(() => {});
 }
 
+/** What the limit rules need for one request; `ok: false` when either part couldn't be read in time. */
+export type PolicyInputs = { ok: true; profile: PolicyProfile; activity: ActivityRecord[] | undefined } | { ok: false };
+
+/**
+ * Read the wallet's profile and recent activity together, for /intent. Never rejects, and an error
+ * or a timeout is `ok: false`, never an empty profile or an empty history: nothing that depends on
+ * the daily limit or the daily total may run without both.
+ */
+export async function readPolicyInputs(wallet: string | undefined, timeoutMs = 2_000): Promise<PolicyInputs> {
+  if (!wallet) return { ok: true, profile: {}, activity: undefined };
+  const inputs = Promise.all([getPolicyProfile(wallet), getRecentActivity(wallet)]).then(
+    ([profile, activity]): PolicyInputs => ({ ok: true, profile, activity }),
+    (err): PolicyInputs => { console.error(`[policy] couldn't read limits or activity: ${safeErr(err)}`); return { ok: false }; },
+  );
+  return withTimeout(inputs, timeoutMs, { ok: false } as PolicyInputs);
+}
+
 /** Test hook — clears all caches. */
 export function _resetPolicyStoreCache(): void {
   profileCache.clear();
   activityCache.clear();
+  unsynced.clear();
 }

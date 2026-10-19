@@ -1,10 +1,9 @@
 // ─── Safe — account setup steps: which are done, which remain ───
-// Setting up an account is several transactions (deploy, enable the AllowanceModule, add the
-// agent as delegate, set allowances, register with OrchestraPolicy) plus our own records. Any of
-// them can fail after the earlier ones succeeded, so "ready" means every step is done, and a retry
-// runs only the steps still missing. Pure and injectable so it is tested without network.
+// Setting up an account is a deployment, a registration with OrchestraPolicy and our own
+// records. Any of them can fail after the earlier ones succeeded, so "ready" means every step is
+// done, and a retry runs only the steps still missing. Pure and injectable so it is tested without network.
 
-export const SETUP_STEPS = ["deploy", "module", "delegate", "allowances", "register", "record"] as const;
+export const SETUP_STEPS = ["deploy", "register", "record"] as const;
 export type SetupStep = (typeof SETUP_STEPS)[number];
 export type SetupSteps = Record<SetupStep, boolean>;
 
@@ -12,6 +11,12 @@ export type SetupSteps = Record<SetupStep, boolean>;
 export interface SetupInspection {
   safeAddress: string;
   steps: SetupSteps;
+  /**
+   * A finished account that isn't registered on the registry this server now uses (it was set up
+   * before the registry was configured or replaced). It stays ready: the registry is a record, it
+   * doesn't gate spending, so the registration is done in the background at the next sign-in.
+   */
+  registrationPending?: boolean;
 }
 
 /** The steps still to do, in the order they must run. Later steps need the earlier ones. */
@@ -24,19 +29,15 @@ export const isSetupComplete = (steps: SetupSteps) => remainingSteps(steps).leng
 /** Does the account itself need deploying? Only then does a run count as a new deployment. */
 export const needsDeployment = (steps: SetupSteps) => !steps.deploy;
 
-export const allStepsDone = (): SetupSteps => ({ deploy: true, module: true, delegate: true, allowances: true, register: true, record: true });
+export const allStepsDone = (): SetupSteps => ({ deploy: true, register: true, record: true });
 
 /** What the chain and our records say about one account; `deriveSteps` turns it into the step states. */
 export interface SetupFacts {
   /** Code exists at the predicted address. */
   hasCode: boolean;
-  moduleEnabled: boolean;
-  agentIsDelegate: boolean;
-  /** How many of the agent's token allowances were never set. */
-  allowancesMissing: number;
   /** OrchestraPolicy is configured for this server; without it there is nothing to register. */
   policyConfigured: boolean;
-  /** Registered: our own flag, the policy contract pointing at this account, or an account from before step tracking. */
+  /** Registered on the configured registry: our record says so for that registry, or the registry has an entry for this account. */
   registered: boolean;
   /** Our stored account record and profile are written. */
   recorded: boolean;
@@ -47,12 +48,9 @@ export interface SetupFacts {
  * whatever local flags say: the chain is the source of truth.
  */
 export function deriveSteps(f: SetupFacts): SetupSteps {
-  if (!f.hasCode) return { deploy: false, module: false, delegate: false, allowances: false, register: false, record: false };
+  if (!f.hasCode) return { deploy: false, register: false, record: false };
   return {
     deploy: true,
-    module: f.moduleEnabled,
-    delegate: f.agentIsDelegate,
-    allowances: f.allowancesMissing === 0,
     register: !f.policyConfigured || f.registered,
     record: f.recorded,
   };

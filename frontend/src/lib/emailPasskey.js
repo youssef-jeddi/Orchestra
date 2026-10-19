@@ -89,9 +89,14 @@ export const shouldOfferPasskey = ({ emailWallet, hasPasskey, accountReady }) =>
  * account holds, a send, a swap or liquidity, is approved by a passkey or on Telegram against the
  * server's stored copy, for every kind of user. Paying it from the personal wallet would skip that
  * check. An email user also needs a passkey before they can fund their account.
+ *
+ * The one other thing: 'safe-owner', signing a request the server holds that went past the
+ * account's on-chain daily ceiling. That signature is over the hash of the transaction the server
+ * stored (the wallet is the account's owner; the server checks it), not over anything this page
+ * builds, and it needs the same passkey for an email user.
  */
 export function userMaySign({ emailWallet, hasPasskey } = {}, kind) {
-  if (kind !== 'deposit') return false;
+  if (kind !== 'deposit' && kind !== 'safe-owner') return false;
   return !emailWallet || !!hasPasskey;
 }
 

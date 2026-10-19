@@ -95,7 +95,7 @@ Once a wallet links Telegram, its risky transactions can only be approved there 
 - **The WebSocket** (`/ws`) takes the session as its first message, `{"type":"AUTH","token":"<session token>"}` (never in the URL); a socket that doesn't sign in within 5 seconds, or sends a forged or expired token, is closed (code 4401) and receives nothing. Each approval is sent only to sockets signed in as its owner, and only they can answer it.
 - **Telegram linking** requires an EIP-712 signature from the wallet, so nobody can route your approvals to their chat.
 - **Phone passkey setup** needs both your signed-in desktop session and your linked Telegram chat: the one-time setup link (10 minutes, single use) is sent there.
-- **Spending-limit updates** are only recorded after the chain shows the owner's exact limit-update transaction succeeded.
+- **The daily limit** is changed only through `POST /policy`: lowering applies at once; raising needs your passkey or a wallet signature.
 
 ---
 
@@ -115,11 +115,11 @@ Once a wallet links Telegram, its risky transactions can only be approved there 
 ### Ledger — Hardware security
 - Device Management Kit (DMK) over Bluetooth in the browser
 - ERC-7730 clear-signing descriptors for Permit2 and the Universal Router (`src/integrations/ledger/`, not yet wired into the signing flow)
-- EIP-712 signing for sign-in and Telegram linking; required for spending-limit updates
+- EIP-712 signing for sign-in and Telegram linking
 
 ### Your account — Smart account custody
-- One Orchestra account per user (a Safe smart account under the hood; your wallet is the owner, the agent wallet a delegate that executes auto-approved actions)
-- On-chain spending limits via the AllowanceModule; `OrchestraPolicy.sol` registry of per-user policies
+- One Orchestra account per user (a Safe smart account under the hood; your wallet and the agent wallet are its owners; the agent executes auto-approved actions)
+- One daily limit, enforced by the server's policy engine (there is no on-chain spending limit); `OrchestraPolicy.sol` registry of per-account policies
 - Fund it from the chat (*"fund my account with 20 USDC"*); the agent can never move funds out of your own wallet
 
 ---
@@ -158,6 +158,7 @@ cp .env.example .env
 | `ZERO_G_PRIVATE_KEY`, `ZERO_G_RPC_URL`, `ZERO_G_INDEXER_URL` | Only with `STORAGE_BACKEND=0g` — tokens at [faucet.0g.ai](https://faucet.0g.ai) |
 | `ZERO_G_API_KEY` | 0G Compute for the agent runtime |
 | `ORCHESTRA_POLICY_ADDRESS` | On-chain policy registry (optional) |
+| `SPENDING_MODULE_ADDRESS` | Turns on the on-chain $1000/day cap (optional). New accounts then have the user as their only owner; the agent calls `SpendingLimitModule.exec(safe, calls[])` (Call-only batches, no MultiSend). A request past what is left today is refused and the user can sign it themselves. Unset, behaviour is unchanged. Deploy as in [`contracts/README.md`](contracts/README.md). |
 | `LEDGER_APPROVAL=on` | Require a Ledger above the hardware threshold |
 | `TELEGRAM_BOT_TOKEN` | Telegram approvals — create a bot with @BotFather |
 | `PUBLIC_APP_URL` | Phone passkey approvals — the frontend's public **https** address |
@@ -203,6 +204,16 @@ Newcomers sign up with a passkey (or email) and get a wallet without installing 
    Put the https URL in `PUBLIC_APP_URL` in the backend's `.env` (the frontend reads it from there too) and restart the backend. Then click **Set up phone passkey** and open the link Telegram sends **in Safari or Chrome** — passkeys don't work in Telegram's built-in browser.
 
 Passkeys are bound to a domain: if the address changes (quick tunnels change on every start), set up the phone passkey again. Approvals fall back to the Telegram button until you do.
+
+### Testing failures (development only)
+
+To see how the app behaves when the stored limits or the day's activity can't be read, start the bridge with `ORCHESTRA_FAULT_INJECT` set to one or more of `profile-read`, `activity-read` (the read fails), `profile-timeout`, `activity-timeout` (it never answers, so the 2-second timeout fires), comma-separated:
+
+```bash
+ORCHESTRA_FAULT_INJECT=profile-read PORT=3011 STORAGE_BACKEND=memory TELEGRAM_BOT_TOKEN= npx tsx src/integrations/ledger/serve.ts
+```
+
+A send, swap or liquidity request then answers "I can't check your limits right now, so nothing was done" and runs nothing; chat and balance questions still work and the Limits sheet shows an error instead of empty settings. It is ignored when `NODE_ENV=production` or the storage is 0G, and the bridge refuses to start (exit code 1) if it is set with `NODE_ENV=production`.
 
 ### Smart contracts (optional)
 

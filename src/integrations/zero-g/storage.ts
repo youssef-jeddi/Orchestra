@@ -17,6 +17,32 @@ function requireEnv(name: string): string {
   return value;
 }
 
+/**
+ * The saved key → root-hash index. A missing file is a first run (empty); anything else wrong with it
+ * throws and the file is left alone: "starting fresh" would orphan every record already uploaded.
+ */
+export function loadIndexFile(file: string): Map<string, string> {
+  const fail = (reason: string) =>
+    new Error(`[0G Storage] Can't read ${file} (${reason}). Refusing to start so no data is overwritten. Fix or restore the file, or move it away to start with an empty index.`);
+  let raw: string;
+  try {
+    raw = fs.readFileSync(file, 'utf-8');
+  } catch (err: any) {
+    if (err?.code === 'ENOENT') return new Map();
+    throw fail(err?.message ?? String(err));
+  }
+  let entries: unknown;
+  try {
+    entries = JSON.parse(raw);
+  } catch (err: any) {
+    throw fail(raw.trim() === '' ? 'the file is empty' : `not valid JSON: ${err.message}`);
+  }
+  if (!Array.isArray(entries) || !entries.every((e) => Array.isArray(e) && e.length === 2 && typeof e[0] === 'string' && typeof e[1] === 'string')) {
+    throw fail('not a list of [key, root hash] pairs');
+  }
+  return new Map(entries as [string, string][]);
+}
+
 class ZeroGStorage {
   private indexer: Indexer;
   private signer: ethers.Wallet;
@@ -62,6 +88,11 @@ class ZeroGStorage {
     }
   }
 
+  /**
+   * The stored value, or null only when the key was never written. A failed download or unreadable
+   * data throws: "missing" and "couldn't read" must not look alike, or a caller would fall back to
+   * defaults (a lowered limit becomes $100) and save over real data.
+   */
   async read(key: string): Promise<unknown | null> {
     console.log(`[0G Storage] READ ${shortKey(key)}`);
     const rootHash = this.index.get(key);
@@ -76,13 +107,10 @@ class ZeroGStorage {
       const err = await this.indexer.download(rootHash, tmpFile, false);
       if (err) {
         console.warn(`[0G Storage] READ ${shortKey(key)} download failed:`, err);
-        return null;
+        throw new Error(`0G download failed for ${shortKey(key)}`);
       }
       const raw = fs.readFileSync(tmpFile, 'utf-8');
       return JSON.parse(raw);
-    } catch (error) {
-      console.warn(`[0G Storage] READ ${shortKey(key)} error:`, error);
-      return null;
     } finally {
       if (fs.existsSync(tmpFile)) {
         fs.unlinkSync(tmpFile);
@@ -97,7 +125,7 @@ class ZeroGStorage {
 
     const results: unknown[] = [];
     for (const key of matchingKeys) {
-      const item = await this.read(key);
+      const item = await this.read(key); // a row that can't be read throws: dropping it would understate what's there
       if (item === null) continue;
 
       if (filter) {
@@ -131,16 +159,7 @@ class ZeroGStorage {
   }
 
   private loadIndex(): Map<string, string> {
-    try {
-      if (fs.existsSync(INDEX_FILE)) {
-        const raw = fs.readFileSync(INDEX_FILE, 'utf-8');
-        const entries: [string, string][] = JSON.parse(raw);
-        return new Map(entries);
-      }
-    } catch (err) {
-      console.warn('[0G Storage] Failed to load index, starting fresh:', err);
-    }
-    return new Map();
+    return loadIndexFile(INDEX_FILE);
   }
 
   private saveIndex(): void {

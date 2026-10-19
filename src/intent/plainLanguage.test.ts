@@ -108,7 +108,7 @@ const approval = (over: Partial<NewApproval>) => createApproval({
 });
 const WETH = "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14";
 
-test("telegram / phone page: every approval text says 'your account' and avoids jargon", () => {
+test("telegram / phone page: every approval text says 'your account' and avoids jargon", async () => {
   const list: NewApproval["intentType"][] = ["swap", "add_liquidity", "remove_liquidity"];
   const executions: Record<string, Record<string, unknown>> = {
     swap: { quoteData: { tokenIn: USDC_SEPOLIA, tokenOut: "0x0000000000000000000000000000000000000000", amount: "10000000", expectedOut: 0.004 } },
@@ -116,25 +116,25 @@ test("telegram / phone page: every approval text says 'your account' and avoids 
     remove_liquidity: { lpRemoveData: { tokenId: "12", percent: 50, token0: USDC_SEPOLIA, token1: WETH, fee: 3000 } },
   };
   for (const t of list) {
-    const a = approval({ intentType: t, execution: executions[t] });
+    const a = await approval({ intentType: t, execution: executions[t] });
     for (const phonePasskey of [false, true]) clean(`${t} message`, describeApproval(a, { phonePasskey }));
     const r = reviewOf(a);
     clean(`${t} review`, [r.title, r.why, r.network, ...r.details.flatMap((d) => [d.label, d.value])].join(" | "));
     assert.match(r.details.map((d) => d.value).join(" "), /your account/);
   }
-  clean("undecodable", describeApproval(approval({ execution: { junk: 1 } })));
-  assert.match(describeApproval(approval({})), /from your account/);
+  clean("undecodable", describeApproval(await approval({ execution: { junk: 1 } })));
+  assert.match(describeApproval(await approval({})), /from your account/);
 });
 
-test("telegram: the reasons for asking read as sentences a newcomer understands", () => {
-  const why = reviewOf(approval({})).why;
+test("telegram: the reasons for asking read as sentences a newcomer understands", async () => {
+  const why = reviewOf(await approval({})).why;
   assert.match(why, /daily limit for automatic actions/);
   assert.match(why, /bigger than you usually move/);
   clean("why", why);
 });
 
-test("telegram: outcome lines link to a receipt, not 'Etherscan'", () => {
-  const done = approval({});
+test("telegram: outcome lines link to a receipt, not 'Etherscan'", async () => {
+  const done = await approval({});
   done.status = "executed";
   done.result = { txHash: "0xabc", explorerUrl: "https://sepolia.etherscan.io/tx/0xabc" };
   const text = describeOutcome(done);
@@ -177,7 +177,7 @@ test("chat: a verdict we don't know never reads as 'done'", () => {
 });
 
 test("chat: every rule the policy can trigger has a plain chip, never the raw slug", () => {
-  const slugs = ["daily-limit", "daily-count-velocity", "unverified-token", "unknown-recipient", "habit-anomaly", "unknown-intent", "malformed", "denylist"];
+  const slugs = ["daily-limit", "daily-count-velocity", "unverified-token", "unknown-recipient", "habit-anomaly", "unknown-intent", "malformed", "denylist", "pressure-wording", "unplanned-address", "pressure-refused"];
   for (const slug of slugs) {
     const label: string = ui.ruleLabel(slug);
     assert.notEqual(label, slug);

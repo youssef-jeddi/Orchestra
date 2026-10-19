@@ -1,13 +1,13 @@
 import { safeErr } from "../../utils/redact";
+import { UserFacingError } from "../../utils/userFacing";
 import Safe from '@safe-global/protocol-kit';
 import { ethers } from 'ethers';
 import { PERMIT2, UNIVERSAL_ROUTER } from '../uniswap/types';
-
-const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
+import { makeSepoliaProvider, sepoliaRpcUrl } from '../../utils/rpc';
 
 export async function initSafe(safeAddress: string, signerPrivateKey: string): Promise<InstanceType<typeof Safe>> {
   return Safe.init({
-    provider: SEPOLIA_RPC,
+    provider: sepoliaRpcUrl(),
     signer: signerPrivateKey,
     safeAddress,
   });
@@ -70,7 +70,7 @@ export async function safeGasLimit(estimate: () => Promise<bigint>, fallbackGasL
       // approval card and Telegram).
       const reason = safeRevertReason(err);
       console.error(`[safe] estimate reverted${reason ? ` (${reason})` : ""} — transaction not sent`);
-      throw new Error(WOULD_FAIL_TEXT);
+      throw new UserFacingError(WOULD_FAIL_TEXT);
     }
     console.warn(`[safe] couldn't estimate gas (${safeErr(err)}); using ${fallbackGasLimit ?? "the SDK's default"}`);
     return fallbackGasLimit;
@@ -102,7 +102,7 @@ export async function executeBatchViaSafe(
   const tx = await safe.createTransaction({ transactions });
   const signedTx = await safe.signTransaction(tx);
 
-  const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC);
+  const provider = makeSepoliaProvider();
   const from = new ethers.Wallet(signerPrivateKey).address;
   const data = await safe.getEncodedTransaction(signedTx);
   // The Safe pays any value from its own balance, so the outer call carries none.
@@ -115,7 +115,7 @@ export async function executeBatchViaSafe(
   if (receipt && Number(receipt.status) === 0) {
     // Shown to the user (chat error, approval card, Telegram): plain words; the technical detail stays in the log.
     console.error(`[safe] transaction reverted on-chain (GS013, the inner call failed): ${hash}`);
-    throw new Error(`This didn't go through, so your funds were not moved. You can see what happened here: https://sepolia.etherscan.io/tx/${hash}`);
+    throw new UserFacingError(`This didn't go through, so your funds were not moved. You can see what happened here: https://sepolia.etherscan.io/tx/${hash}`);
   }
   return hash;
 }
@@ -134,7 +134,7 @@ export async function getApprovalTxsForSwap(
   amount: bigint,
   routerAddress: string
 ): Promise<Array<{ to: string; value: string; data: string }>> {
-  const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC);
+  const provider = makeSepoliaProvider();
   const txs: Array<{ to: string; value: string; data: string }> = [];
 
   // Step 1: Check ERC20 → Permit2 allowance

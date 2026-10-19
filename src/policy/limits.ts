@@ -108,8 +108,13 @@ export function classifyChange(storedPolicy: Record<string, unknown>, change: Li
   return "tightening";
 }
 
-/** The wallet's learned usual amount, read the way the pipeline reads it. */
-async function learnedTypical(wallet: string): Promise<number | null> {
+/**
+ * The wallet's learned usual amount, read the way the pipeline reads it. Only a change to the usual
+ * amount depends on it, so the others don't read the history (lowering a limit keeps working
+ * while the history can't be read).
+ */
+async function learnedTypical(wallet: string, change: LimitChange): Promise<number | null> {
+  if (!("typicalMaxUsd" in change.set)) return null;
   return computeHabitProfile(await getRecentActivity(wallet)).typicalMaxUsd;
 }
 
@@ -165,16 +170,25 @@ function limitTypedData(wallet: string, nonce: string, expiresAt: string, c: Lim
   };
 }
 
+export interface ChangeOptions {
+  /**
+   * The owner has just sent (and the chain confirmed) a transaction that carries this exact change,
+   * which takes the place of the wallet signature for a wallet with no passkey. A wallet with a
+   * passkey still needs its passkey; an email wallet without one still can't raise.
+   */
+  ownerTx?: boolean;
+}
+
 export type Confirmation =
   | { required: false }
   | { required: true; method: "passkey"; nonce: string; options: unknown }
   | { required: true; method: "wallet"; nonce: string; typedData: unknown };
 
 /** Whether this change needs proof, and if so the challenge to answer (passkey options or typed data to sign). */
-export async function requestConfirmation(wallet: string, body: unknown, rp: RelyingParty, now = Date.now()): Promise<Confirmation> {
+export async function requestConfirmation(wallet: string, body: unknown, rp: RelyingParty, now = Date.now(), opts: ChangeOptions = {}): Promise<Confirmation> {
   const change = parseChange(body);
   const stored = (await readUserProfile(wallet)).policy ?? {};
-  if (classifyChange(stored, change, await learnedTypical(wallet)) === "tightening") return { required: false };
+  if (classifyChange(stored, change, await learnedTypical(wallet, change)) === "tightening") return { required: false };
   sweep(now);
   const w = wallet.toLowerCase();
   const nonce = crypto.randomBytes(16).toString("base64url");
@@ -187,12 +201,28 @@ export async function requestConfirmation(wallet: string, body: unknown, rp: Rel
     return { required: true, method: "passkey", nonce, options };
   }
   if (await isEmailWallet(w)) throw new LimitsError(403, "Add a passkey first to raise your limits.", "passkey_required");
+  if (opts.ownerTx) return { required: false }; // the owner's own on-chain transaction is the wallet's proof
   const typedData = limitTypedData(w, nonce, new Date(expires).toISOString(), change);
   pending.set(nonce, { wallet: w, key: changeKey(change), method: "wallet", typedData, expires });
   return {
     required: true, method: "wallet", nonce,
     typedData: { ...typedData, types: { EIP712Domain: [{ name: "name", type: "string" }, { name: "version", type: "string" }, { name: "chainId", type: "uint256" }], ...typedData.types } },
   };
+}
+
+/**
+ * What raising this limit takes when the owner has just signed an on-chain transaction for it:
+ * "passkey" if the wallet has one, nothing more otherwise. An email wallet with no passkey can't
+ * raise (the same rule as POST /policy), so it is told before it spends gas on the transaction.
+ */
+export async function proofToRaise(wallet: string, body: unknown): Promise<"none" | "passkey"> {
+  const change = parseChange(body);
+  const stored = (await readUserProfile(wallet)).policy ?? {};
+  if (classifyChange(stored, change, await learnedTypical(wallet, change)) === "tightening") return "none";
+  const w = wallet.toLowerCase();
+  if (await hasAnyPasskey(w)) return "passkey";
+  if (await isEmailWallet(w)) throw new LimitsError(403, "Add a passkey first to raise your limits.", "passkey_required");
+  return "none";
 }
 
 function needProof(method: "passkey" | "wallet"): LimitsError {
@@ -252,6 +282,15 @@ export async function readLimits(wallet: string): Promise<LimitsView> {
   return { policy, knownRecipients: recipientsOf(p) };
 }
 
+/** The wallet's daily limit in dollars (the default if none is saved), or null when its profile can't be read. */
+export async function dailyLimitFor(wallet: string): Promise<number | null> {
+  try {
+    return resolveDailyLimit((await readLimits(wallet)).policy.dailyLimitUsd);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Apply a change. Tightening needs only the session; loosening needs `body.confirmation`
  * (see requestConfirmation). `notify` tells the user on Telegram about a loosening and never
@@ -263,12 +302,18 @@ export async function applyChange(
   rp: RelyingParty,
   notify?: (wallet: string, text: string) => Promise<void>,
   now = Date.now(),
+  opts: ChangeOptions & { beforeSave?: () => Promise<void> } = {},
 ): Promise<LimitsView & { loosened: boolean }> {
   const change = parseChange(body);
   const before = (await readUserProfile(wallet)).policy ?? {};
-  const learned = await learnedTypical(wallet);
+  const learned = await learnedTypical(wallet, change);
   const loosening = classifyChange(before, change, learned) === "loosening";
-  if (loosening) await verifyConfirmation(wallet, change, body?.confirmation, rp, now);
+  if (loosening) {
+    const w = wallet.toLowerCase();
+    const ownerTxIsProof = opts.ownerTx && !(await hasAnyPasskey(w)) && !(await isEmailWallet(w));
+    if (!ownerTxIsProof) await verifyConfirmation(wallet, change, body?.confirmation, rp, now);
+  }
+  await opts.beforeSave?.(); // a side effect that must succeed first (the registry write); if it throws, nothing is saved
 
   await updateUserProfile(wallet, (p) => {
     const policy: Record<string, unknown> = { ...(p.policy ?? {}) };

@@ -2,7 +2,8 @@
 // Run with `npm run test:safe`.
 
 import assert from "node:assert/strict";
-import { predictedSafeConfig } from "./deploy";
+import { ethers } from "ethers";
+import { predictedSafeConfig, SAFE_MODULE_SETUP } from "./deploy";
 // @ts-expect-error plain JS helper shared with the frontend, no type declarations
 import { safeStatusFor, shouldPoll, pollAction, onboardingErrorMessage, shortAddress } from "../../../frontend/src/lib/onboarding.js";
 import { OnboardingLimiter, OnboardingQueue, OnboardingError, type OnboardingLimits } from "./onboarding";
@@ -18,7 +19,7 @@ const COMPLETION = { globalPerWindow: 10, perIpPerWindow: 2, windowMs: 3_600_000
 const LIMITS = { globalPerWindow: 4, perIpPerWindow: 2, windowMs: 3_600_000 };
 
 type Deps = ConstructorParameters<typeof OnboardingQueue>[0];
-const noSteps = (): SetupSteps => ({ deploy: false, module: false, delegate: false, allowances: false, register: false, record: false });
+const noSteps = (): SetupSteps => ({ deploy: false, register: false, record: false });
 
 /** A fake chain: per wallet, which steps are done. Only the "deploy" step waits for release(). */
 function setup(over: Partial<Deps> = {}, limits = LIMITS, opts: { failAt?: SetupStep; completion?: OnboardingLimits } = {}) {
@@ -47,10 +48,43 @@ function setup(over: Partial<Deps> = {}, limits = LIMITS, opts: { failAt?: Setup
   return { queue, chain, complete, stepsOf, log, release, settle, tick: (ms: number) => { clock += ms; } };
 }
 
+/** Run `fn` with SPENDING_MODULE_ADDRESS set to `value` (or unset), restoring it after. */
+function withModuleEnv<T>(value: string | undefined, fn: () => T): T {
+  const before = process.env.SPENDING_MODULE_ADDRESS;
+  if (value === undefined) delete process.env.SPENDING_MODULE_ADDRESS; else process.env.SPENDING_MODULE_ADDRESS = value;
+  try { return fn(); } finally {
+    if (before === undefined) delete process.env.SPENDING_MODULE_ADDRESS; else process.env.SPENDING_MODULE_ADDRESS = before;
+  }
+}
+
 test("the predicted-address config is pinned: owners [agent, user], threshold 1, no salt", () => {
   // Changing any of this moves every user's account address. Do not "fix" this test.
-  assert.deepEqual(predictedSafeConfig(USER, AGENT), { safeAccountConfig: { owners: [AGENT, USER], threshold: 1 } });
-  assert.deepEqual(Object.keys(predictedSafeConfig(USER, AGENT)), ["safeAccountConfig"]); // no saltNonce / safeDeploymentConfig
+  withModuleEnv(undefined, () => {
+    assert.deepEqual(predictedSafeConfig(USER, AGENT), { safeAccountConfig: { owners: [AGENT, USER], threshold: 1 } });
+    assert.deepEqual(Object.keys(predictedSafeConfig(USER, AGENT)), ["safeAccountConfig"]); // no saltNonce / safeDeploymentConfig
+  });
+});
+
+test("with SPENDING_MODULE_ADDRESS set the config is pinned too: owner only, threshold 1, the module enabled at setup", () => {
+  const MODULE = "0x00000000000000000000000000000000000000C3";
+  const config = withModuleEnv(` ${MODULE.toLowerCase()} `, () => predictedSafeConfig(USER, AGENT));
+  const iface = new ethers.Interface(["function enableModules(address[] modules)"]);
+  assert.deepEqual(config, {
+    safeAccountConfig: {
+      owners: [USER], // the agent is not an owner: it can only act through the module
+      threshold: 1,
+      to: SAFE_MODULE_SETUP,
+      data: iface.encodeFunctionData("enableModules", [[ethers.getAddress(MODULE.toLowerCase())]]),
+    },
+  });
+  assert.equal(SAFE_MODULE_SETUP, "0x2dd68b007B46fBe91B9A7c3EDa5A7a1063cB5b47");
+  assert.ok(!config.safeAccountConfig.owners.includes(AGENT));
+});
+
+test("a malformed SPENDING_MODULE_ADDRESS counts as unset: the owner config, never a half-configured one", () => {
+  for (const bad of ["", "   ", "0x123", "not-an-address"]) {
+    assert.deepEqual(withModuleEnv(bad, () => predictedSafeConfig(USER, AGENT)), { safeAccountConfig: { owners: [AGENT, USER], threshold: 1 } });
+  }
 });
 
 test("concurrent starts for one wallet share a single deployment", async () => {
@@ -125,32 +159,31 @@ test("a failed deployment is reported plainly and can be retried", async () => {
 });
 
 test("failure after the deploy leaves the account NOT ready, and says what is missing", async () => {
-  const { queue, release, settle, stepsOf } = setup({}, LIMITS, { failAt: "delegate" });
+  const { queue, release, settle, stepsOf } = setup({}, LIMITS, { failAt: "register" });
   await queue.start(USER, "1.1.1.1");
   await release();
   await settle();
   const st = await queue.status(USER);
   assert.equal(st.status, "failed");
-  assert.deepEqual(st.remaining, ["delegate", "allowances", "register", "record"]);
+  assert.deepEqual(st.remaining, ["register", "record"]);
   assert.equal(stepsOf(USER).deploy, true);
-  assert.equal(stepsOf(USER).module, true);
   assert.equal(stepsOf(USER).record, false);
 });
 
 test("a retry runs only the missing steps: no second deploy, same address", async () => {
   const { queue, log, chain, release, settle, stepsOf } = setup();
   const first = await queue.start(USER, "1.1.1.1");
-  chain.set(USER.toLowerCase(), { ...allStepsDone(), delegate: false, allowances: false, register: false, record: false }); // as if it stopped after "module"
+  chain.set(USER.toLowerCase(), { ...allStepsDone(), register: false, record: false }); // as if it stopped after "deploy"
   await release();
   await settle();
   log.length = 0;
-  chain.set(USER.toLowerCase(), { ...allStepsDone(), allowances: false, register: false, record: false });
+  chain.set(USER.toLowerCase(), { ...allStepsDone(), register: false, record: false });
   const retry = await queue.start(USER, "1.1.1.1");
   assert.equal(retry.status, "deploying");
   assert.equal(retry.resumed, true);
   assert.equal(retry.safeAddress, first.safeAddress);
   await settle();
-  assert.deepEqual(log, [`allowances ${USER}`, `register ${USER}`, `record ${USER}`]);
+  assert.deepEqual(log, [`register ${USER}`, `record ${USER}`]);
   assert.equal((await queue.status(USER)).status, "ready");
   assert.equal(Object.values(stepsOf(USER)).every(Boolean), true);
 });
@@ -165,14 +198,14 @@ test("a retry after a timed-out deploy (the code is already there) sends no seco
   await queue.start(USER, "1.1.1.1");
   await settle();
   assert.equal(log.some((l) => l.startsWith("deploy")), false);
-  assert.deepEqual(log.map((l) => l.split(" ")[0]), ["module", "delegate", "allowances", "register", "record"]);
+  assert.deepEqual(log.map((l) => l.split(" ")[0]), ["register", "record"]);
 });
 
 test("finishing an account does not use the deployment budget", async () => {
   const { queue, chain, settle, release } = setup({}, { ...LIMITS, perIpPerWindow: 1 });
   await queue.start("0x01", "9.9.9.9"); // takes the IP's only deployment slot
   await assert.rejects(queue.start("0x02", "9.9.9.9"), (e: any) => e.status === 429);
-  chain.set(USER.toLowerCase(), { ...allStepsDone(), allowances: false, register: false, record: false });
+  chain.set(USER.toLowerCase(), { ...allStepsDone(), register: false, record: false });
   const r = await queue.start(USER, "9.9.9.9"); // same IP, but only finishing
   assert.equal(r.resumed, true);
   await release(); // the first wallet's deployment ends; the queue then finishes this account
@@ -197,11 +230,11 @@ test("attack: asking over and over to finish one account is capped per account, 
 });
 
 test("deriveSteps: the chain decides; nothing after deploy counts without code", () => {
-  const all = { hasCode: true, moduleEnabled: true, agentIsDelegate: true, allowancesMissing: 0, policyConfigured: true, registered: true, recorded: true };
+  const all = { hasCode: true, policyConfigured: true, registered: true, recorded: true };
   assert.deepEqual(remainingSteps(deriveSteps(all)), []);
   assert.deepEqual(remainingSteps(deriveSteps({ ...all, hasCode: false })), [...SETUP_STEPS], "local flags can't make an undeployed account ready");
-  assert.deepEqual(remainingSteps(deriveSteps({ ...all, moduleEnabled: false, allowancesMissing: 2 })), ["module", "allowances"]);
-  assert.deepEqual(remainingSteps(deriveSteps({ ...all, agentIsDelegate: false, registered: false, recorded: false })), ["delegate", "register", "record"]);
+  assert.deepEqual([...SETUP_STEPS], ["deploy", "register", "record"], "no AllowanceModule step: the server's daily limit is the only limit");
+  assert.deepEqual(remainingSteps(deriveSteps({ ...all, registered: false, recorded: false })), ["register", "record"]);
   assert.deepEqual(remainingSteps(deriveSteps({ ...all, policyConfigured: false, registered: false })), [], "nothing to register without a policy contract");
 });
 

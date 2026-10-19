@@ -44,6 +44,7 @@ export async function bridgeFetch(path, options = {}) {
     const err = new Error(data.error || `HTTP ${res.status}`);
     err.status = res.status;
     err.code = data.code; // e.g. 'session_required', so callers can sign in and retry
+    err.data = data; // the whole answer, e.g. the passkey challenge of a 'confirmation_required'
     throw err;
   }
   return data;
@@ -126,10 +127,11 @@ export async function prepareLimitUpdate(newLimitUSD, ledgerAddress) {
   });
 }
 
-export async function finalizeLimitUpdate(newLimitUSD, ledgerAddress, txHash) {
+/** `confirmation` ({ nonce, response }) answers the passkey challenge of a raise; see finishLimitUpdate. */
+export async function finalizeLimitUpdate(newLimitUSD, ledgerAddress, txHash, confirmation) {
   return bridgeFetch('/finalize-limit-update', {
     method: 'POST',
-    body: JSON.stringify({ newLimitUSD, ledgerAddress, txHash }),
+    body: JSON.stringify({ newLimitUSD, ledgerAddress, txHash, ...(confirmation ? { confirmation } : {}) }),
   });
 }
 
@@ -221,6 +223,14 @@ export async function passkeyApprove(walletAddress, approvalId, response) {
   return bridgeFetch('/passkey/approve', {
     method: 'POST', body: JSON.stringify({ walletAddress, approvalId, response }),
   });
+}
+
+/**
+ * Send the owner's signature for a request held past the on-chain daily ceiling. Only the id and
+ * the signature go: the server relays the transaction it holds, never one from here.
+ */
+export async function submitOwnerSignature(id, signature) {
+  return bridgeFetch(`/owner-sign/${encodeURIComponent(id)}/submit`, { method: 'POST', body: JSON.stringify({ signature }) });
 }
 
 // ── Server-held approvals ──

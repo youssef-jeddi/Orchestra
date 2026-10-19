@@ -39,10 +39,15 @@ const base = (over: Partial<NewApproval> = {}): NewApproval => ({
 });
 
 let passed = 0;
-const tests: [string, () => void][] = [];
-const test = (name: string, fn: () => void) => tests.push([name, fn]);
-const code = (fn: () => void) => {
+const tests: [string, () => void | Promise<void>][] = [];
+const test = (name: string, fn: () => void | Promise<void>) => tests.push([name, fn]);
+const code = (fn: () => unknown) => {
   try { fn(); } catch (e) { return e instanceof ApprovalError ? e.status : -1; }
+  return 0;
+};
+/** Like `code`, for the async calls (claim, reject). */
+const acode = async (p: Promise<unknown>) => {
+  try { await p; } catch (e) { return e instanceof ApprovalError ? e.status : -1; }
   return 0;
 };
 
@@ -52,59 +57,65 @@ test("canonicalJson: key order doesn't change the hash", () => {
   assert.notEqual(hashExecution({ x: 1 }), hashExecution({ x: 2 }));
 });
 
-test("create: pending, lowercased wallet, hash of the execution payload", () => {
-  const a = createApproval(base());
+test("create: pending, lowercased wallet, hash of the execution payload", async () => {
+  const a = await createApproval(base());
   assert.equal(a.status, "pending");
   assert.equal(a.wallet, WALLET.toLowerCase());
   assert.equal(a.hash, hashExecution(base().execution));
   assert.equal(getApproval(a.id), a);
 });
 
-test("requirePending: unknown id / other wallet / wrong status", () => {
-  const a = createApproval(base());
+test("requirePending: unknown id / other wallet / wrong status", async () => {
+  const a = await createApproval(base());
   assert.equal(code(() => requirePending("nope", WALLET)), 404);
   assert.equal(code(() => requirePending(a.id, OTHER)), 403);
   assert.equal(code(() => requirePending(a.id, WALLET.toUpperCase().replace("0X", "0x"))), 0); // case-insensitive
-  reject(a.id, WALLET);
+  await reject(a.id, WALLET);
   assert.equal(code(() => requirePending(a.id, WALLET)), 409);
 });
 
-test("claim: only one approver wins; the challenge is cleared", () => {
-  const a = createApproval(base());
+test("claim: only one approver wins; the challenge is cleared", async () => {
+  const a = await createApproval(base());
   a.challenge = "abc";
-  claim(a.id, WALLET);
+  await claim(a.id, WALLET);
   assert.equal(a.status, "executing");
   assert.equal(a.challenge, undefined);
-  assert.equal(code(() => claim(a.id, WALLET)), 409);
+  assert.equal(await acode(claim(a.id, WALLET)), 409);
 });
 
-test("expiry: a lapsed approval can't be claimed", () => {
+test("claim: two approvers at the same moment — exactly one wins", async () => {
+  const a = await createApproval(base());
+  const codes = await Promise.all([acode(claim(a.id, WALLET)), acode(claim(a.id, WALLET))]);
+  assert.deepEqual(codes.sort(), [0, 409]);
+});
+
+test("expiry: a lapsed approval can't be claimed", async () => {
   const t0 = 1_000_000;
-  const a = createApproval(base(), t0);
-  assert.equal(code(() => claim(a.id, WALLET, t0 + APPROVAL_TTL_MS + 1)), 409);
+  const a = await createApproval(base(), t0);
+  assert.equal(await acode(claim(a.id, WALLET, t0 + APPROVAL_TTL_MS + 1)), 409);
   assert.equal(getApproval(a.id)!.status, "expired");
 });
 
-test("challengeBytes: 32 bytes, fresh each time", () => {
-  const a = createApproval(base());
+test("challengeBytes: 32 bytes, fresh each time", async () => {
+  const a = await createApproval(base());
   const c1 = challengeBytes(a);
   const c2 = challengeBytes(a);
   assert.equal(c1.length, 32);
   assert.notDeepEqual(c1, c2);
 });
 
-test("settle + view: result exposed, execution payload is not", () => {
-  const a = createApproval(base());
-  claim(a.id, WALLET);
-  settle(a, { result: { txHash: "0xabc", explorerUrl: "https://x" } });
+test("settle + view: result exposed, execution payload is not", async () => {
+  const a = await createApproval(base());
+  await claim(a.id, WALLET);
+  await settle(a, { result: { txHash: "0xabc", explorerUrl: "https://x" } });
   const v = approvalView(a) as any;
   assert.equal(v.status, "executed");
   assert.equal(v.txHash, "0xabc");
   assert.equal(v.execution, undefined);
 
-  const b = createApproval(base());
-  claim(b.id, WALLET);
-  settle(b, { error: "reverted" });
+  const b = await createApproval(base());
+  await claim(b.id, WALLET);
+  await settle(b, { error: "reverted" });
   assert.equal(b.status, "failed");
   assert.equal((approvalView(b) as any).error, "reverted");
 });
@@ -113,8 +124,8 @@ test("settle + view: result exposed, execution payload is not", () => {
 const VITALIK = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045";
 const transfer = new ethers.Interface(["function transfer(address to, uint256 amount)"]);
 
-test("describe: ERC-20 send is decoded from the calldata, ignoring the summary", () => {
-  const a = createApproval(base({
+test("describe: ERC-20 send is decoded from the calldata, ignoring the summary", async () => {
+  const a = await createApproval(base({
     summary: "Send 5 USDC to alice.eth", // a lying summary must not reach the phone
     execution: { sendData: { unsignedTx: { to: USDC_SEPOLIA, value: "0", data: transfer.encodeFunctionData("transfer", [VITALIK, 150_000_000n]) } } },
   }));
@@ -125,15 +136,15 @@ test("describe: ERC-20 send is decoded from the calldata, ignoring the summary",
   assert.doesNotMatch(html, /alice/);
 });
 
-test("describe: native ETH send shows the value and full recipient", () => {
-  const a = createApproval(base({ execution: { sendData: { unsignedTx: { to: VITALIK.toLowerCase(), value: "500000000000000000", data: "0x" } } } }));
+test("describe: native ETH send shows the value and full recipient", async () => {
+  const a = await createApproval(base({ execution: { sendData: { unsignedTx: { to: VITALIK.toLowerCase(), value: "500000000000000000", data: "0x" } } } }));
   const html = describeApproval(a);
   assert.match(html, /<b>Send 0\.5 ETH<\/b>/);
   assert.match(html, new RegExp(VITALIK)); // checksummed
 });
 
-test("describe: swap shows exact input, expected output and the market guard", () => {
-  const a = createApproval(base({
+test("describe: swap shows exact input, expected output and the market guard", async () => {
+  const a = await createApproval(base({
     intentType: "swap",
     execution: { quoteData: { tokenIn: USDC_SEPOLIA, tokenOut: "0x0000000000000000000000000000000000000000", amount: "10000000", expectedOut: 0.00372 } },
   }));
@@ -143,31 +154,32 @@ test("describe: swap shows exact input, expected output and the market guard", (
   assert.match(html, /≈ 0\.00372 ETH \(I won't go ahead if that's more than 5% below the market price\)/);
 });
 
-test("describe: an undecodable payload is flagged, never summarised", () => {
-  const a = createApproval(base({ execution: { sendData: { unsignedTx: { to: USDC_SEPOLIA, value: "0", data: "0xdeadbeef" } } } }));
+test("describe: an undecodable payload is flagged, never summarised", async () => {
+  const a = await createApproval(base({ execution: { sendData: { unsignedTx: { to: USDC_SEPOLIA, value: "0", data: "0xdeadbeef" } } } }));
   const html = describeApproval(a);
   assert.match(html, /couldn't work out what this would do/);
   assert.doesNotMatch(html, /Send 150/);
 });
 
-test("describe: HTML in the reason is escaped", () => {
-  const a = createApproval(base({ triggered: [], reason: "<b>bad</b> & worse" }));
+test("describe: HTML in the reason is escaped", async () => {
+  const a = await createApproval(base({ triggered: [], reason: "<b>bad</b> & worse" }));
   assert.match(describeApproval(a), /&lt;b&gt;bad&lt;\/b&gt; &amp; worse/);
 });
 
 // ── Phone review links ──
-test("review link: only the exact secret opens it", () => {
-  const a = createApproval(base());
+test("review link: only the exact secret opens it; only its hash is kept", async () => {
+  const a = await createApproval(base());
   assert.equal(code(() => approvalForReview(a.id, "anything")), 404); // no token issued yet
   const t = issueReviewToken(a);
+  assert.ok(a.reviewTokenHash && !JSON.stringify(a).includes(t), "the plain token is not on the record");
   assert.equal(approvalForReview(a.id, t), a);
   assert.equal(code(() => approvalForReview(a.id, t.slice(0, -1) + (t.endsWith("A") ? "B" : "A"))), 404);
   assert.equal(code(() => approvalForReview(a.id, undefined)), 404);
   assert.equal(code(() => approvalForReview("unknown", t)), 404);
 });
 
-test("review + phone hint: structured review matches the message; the chat says to use the passkey", () => {
-  const a = createApproval(base({
+test("review + phone hint: structured review matches the message; the chat says to use the passkey", async () => {
+  const a = await createApproval(base({
     execution: { sendData: { unsignedTx: { to: USDC_SEPOLIA, value: "0", data: transfer.encodeFunctionData("transfer", [VITALIK, 150_000_000n]) } } },
   }));
   const r = reviewOf(a);
@@ -179,8 +191,8 @@ test("review + phone hint: structured review matches the message; the chat says 
   assert.doesNotMatch(describeApproval(a), /passkey/);
 });
 
-test("describe: add liquidity is decoded from lpData — max deposit, expected use, full range, to your account", () => {
-  const a = createApproval(base({
+test("describe: add liquidity is decoded from lpData — max deposit, expected use, full range, to your account", async () => {
+  const a = await createApproval(base({
     intentType: "add_liquidity",
     execution: { lpData: {
       tokenA: "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14", symbolA: "ETH", amountA: "10000000000000000",
@@ -197,27 +209,32 @@ test("describe: add liquidity is decoded from lpData — max deposit, expected u
     "all prices (I won't go ahead if the pool's price is far from the market price)",
     "your account",
   ]);
-  const unknown = createApproval(base({ intentType: "add_liquidity", execution: { lpData: { tokenA: "0x0000000000000000000000000000000000000001", tokenB: USDC_SEPOLIA, feeTier: 3000 } } }));
+  const unknown = await createApproval(base({ intentType: "add_liquidity", execution: { lpData: { tokenA: "0x0000000000000000000000000000000000000001", tokenB: USDC_SEPOLIA, feeTier: 3000 } } }));
   assert.equal(reviewOf(unknown).decoded, false);
 });
 
-test("describe: remove liquidity is decoded from lpRemoveData — position, share, back to your account", () => {
-  const a = createApproval(base({
+test("describe: remove liquidity is decoded from lpRemoveData — position, share, back to your account", async () => {
+  const a = await createApproval(base({
     intentType: "remove_liquidity",
     execution: { lpRemoveData: { tokenId: "1234", percent: 50, token0: USDC_SEPOLIA, token1: "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14", symbol0: "USDC", symbol1: "WETH", fee: 3000 } },
   }));
   const r = reviewOf(a);
   assert.equal(r.title, "Take out liquidity: USDC/ETH (0.3% pool)");
   assert.deepEqual(r.details.map((d) => d.value), ["#1234", "50%", "USDC and ETH at today's price, plus the fees earned", "your account"]);
-  const bad = createApproval(base({ intentType: "remove_liquidity", execution: { lpRemoveData: { tokenId: "1234", percent: 150, token0: USDC_SEPOLIA, token1: USDC_SEPOLIA, fee: 3000 } } }));
+  const bad = await createApproval(base({ intentType: "remove_liquidity", execution: { lpRemoveData: { tokenId: "1234", percent: 150, token0: USDC_SEPOLIA, token1: USDC_SEPOLIA, fee: 3000 } } }));
   assert.equal(reviewOf(bad).decoded, false);
 });
 
-console.log("approvals");
-for (const [name, fn] of tests) {
-  _resetApprovals();
-  fn();
-  passed++;
-  console.log(`  ✓ ${name}`);
-}
-console.log(`\n${passed} passed`);
+(async () => {
+  console.log("approvals");
+  for (const [name, fn] of tests) {
+    _resetApprovals();
+    await fn();
+    passed++;
+    console.log(`  ✓ ${name}`);
+  }
+  console.log(`\n${passed} passed`);
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

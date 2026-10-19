@@ -12,6 +12,7 @@
 
 import { estimateUsd, resolveValuationSymbol } from "./prices";
 import { formatUsd } from "./money";
+import type { MessageSignals } from "./messageSignals";
 
 export type Verdict = "AUTO_EXECUTE" | "NEEDS_APPROVAL" | "BLOCKED" | "INFO";
 
@@ -40,6 +41,15 @@ export function detectIntentType(steps: any[]): IntentType {
 // ─── Daily limit resolution ───
 /** The highest daily limit a user can set (enforced when saving). */
 export const MAX_DAILY_LIMIT = 1000;
+
+/**
+ * A daily limit from an untrusted request as a whole number of dollars from 0 to MAX_DAILY_LIMIT,
+ * or null. Only a real number passes: no strings ("1e6"), NaN, decimals, negatives or missing
+ * values. Used wherever a limit also becomes an on-chain amount, which has to be whole dollars.
+ */
+export function parseWholeDollarLimit(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= MAX_DAILY_LIMIT ? value : null;
+}
 
 // A configured limit of 0 is honoured ("always ask me"); only a missing or invalid value
 // (not a number, negative, NaN) falls back to the default.
@@ -119,7 +129,15 @@ export interface DecisionInput {
   history?: ActivityRecord[];
   /** Injectable clock (ms) for deterministic velocity tests. Defaults to Date.now(). */
   now?: number;
+  /** Wording and addresses found in the user's raw message (never the message itself). */
+  signals?: MessageSignals;
+  /** The plan moves all or most of the funds (computed by code in the intent pipeline). */
+  movesAllFunds?: boolean;
 }
+
+/** Shown when pressure wording comes with moving everything or a new address: nothing is held or built. */
+export const REFUSAL =
+  "I won't do this one. Your message pushes me to skip my usual checks, and it would move all your money or send it somewhere new. If you really want to do this, ask again in your own words, without the rush, and I'll ask for your OK first.";
 
 /**
  * Per-user deterministic policy. Every field is optional — an absent field
@@ -232,6 +250,10 @@ function sendRecipient(steps: any[]): string | null {
  *        · unknown recipient       (profile.knownAddresses, send only, always on)
  *        · daily count velocity    (profile.maxAutoTxPerDay + history)
  *        · habit anomaly           (profile.typicalMaxUsd)
+ *        · pressure wording        (signals.pressure: the message pushes to skip checks or hurry)
+ *        · unplanned address       (signals.mentions: an address in the message the plan doesn't use)
+ *      then, pressure wording together with moving all or most of the funds, an unknown
+ *      recipient or an unplanned address → BLOCKED (refused outright, no approval is held)
  *   6. otherwise               → AUTO_EXECUTE
  */
 export function decide(input: DecisionInput): PolicyDecision {
@@ -304,6 +326,34 @@ export function decide(input: DecisionInput): PolicyDecision {
     }
   }
 
+  // 5g. Pressure wording ("pre-approved", "urgent", "system override"): only ever escalates,
+  // whatever the planner understood, so a persuasive message can't earn an auto-execution.
+  const signals = input.signals;
+  if (signals && signals.pressure.length > 0) {
+    escalations.push({
+      rule: "pressure-wording",
+      reason: "Your message asks me to skip my usual checks or to hurry, so I'm checking with you before anything moves.",
+      risk: 75,
+    });
+  }
+
+  // 5h. An address typed in the message that the plan doesn't use (e.g. a swap whose send the
+  // planner dropped). A 0x mention is fine as the send recipient or a known address; an ENS name
+  // is fine when it appears in the plan summary (resolve.ts puts the label there).
+  if (signals && signals.mentions.length > 0) {
+    const to = sendRecipient(steps)?.toLowerCase();
+    const known = new Set((profile?.knownAddresses ?? []).filter((a) => typeof a === "string").map((a) => a.toLowerCase()));
+    const summary = String(plan.summary).toLowerCase();
+    const unplanned = signals.mentions.some((m) => (m.startsWith("0x") ? m !== to && !known.has(m) : !summary.includes(m)));
+    if (unplanned) {
+      escalations.push({
+        rule: "unplanned-address",
+        reason: "Your message mentions an address that isn't part of what I'm about to do, so I'm checking with you first.",
+        risk: 70,
+      });
+    }
+  }
+
   if (profile) {
     // 5b. Token allow-list.
     if (profile.verifiedTokens && profile.verifiedTokens.length > 0) {
@@ -334,6 +384,21 @@ export function decide(input: DecisionInput): PolicyDecision {
         risk: 55,
       });
     }
+  }
+
+  // Pressure wording plus a drain-shaped or new-destination action is refused, not held for approval.
+  if (
+    signals && signals.pressure.length > 0 &&
+    (input.movesAllFunds || escalations.some((e) => e.rule === "unknown-recipient" || e.rule === "unplanned-address"))
+  ) {
+    return {
+      verdict: "BLOCKED",
+      riskScore: 95,
+      reason: REFUSAL,
+      requiresLedger: false,
+      triggered: ["pressure-refused", ...escalations.map((e) => e.rule)],
+      approvalMethod: "none",
+    };
   }
 
   // 6. Verdict.

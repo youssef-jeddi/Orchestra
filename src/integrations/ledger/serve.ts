@@ -2,6 +2,7 @@
 // Express + WS bridge. Serves the test UI and exposes POST /mock-trade (local dev only).
 
 import "dotenv/config";
+import "../../utils/faultGuard"; // exits if dev-only fault injection is set in production
 
 import express from "express";
 import http from "http";
@@ -18,29 +19,30 @@ import { executeSwap } from "../uniswap/execution";
 import { WETH_SEPOLIA, USDC_SEPOLIA, CHAIN_ID } from "../uniswap/types";
 import { write, read, append } from "../zero-g/storage";
 import { detectExistingSafe } from "../safe/detect";
-import { onboarding, storedSpendingLimit, isAccountReady } from "../safe/onboard";
+import { onboarding, isAccountReady } from "../safe/onboard";
 import { OnboardingError, ACCOUNT_NOT_READY_REASON } from "../safe/onboarding";
-import { setInitialSpendingLimits, updateSpendingLimit, buildLimitUpdateTx } from "../safe/spendingLimit";
-import { getAgentAddress } from "../safe/agentWallet";
-import { limitTxProblem } from "../safe/verifyLimitTx";
+import { errorResponse, isUserFacing, executionErrorMessage } from "./errors";
+import { UserFacingError, OverCapError } from "../../utils/userFacing";
+import { submitOwnerSignature, relayWithAgent } from "../safe/ownerSign";
 import { readPositions, type Position } from "../uniswap/liquidity";
 import { tokenByAddress } from "../../intent/tokens";
 import { executePlan } from "../../executor";
 import {
   computeHabitProfile,
   refreshPrices,
+  pricesUsable,
   getPrices,
   type PolicyProfile,
-  type ActivityRecord,
 } from "../../policy";
-import { getPolicyProfile, getRecentActivity, recordActivity, readUserProfile, writeUserProfile } from "../../policy/store";
-import { readLimits, requestConfirmation, applyChange, LimitsError } from "../../policy/limits";
+import { getRecentActivity, recordActivity, readPolicyInputs } from "../../policy/store";
+import { readLimits, requestConfirmation, applyChange, dailyLimitFor } from "../../policy/limits";
 import { loginRequest, login, issueToken, requireSession, sessionWallet, verifyToken, AuthError } from "../../auth";
 import { verifyPrivyUser, importPrivyPasskeys, noteEmailSignIn, verifyEmailForPasskey } from "../../auth/privy";
 import { getAdapter, type Balances } from "../../executor/adapters";
 import { interpretIntent, assessAction } from "../../intent/pipeline";
 import { sanitizeHistory } from "../../intent/planner";
-import { INTENT_FALLBACK_ERROR } from "../../intent/messages";
+import { INTENT_FALLBACK_ERROR, LIMITS_UNREADABLE_REASON, PRICE_UNAVAILABLE_REASON } from "../../intent/messages";
+import { injectFault } from "../../utils/faultInject";
 import { shortAddr, safeErr, requestId, logUserMessage, intentSummaryLine, intentOutcome, type IntentLogFields } from "../../utils/redact";
 import { fetchBalances, resolveEnsName } from "../../intent/context";
 import { describeAddresses, describeBalances } from "../../intent/replies";
@@ -57,6 +59,8 @@ import {
   reject,
   issueReviewToken,
   approvalForReview,
+  persistApproval,
+  loadApprovals,
   ApprovalError,
   type PendingApproval,
 } from "../../approvals";
@@ -235,8 +239,7 @@ app.post("/quote", requireSession, async (req, res) => {
       approvalTx,
     });
   } catch (err: any) {
-    console.error("[serve] /quote error:", safeErr(err));
-    res.status(500).json({ error: err.message });
+    sendError(res, err);
   }
 });
 
@@ -277,8 +280,7 @@ app.post("/swap", requireSession, async (req, res) => {
       unsignedTx: swapTx, // { to, data, value, gasLimit, ... }
     });
   } catch (err: any) {
-    console.error("[serve] /swap error:", safeErr(err));
-    res.status(500).json({ error: err.message });
+    sendError(res, err);
   }
 });
 
@@ -310,8 +312,7 @@ app.post("/broadcast", requireSession, async (req, res) => {
       explorerUrl: `https://sepolia.etherscan.io/tx/${txResponse.hash}`,
     });
   } catch (err: any) {
-    console.error("[serve] /broadcast error:", safeErr(err));
-    res.status(500).json({ error: err.message });
+    sendError(res, err); // an RPC rejection of the transaction is unexpected here: logged, plain sentence
   }
 });
 
@@ -334,8 +335,7 @@ app.get("/nonce/:address", requireSession, async (req, res) => {
       maxPriorityFeePerGas: maxPriority.toString(),
     });
   } catch (err: any) {
-    console.error("[serve] /nonce error:", safeErr(err));
-    res.status(500).json({ error: err.message });
+    sendError(res, err);
   }
 });
 
@@ -395,10 +395,9 @@ app.post("/intent", async (req, res) => {
     const balancesP: Promise<Balances | null> = wallet
       ? safeP.then((safe) => fetchBalances(provider, safe || wallet))
       : Promise.resolve(null);
-    const profileP = withTimeout(getPolicyProfile(wallet), 2_000, {} as PolicyProfile);
-    const activityP: Promise<ActivityRecord[] | undefined> = wallet
-      ? withTimeout(getRecentActivity(wallet), 2_000, [] as ActivityRecord[])
-      : Promise.resolve(undefined);
+    // Never rejects; only awaited for a value-bearing action. An unreadable profile or history (or a
+    // timeout) is `ok: false`, not an empty one: the daily limit and total can't be checked then.
+    const inputsP = readPolicyInputs(wallet);
 
     // The wallet's own balance only matters for deposits into the Safe — fetch it on demand.
     let walletBalancesP: Promise<Balances | null> | null = null;
@@ -412,6 +411,14 @@ app.post("/intent", async (req, res) => {
         ? withTimeout(readPositions(provider, safe, tokenByAddress).catch(() => null), 10_000, null)
         : ([] as Position[]))),
       resolveEns: resolveEnsName,
+      valueGate: async () => {
+        if (!(await inputsP).ok) return LIMITS_UNREADABLE_REASON;
+        if (!pricesUsable()) {
+          await refreshPrices().catch(() => {});
+          if (!pricesUsable()) return PRICE_UNAVAILABLE_REASON;
+        }
+        return null;
+      },
     });
     const timing = () => ({ totalMs: Date.now() - started, plannerMs: planner.latencyMs, model: planner.model });
     Object.assign(li, { kind: outcome.kind, plannerMs: planner.latencyMs, model: planner.model });
@@ -467,6 +474,22 @@ app.post("/intent", async (req, res) => {
     const intentType = action.intentType;
     li.intentType = intentType;
 
+    // Nothing that spends runs unless the daily limit AND the day's total could be read: an
+    // unreadable profile must not mean the $100 default, an unreadable history must not mean $0 spent.
+    // (Asked before anything is built, auto-run or held for approval.)
+    const inputs = await inputsP;
+    if (!inputs.ok) {
+      console.log(`[intent ${rid}] ${intentType} held back: limits or activity unreadable`);
+      res.json({ status: "unsupported", intentType, reason: LIMITS_UNREADABLE_REASON, reasoning: LIMITS_UNREADABLE_REASON, timing: timing() });
+      return;
+    }
+    // Same for the price: without a fresh one the dollar value (and the daily limit check) is a guess.
+    if (!pricesUsable()) {
+      console.log(`[intent ${rid}] ${intentType} held back: no fresh price`);
+      res.json({ status: "unsupported", intentType, reason: PRICE_UNAVAILABLE_REASON, reasoning: PRICE_UNAVAILABLE_REASON, timing: timing() });
+      return;
+    }
+
     // A wallet that signed in with an email can't move funds, even small auto-executed amounts,
     // until it holds a passkey: say so now, in the chat, before anything is built or held.
     // (The registry's execute enforces the same rule for every path that gets past this.)
@@ -482,7 +505,7 @@ app.post("/intent", async (req, res) => {
     }
     const emailWallet = !!wallet && (await isEmailWallet(wallet));
 
-    const [storedProfile, activity] = await Promise.all([profileP, activityP]);
+    const { profile: storedProfile, activity } = inputs;
     // The user's own wallet and own account are never "new recipients"; every other address
     // is known only once a send to it has gone through (the server's own record).
     const profile: PolicyProfile = {
@@ -494,7 +517,9 @@ app.post("/intent", async (req, res) => {
     li.riskScore = riskScore;
     console.log(`[intent ${rid}] ${intentType} → ${verdict} (risk ${riskScore}) rules: ${decision.triggered.length ? decision.triggered.join(",") : "none"}`);
 
-    append("plans", { ...action, flagId: "user-message", createdAt: new Date().toISOString() }).catch(() => {});
+    // The message signals stay out of storage: they can name addresses the plan doesn't use.
+    const { signals: _signals, ...storedPlan } = action;
+    append("plans", { ...storedPlan, flagId: "user-message", createdAt: new Date().toISOString() }).catch(() => {});
     append("assessments", {
       planId: action.id, verdict, riskScore, reasons: [decision.reason],
       requiresLedger: decision.requiresLedger, assessedAt: new Date().toISOString(),
@@ -552,6 +577,7 @@ app.post("/intent", async (req, res) => {
     // Auto-execute when policy allows and the adapter supports it.
     if (adapter.execute && verdict === "AUTO_EXECUTE" && safeAddress) {
       try {
+        await injectFault("execute");
         const exec = await adapter.execute(ctx, result);
         if (exec) {
           console.log(`[intent ${rid}] ✓ ${intentType} auto-executed: ${exec.txHash}`);
@@ -577,8 +603,11 @@ app.post("/intent", async (req, res) => {
         }
       } catch (err: any) {
         console.error(`[intent ${rid}] ${intentType} auto-execute failed: ${safeErr(err)}`);
-        res.status(502).json({
-          error: err.message,
+        // Past the on-chain daily ceiling: the app offers to have the owner's wallet sign it instead.
+        const overCap = err instanceof OverCapError ? { code: err.code, ...(err.ownerSign ? { ownerSign: err.ownerSign } : {}) } : null;
+        res.status(overCap ? 409 : 502).json({
+          error: executionErrorMessage(err),
+          ...overCap,
           intentType,
           autoExecuted: false,
           plan,
@@ -593,11 +622,18 @@ app.post("/intent", async (req, res) => {
     let approval: PendingApproval | null = null;
     const execution = approvalExecution(intentType, result.payload);
     if (verdict === "NEEDS_APPROVAL" && adapter.execute && safeAddress && wallet && execution) {
-      approval = createApproval({
-        wallet, safeAddress, intentType: intentType as PendingApproval["intentType"],
-        summary: plan.summary, valueUsd: action.valueUsd,
-        reason: decision.reason, triggered: decision.triggered, execution,
-      });
+      try {
+        approval = await createApproval({
+          wallet, safeAddress, intentType: intentType as PendingApproval["intentType"],
+          summary: plan.summary, valueUsd: action.valueUsd,
+          reason: decision.reason, triggered: decision.triggered, execution,
+        });
+      } catch (err: any) {
+        // Not saved means not held: nothing can be approved or executed.
+        console.error(`[intent ${rid}] couldn't save the approval: ${safeErr(err)}`);
+        res.status(503).json({ error: "I couldn't save that request, so nothing was done. Please try again in a moment." });
+        return;
+      }
       console.log(`[intent ${rid}] [approval] ${approval.id} pending (hash ${approval.hash.slice(0, 18)}…)`);
 
       // A linked Telegram chat becomes the only way to approve it: the phone shows
@@ -614,14 +650,19 @@ app.post("/intent", async (req, res) => {
             const t = issueReviewToken(approval);
             reviewUrl = `${rp!.origin}/phone/approve/${approval.id}?t=${encodeURIComponent(t)}`;
           }
-          const messageId = await sendApprovalMessage(link.chatId, approval.id, describeApproval(approval, { phonePasskey }), reviewUrl);
+          // Saved before the message goes out: after a restart this must still be a Telegram
+          // approval, never one the desktop passkey could approve.
           approval.channel = "telegram";
           approval.factor = phonePasskey ? "phone-passkey" : "telegram-button";
+          await persistApproval(approval);
+          const messageId = await sendApprovalMessage(link.chatId, approval.id, describeApproval(approval, { phonePasskey }), reviewUrl);
           approval.telegram = { chatId: link.chatId, messageId };
+          await persistApproval(approval, { required: false });
           console.log(`[intent ${rid}] [approval] ${approval.id} sent to Telegram (${approval.factor})`);
         } catch (err: any) {
           // Fail closed: never fall back to a weaker factor because the phone was unreachable.
-          settle(approval, { error: `I couldn't send the approval to Telegram: ${err.message}` });
+          console.error(`[intent ${rid}] [approval] ${approval.id} couldn't be sent to Telegram: ${safeErr(err)}`);
+          await settle(approval, { error: "I couldn't send the approval to Telegram, so nothing will execute." });
           const reason = "I couldn't deliver the approval to your Telegram, so nothing will execute. Try again in a moment.";
           res.json({ status: "unsupported", intentType, reason, reasoning: reason, plan, timing: timing() });
           return;
@@ -673,18 +714,20 @@ async function executeApproval(a: PendingApproval): Promise<{ txHash: string; ex
   try {
     const result = await executeApprovalFlow(a, async (a) => {
       const adapter = getAdapter(a.intentType);
-      if (!adapter?.execute) throw new Error(`This ${a.intentType.replace(/_/g, " ")} can't be run from your account`);
+      if (!adapter?.execute) throw new UserFacingError(`This ${a.intentType.replace(/_/g, " ")} can't be run from your account`);
       const ctx = {
         walletAddress: a.wallet, safeAddress: a.safeAddress, balanceAddress: a.safeAddress, provider,
         params: {}, planSummary: a.summary, planSteps: [], totalEstimatedValueUsd: a.valueUsd, balances: null,
       };
+      await injectFault("execute");
       return adapter.execute(ctx, { payload: a.execution });
     });
     console.log(`[approval] ${a.id} executed: ${result.txHash}`);
     return result;
   } catch (err: any) {
     console.error(`[approval] ${a.id} failed: ${safeErr(err)}`);
-    throw err;
+    // The approve routes answer with this error: the same sentence as the record, not "try again".
+    throw isUserFacing(err) ? err : new UserFacingError(executionErrorMessage(err), 502);
   }
 }
 
@@ -724,10 +767,15 @@ function desktopRp(req: express.Request): RelyingParty {
   throw new ApprovalError(400, `Passkeys only work on ${browserRp().origin}${phone ? ` or ${phone.origin}` : ""}. Open Orchestra there.`);
 }
 
-function sendError(res: express.Response, err: any, fallbackStatus = 500): void {
-  if (err instanceof PasskeyError) { res.status(err.status).json({ error: err.message, code: err.code }); return; }
-  if (err instanceof OnboardingError) { res.status(err.status).json({ error: err.message, code: err.code }); return; }
-  res.status(err instanceof ApprovalError ? err.status : fallbackStatus).json({ error: err.message });
+/**
+ * Answer with an error. Errors raised on purpose keep their own status and sentence; anything else
+ * is logged here and the user gets one plain sentence (see errors.ts), never `err.message`.
+ * `_fallbackStatus` is kept so older call sites still read the same; an unexpected error is always a 500.
+ */
+function sendError(res: express.Response, err: any, _fallbackStatus = 500): void {
+  if (!isUserFacing(err)) console.error(`[serve] unexpected error: ${safeErr(err)}`);
+  const { status, body } = errorResponse(err);
+  res.status(status).json(body);
 }
 
 /**
@@ -765,7 +813,7 @@ app.get("/passkey/status", requireSession, async (req, res) => {
     if (!requireOwnWallet(res, req.query.wallet)) return;
     const wallet = res.locals.wallet as string;
     res.json({ registered: await hasPasskey(wallet, rpForOrigin(req.headers.origin) ?? browserRp()) });
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
+  } catch (e: any) { sendError(res, e); }
 });
 
 // Registering a passkey for a wallet requires a session for that wallet;
@@ -876,11 +924,25 @@ app.post("/passkey/approve", requireSession, async (req, res) => {
   } catch (e: any) { sendError(res, e); }
 });
 
+// A request past the on-chain daily ceiling that the owner signs with their own wallet. The server
+// holds the exact Safe transaction (from /intent or an approve); the body carries only the id and the
+// signature over its hash, never a transaction. The agent key only pays gas, and the same passkey
+// rule as every other way of moving funds applies.
+app.post("/owner-sign/:id/submit", requireSession, async (req, res) => {
+  try {
+    const wallet = res.locals.wallet as string;
+    await requirePasskeyToMoveFunds(wallet);
+    const result = await submitOwnerSignature(wallet, req.params.id, req.body?.signature, { relay: relayWithAgent });
+    console.log(`[owner-sign] ${req.params.id} signed by ${shortAddr(wallet)} — sent`);
+    res.json({ status: "ok", ...result });
+  } catch (e: any) { sendError(res, e); }
+});
+
 // ─── Approval status (the frontend polls this while an approval is out on another channel) ───
 app.get("/approvals/:id", requireSession, (req, res) => {
   const a = getApproval(String(req.params.id));
   // Someone else's approval looks exactly like one that doesn't exist.
-  if (!a || !approvalBelongsTo(a, res.locals.wallet)) { res.status(404).json({ error: "I can't find that approval. It may have expired." }); return; }
+  if (!a || !approvalBelongsTo(a, res.locals.wallet)) { res.status(404).json({ error: "This request expired. Ask me again." }); return; }
   res.json(approvalView(a));
 });
 
@@ -1003,7 +1065,7 @@ app.post("/phone/approvals/:id/approve", async (req, res) => {
     const ok = await verifyAuthentication(a.wallet, req.body?.response, challenge, rp);
     if (!ok) { res.status(401).json({ error: "That passkey check didn't work. Please try again." }); return; }
 
-    claim(a.id, a.wallet);
+    await claim(a.id, a.wallet);
     console.log(`[passkey] ${a.id} approved with the phone passkey — executing`);
     await refreshTelegramMessage(a); // "⏳ doing it…"
     try {
@@ -1018,7 +1080,7 @@ app.post("/phone/approvals/:id/approve", async (req, res) => {
 app.post("/phone/approvals/:id/reject", async (req, res) => {
   try {
     const a = approvalForReview(req.params.id, req.body?.t);
-    reject(a.id, a.wallet);
+    await reject(a.id, a.wallet);
     console.log(`[passkey] ${a.id} rejected on the phone`);
     await refreshTelegramMessage(a);
     res.json({ status: "rejected" });
@@ -1030,7 +1092,7 @@ app.post("/telegram/link-request", requireSession, (req, res) => {
     if (!requireOwnWallet(res, req.body?.walletAddress)) return;
     if (!telegramEnabled()) { res.status(400).json({ error: "Telegram approvals aren't configured on this server." }); return; }
     res.json(linkRequest(res.locals.wallet));
-  } catch (e: any) { res.status(400).json({ error: e.message }); }
+  } catch (e: any) { sendError(res, e); }
 });
 
 app.post("/telegram/link", async (req, res) => {
@@ -1038,7 +1100,7 @@ app.post("/telegram/link", async (req, res) => {
     const { walletAddress, code, signature } = req.body || {};
     if (!walletAddress || !code || !signature) { res.status(400).json({ error: "walletAddress, code and signature required" }); return; }
     res.json(await confirmLink(walletAddress, code, signature));
-  } catch (e: any) { res.status(400).json({ error: e.message }); }
+  } catch (e: any) { sendError(res, e); }
 });
 
 // ─── Live prices (cached) ───
@@ -1053,7 +1115,7 @@ app.get("/prices", async (_req, res) => {
 app.post("/auth/login-request", (req, res) => {
   try {
     res.json(loginRequest(req.body?.walletAddress));
-  } catch (e: any) { res.status(e instanceof AuthError ? e.status : 400).json({ error: e.message }); }
+  } catch (e: any) { sendError(res, e); }
 });
 
 app.post("/auth/login", (req, res) => {
@@ -1062,7 +1124,7 @@ app.post("/auth/login", (req, res) => {
     const session = login(walletAddress, nonce, signature);
     console.log(`[auth] session issued for ${shortAddr(session.wallet)}`);
     res.json(session);
-  } catch (e: any) { res.status(e instanceof AuthError ? e.status : 400).json({ error: e.message }); }
+  } catch (e: any) { sendError(res, e); }
 });
 
 // Privy sign-in (passkey/email with an embedded wallet, or an external wallet):
@@ -1086,7 +1148,7 @@ app.post("/auth/privy", async (req, res) => {
       }
     }
     res.json({ ...session, emailWallet });
-  } catch (e: any) { res.status(e instanceof AuthError ? e.status : 400).json({ error: e.message }); }
+  } catch (e: any) { sendError(res, e); }
 });
 
 // Where the session's wallet stands for passkeys: the chat asks an email wallet without one to add it.
@@ -1105,10 +1167,8 @@ app.get("/auth/session", requireSession, async (_req, res) => {
 // wallet signature when there is no passkey) — see src/policy/limits.ts.
 app.get("/policy", requireSession, async (_req, res) => {
   try {
-    res.json(await readLimits(res.locals.wallet));
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
+    res.json(await readLimits(res.locals.wallet)); // a storage error is an error, never an empty sheet
+  } catch (e: any) { sendError(res, e); }
 });
 
 // The habit profile the engine has learned from recorded activity.
@@ -1118,9 +1178,7 @@ app.get("/habit", requireSession, async (req, res) => {
     const wallet = res.locals.wallet as string;
     const history = await getRecentActivity(wallet);
     res.json({ wallet, ...computeHabitProfile(history) });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e: any) { sendError(res, e); }
 });
 
 // Step 1 of raising a limit: the challenge to answer (passkey options or typed data), or { required: false }.
@@ -1139,9 +1197,12 @@ app.post("/policy", requireSession, async (req, res) => {
   } catch (e: any) { sendLimitsError(res, e); }
 });
 
-function sendLimitsError(res: express.Response, e: any): void {
-  if (e instanceof LimitsError) { res.status(e.status).json({ error: e.message, ...(e.code ? { code: e.code } : {}), ...e.extra }); return; }
-  sendError(res, e);
+const sendLimitsError = sendError; // LimitsError is one of the errors errors.ts passes through
+
+/** The wallet's daily limit as `spendingLimitUSD`; left out when it can't be read, so setup status still answers. */
+async function limitField(wallet: string): Promise<{ spendingLimitUSD?: number }> {
+  const usd = await dailyLimitFor(wallet);
+  return usd === null ? {} : { spendingLimitUSD: usd };
 }
 
 // ─── Safe onboarding ───
@@ -1156,7 +1217,7 @@ app.post("/onboard", requireSession, async (req, res) => {
     res.json({
       ...result,
       isNewUser: !!result.started && !result.resumed, // finishing an older account's setup is not a new user
-      spendingLimitUSD: await storedSpendingLimit(wallet),
+      ...(await limitField(wallet)),
     });
   } catch (err: any) {
     if (!(err instanceof OnboardingError)) console.error("[onboard] Error:", safeErr(err));
@@ -1180,7 +1241,7 @@ app.get("/check-safe", requireSession, async (req, res) => {
     if (req.query.address !== undefined && !(await requireOwnAddress(res, req.query.address, storedSafeOf))) return;
     const status = await onboarding.status(wallet);
     if (status.status === "ready") {
-      res.json({ ...status, hasSafe: true, spendingLimitUSD: await storedSpendingLimit(wallet) });
+      res.json({ ...status, hasSafe: true, ...(await limitField(wallet)) });
     } else {
       res.json({ ...status, hasSafe: false });
     }
@@ -1210,106 +1271,7 @@ app.get("/safe-balances", requireSession, async (req, res) => {
       usdc: ethers.formatUnits(usdcRaw, 6),
       weth: ethers.formatEther(wethRaw),
     });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Step 1: Build unsigned tx for Ledger to sign (MultiSend of 3 setAllowance calls through Safe)
-app.post("/prepare-limit-update", requireSession, async (req, res) => {
-  try {
-    const ledgerAddress = ethers.getAddress(res.locals.wallet);
-    if (!sameWalletOrAbsent(req.body?.ledgerAddress, res)) return;
-    const { newLimitUSD } = req.body;
-    if (!newLimitUSD) {
-      res.status(400).json({ error: "newLimitUSD required" });
-      return;
-    }
-
-    const stored = await read(`safe:${ledgerAddress.toLowerCase()}`);
-    if (!stored) {
-      res.status(400).json({ error: "Your account isn't set up yet. Sign in again to set it up." });
-      return;
-    }
-    const safeAddress = (stored as any).safeAddress;
-    const agentAddr = getAgentAddress();
-
-    const unsignedTx = buildLimitUpdateTx(safeAddress, ledgerAddress, agentAddr, newLimitUSD);
-
-    console.log(`[prepare-limit-update] Built tx for $${newLimitUSD} limit (${shortAddr(safeAddress)})`);
-    res.json({ unsignedTx });
-  } catch (err: any) {
-    console.error("[prepare-limit-update] Error:", safeErr(err));
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Step 2: After Ledger signs and tx is broadcast, update storage + OrchestraPolicy.
-// Only once the chain shows that exact limit-update tx succeeded, sent by this
-// wallet to its Safe — a session alone can't raise the limit.
-app.post("/finalize-limit-update", requireSession, async (req, res) => {
-  try {
-    const ledgerAddress = ethers.getAddress(res.locals.wallet);
-    if (!sameWalletOrAbsent(req.body?.ledgerAddress, res)) return;
-    const { newLimitUSD, txHash } = req.body;
-    if (!newLimitUSD || typeof txHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(txHash)) {
-      res.status(400).json({ error: "newLimitUSD and txHash required" });
-      return;
-    }
-
-    const stored = await read(`safe:${ledgerAddress.toLowerCase()}`);
-    if (!stored) {
-      res.status(400).json({ error: "Your account isn't set up yet." });
-      return;
-    }
-
-    const safeAddress = (stored as any).safeAddress as string;
-    const expected = buildLimitUpdateTx(safeAddress, ledgerAddress, getAgentAddress(), newLimitUSD);
-    const [tx, receipt] = await Promise.all([
-      withTimeout(provider.getTransaction(txHash), 10_000, null),
-      withTimeout(provider.getTransactionReceipt(txHash), 10_000, null),
-    ]);
-    const problem = limitTxProblem({ tx, receipt, wallet: ledgerAddress, safeAddress, expectedData: expected.data });
-    if (problem) {
-      res.status(400).json({ error: `Limit not updated: ${problem}` });
-      return;
-    }
-
-    // Update 0G Storage
-    await write(`safe:${ledgerAddress.toLowerCase()}`, {
-      ...(stored as any),
-      spendingLimitUSD: newLimitUSD,
-    });
-    const profile = await readUserProfile(ledgerAddress);
-    await writeUserProfile(ledgerAddress, {
-      ...profile,
-      autoApproveLimit: newLimitUSD,
-      updatedAt: new Date().toISOString(),
-    });
-
-    // Update OrchestraPolicy on-chain (agent wallet signs — it's just a registry write)
-    const policyAddress = process.env.ORCHESTRA_POLICY_ADDRESS;
-    if (policyAddress) {
-      try {
-        const agentKey = process.env.AGENT_PRIVATE_KEY!;
-        const wallet = new ethers.Wallet(agentKey, provider);
-        const policy = new ethers.Contract(policyAddress, [
-          'function updateSpendingLimit(uint256 newLimitUSD) external',
-        ], wallet);
-        const policyTx = await policy.updateSpendingLimit(newLimitUSD * 100);
-        await policyTx.wait();
-        console.log(`[finalize-limit-update] OrchestraPolicy updated: ${policyTx.hash}`);
-      } catch (policyErr: any) {
-        console.warn(`[finalize-limit-update] OrchestraPolicy update failed (non-critical): ${safeErr(policyErr)}`);
-      }
-    }
-
-    console.log(`[finalize-limit-update] Limit updated to $${newLimitUSD}, on-chain tx: ${txHash}`);
-    res.json({ success: true });
-  } catch (err: any) {
-    console.error("[finalize-limit-update] Error:", safeErr(err));
-    res.status(500).json({ error: err.message });
-  }
+  } catch (err: any) { sendError(res, err); }
 });
 
 // ─── Health check ───
@@ -1322,7 +1284,9 @@ app.get("/health", (_req, res) => {
 });
 
 // ─── Start ───
-server.listen(PORT, "0.0.0.0", () => {
+// Saved approvals are loaded first; if storage can't be read the bridge refuses to start
+// rather than pretend nothing is pending.
+loadApprovals().then(() => server.listen(PORT, "0.0.0.0", () => {
   const addr = server.address();
   console.log(`\n  ⚡ SafeSwarm Ledger Bridge`);
   console.log(`  ─────────────────────────`);
@@ -1334,6 +1298,9 @@ server.listen(PORT, "0.0.0.0", () => {
   // Warm the price cache at startup.
   refreshPrices().catch(() => {});
   startTelegramBot(onTelegramDecision);
+})).catch((err) => {
+  console.error(`[approval] couldn't read the saved approvals, so the bridge won't start: ${safeErr(err)}`);
+  process.exit(1);
 });
 
 server.on("error", (err) => {

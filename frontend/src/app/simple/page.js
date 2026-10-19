@@ -11,6 +11,8 @@ import {
   sendIntent, getPrices, getPasskeyStatus, getApproval,
   getTelegramStatus, telegramLinkRequest, telegramLink, listPasskeys, rejectApproval,
 } from '@/lib/bridge';
+import { signOwnerRequest } from '@/lib/signing';
+import { errorMessage } from '@/lib/ownerSign';
 import { registerPasskey, approveWithPasskey, setUpPhonePasskey, removePasskey } from '@/lib/passkey';
 import { PRIVY_APP_ID } from '@/lib/privy';
 import { shortAddress, setupProgressText } from '@/lib/onboarding';
@@ -122,7 +124,7 @@ function SimpleChat() {
       setMessages((m) => [...m, { role: 'agent', data }]);
       if (shouldRefreshBalances(data)) refreshSoon(refreshBalances);
     } catch (err) {
-      setMessages((m) => [...m, { role: 'agent', error: err.message }]);
+      setMessages((m) => [...m, errorMessage(err)]);
     } finally {
       setBusy(false);
     }
@@ -194,11 +196,28 @@ function SimpleChat() {
       const approval = await getApproval(data.approval.id).catch(() => null);
       const outcome = outcomeAfterError(err, approval, data.intentType);
       if (outcome) settleCard(idx, outcome);
-      else setMessages((m) => [...m, { role: 'agent', error: err.message }]);
+      // Past the on-chain daily ceiling: say so, with the offer to sign it as the owner when there is one.
+      if (err.code === 'over_daily_cap') setMessages((m) => [...m, errorMessage(err)]);
+      else if (!outcome) setMessages((m) => [...m, { role: 'agent', error: err.message }]);
     } finally {
       setSigningIdx(null);
     }
   }, [ledger.walletAddress, settleCard, refreshBalances]);
+
+  // Sign a request that went past the daily ceiling, as the account's owner. The server holds the
+  // exact transaction; the wallet signs its hash and the server sends it.
+  const signAsOwner = useCallback(async (offer, idx) => {
+    setSigningIdx(idx);
+    try {
+      const result = await signOwnerRequest(ledger, offer, { emailWallet, hasPasskey: session.hasPasskey });
+      setMessages((m) => [...m, { role: 'system', txHash: result.txHash, explorerUrl: result.explorerUrl }]);
+      refreshSoon(refreshBalances);
+    } catch (err) {
+      setMessages((m) => [...m, { role: 'agent', error: err.message }]);
+    } finally {
+      setSigningIdx(null);
+    }
+  }, [ledger, emailWallet, session.hasPasskey, refreshBalances]);
 
   const registerPk = useCallback(async () => {
     if (!ledger.walletAddress) return;
@@ -361,7 +380,7 @@ function SimpleChat() {
         )}
 
         {messages.map((m, i) => (
-          <MessageRow key={i} m={m} idx={i} onExecute={execute} onPasskey={approvePasskey}
+          <MessageRow key={i} m={m} idx={i} onExecute={execute} onPasskey={approvePasskey} onOwnerSign={signAsOwner}
             onAddPasskeyHere={registerPk} onMoved={movedFunds}
             passkeyReg={passkeyReg} signing={signingIdx === i}
             onAddPasskey={() => setSetupOpen(true)} canAddPasskey={needsFirstPasskey} />
@@ -408,7 +427,7 @@ function SimpleChat() {
   );
 }
 
-function MessageRow({ m, idx, onExecute, onPasskey, onAddPasskeyHere, onMoved, passkeyReg, signing, onAddPasskey, canAddPasskey }) {
+function MessageRow({ m, idx, onExecute, onPasskey, onOwnerSign, onAddPasskeyHere, onMoved, passkeyReg, signing, onAddPasskey, canAddPasskey }) {
   if (m.passkeyPrompt || isPasskeyRequired(m.data)) {
     return <PasskeyPrompt text={m.passkeyPrompt ? PASSKEY_PROMPT : agentText(m.data)} onAdd={onAddPasskey} canAdd={canAddPasskey} />;
   }
@@ -425,6 +444,13 @@ function MessageRow({ m, idx, onExecute, onPasskey, onAddPasskeyHere, onMoved, p
       <div style={{ alignSelf: 'flex-start', maxWidth: '90%', color: '#FF453A', fontSize: 14,
         border: '1px solid #FF453A44', borderRadius: 12, padding: '10px 14px', background: '#FF453A11' }}>
         {m.error}
+        {m.ownerSign && (
+          <div style={{ marginTop: 10 }}>
+            <button onClick={() => onOwnerSign(m.ownerSign, idx)} disabled={signing} style={approveBtn(signing)}>
+              {signing ? 'Check your wallet…' : '✍️ Sign with my wallet'}
+            </button>
+          </div>
+        )}
       </div>
     );
   }

@@ -7,10 +7,12 @@
 // The interface is deliberately shaped to fit protocol integrations, not just
 // native transfers: an adapter can fetch quotes, check approvals, and build one
 // or more unsigned transactions. Server-side auto-execution goes through the
-// optional `execute()` (swap and send), signed by the agent wallet as a Safe owner.
+// optional `execute()` (swap and send), signed by the agent wallet as a Safe owner (or, with SPENDING_MODULE_ADDRESS set,
+// sent through the capped module).
 
 import { ethers } from "ethers";
 import crypto from "crypto";
+import { UserFacingError } from "../utils/userFacing";
 import { WETH_SEPOLIA, USDC_SEPOLIA } from "../integrations/uniswap/types";
 import { checkApproval } from "../integrations/uniswap/api";
 import { fetchQuoteWithRouting } from "../integrations/uniswap/routing";
@@ -128,6 +130,14 @@ export interface IntentAdapter {
   execute?(ctx: ExecutionContext, built: AdapterResult): Promise<ExecuteResult | null>;
 }
 
+/** What every adapter's account run needs from the context (see integrations/safe/accountExec.ts). */
+function accountRun(ctx: ExecutionContext, agentKey: string) {
+  return {
+    safeAddress: ctx.safeAddress!, agentKey, valueUsd: ctx.totalEstimatedValueUsd,
+    wallet: ctx.walletAddress, summary: ctx.planSummary,
+  };
+}
+
 // ─── balance — instant on-chain read ───
 const balanceAdapter: IntentAdapter = {
   kind: "balance",
@@ -192,10 +202,10 @@ const sendAdapter: IntentAdapter = {
     const agentKey = process.env.AGENT_PRIVATE_KEY;
     if (!agentKey) throw new Error("AGENT_PRIVATE_KEY not set");
 
-    const { executeBatchViaSafe } = await import("../integrations/safe/transaction");
+    const { executeForAccount } = await import("../integrations/safe/accountExec");
     const tx = sendData.unsignedTx;
     console.log("[adapter:send] AUTO_EXECUTE via your account");
-    const txHash = await executeBatchViaSafe(ctx.safeAddress, agentKey, [{ to: tx.to, value: tx.value || "0", data: tx.data || "0x" }], "150000");
+    const txHash = await executeForAccount({ ...accountRun(ctx, agentKey), batch: [{ to: tx.to, value: tx.value || "0", data: tx.data || "0x" }], fallbackGasLimit: "150000" });
 
     const tradeId = crypto.randomUUID();
     const { logTradeResult } = await import("./logResult");
@@ -295,16 +305,16 @@ const addLiquidityAdapter: IntentAdapter = {
     const b = lpSide(d.tokenB, d.symbolB, BigInt(d.amountB));
     const fee = Number(d.feeTier) || 3000;
     const state = await readPool(ctx.provider, a.address, b.address, fee);
-    if (!state) throw new Error("The trading pool no longer exists.");
+    if (!state) throw new UserFacingError("The trading pool no longer exists.");
     const [t0, t1] = orderSides(a, b);
     const problem = lpPriceProblem(state.sqrtPriceX96, t0, t1);
-    if (problem) throw new Error(problem);
+    if (problem) throw new UserFacingError(problem);
 
     const plan = planMint(a, b, fee, state.sqrtPriceX96);
     const batch = buildMintBatch(plan, ctx.safeAddress, Math.floor(Date.now() / 1000) + 20 * 60);
     console.log(`[adapter:add_liquidity] EXECUTE via your account: ${batch.length} op(s)`);
-    const { executeBatchViaSafe } = await import("../integrations/safe/transaction");
-    const txHash = await executeBatchViaSafe(ctx.safeAddress, agentKey, batch, "900000");
+    const { executeForAccount } = await import("../integrations/safe/accountExec");
+    const txHash = await executeForAccount({ ...accountRun(ctx, agentKey), batch, fallbackGasLimit: "900000" });
 
     const tradeId = crypto.randomUUID();
     const { logTradeResult } = await import("./logResult");
@@ -340,19 +350,19 @@ const removeLiquidityAdapter: IntentAdapter = {
 
     const owner = await positionOwner(ctx.provider, d.tokenId).catch(() => null);
     if (!owner || owner.toLowerCase() !== ctx.safeAddress.toLowerCase()) {
-      throw new Error(`Position #${d.tokenId} is no longer in your account.`);
+      throw new UserFacingError(`Position #${d.tokenId} is no longer in your account.`);
     }
     const position = (await readPositions(ctx.provider, ctx.safeAddress, tokenByAddress)).find((x) => x.tokenId === d.tokenId);
-    if (!position || position.liquidity === 0n) throw new Error(`Position #${d.tokenId} has no liquidity left to remove.`);
+    if (!position || position.liquidity === 0n) throw new UserFacingError(`Position #${d.tokenId} has no liquidity left to remove.`);
     if (position.token0.address.toLowerCase() !== String(d.token0).toLowerCase() || position.token1.address.toLowerCase() !== String(d.token1).toLowerCase()) {
-      throw new Error(`Position #${d.tokenId} no longer matches what you approved.`);
+      throw new UserFacingError(`Position #${d.tokenId} no longer matches what you approved.`);
     }
 
     const plan = planRemove(position, d.percent);
     const batch = buildRemoveBatch(position, plan, ctx.safeAddress, Math.floor(Date.now() / 1000) + 20 * 60, WETH_SEPOLIA);
     console.log(`[adapter:remove_liquidity] EXECUTE via your account: ${d.percent}%${plan.burn ? " (+ burn)" : ""}`);
-    const { executeBatchViaSafe } = await import("../integrations/safe/transaction");
-    const txHash = await executeBatchViaSafe(ctx.safeAddress, agentKey, batch, "600000");
+    const { executeForAccount } = await import("../integrations/safe/accountExec");
+    const txHash = await executeForAccount({ ...accountRun(ctx, agentKey), batch, fallbackGasLimit: "600000" });
 
     const tradeId = crypto.randomUUID();
     const { logTradeResult } = await import("./logResult");
@@ -426,7 +436,8 @@ const swapAdapter: IntentAdapter = {
     const agentKey = process.env.AGENT_PRIVATE_KEY;
     if (!agentKey) throw new Error("AGENT_PRIVATE_KEY not set");
 
-    const { getApprovalTxsForSwap, executeBatchViaSafe } = await import("../integrations/safe/transaction");
+    const { getApprovalTxsForSwap } = await import("../integrations/safe/transaction");
+    const { executeForAccount } = await import("../integrations/safe/accountExec");
     const { submitSwap } = await import("../integrations/uniswap/api");
 
     console.log(`[adapter:swap] AUTO_EXECUTE — fetching fresh quote…`);
@@ -441,7 +452,7 @@ const swapAdapter: IntentAdapter = {
       amountIn: String(quoteData.amount), tokenOut: quoteData.tokenOut,
       symbolOut: quoteData.symbolOut || symbolFor(quoteData.tokenOut),
     });
-    if (refusal) throw new Error(refusal);
+    if (refusal) throw new UserFacingError(refusal); // the re-quote at execution time moved too far
     const swapTx = await submitSwap(freshQuote.quote, null, undefined);
     console.log("[adapter:swap] AUTO_EXECUTE: swap tx built");
 
@@ -467,7 +478,7 @@ const swapAdapter: IntentAdapter = {
     const uniswapGas = parseInt(freshQuote.quote?.gasUseEstimate || "300000", 10);
     const fallbackGasLimit = String(Math.max(uniswapGas + 150000, 600000));
     console.log(`[adapter:swap] AUTO_EXECUTE — executing ${batch.length} op(s) via your account…`);
-    const txHash = await executeBatchViaSafe(ctx.safeAddress, agentKey, batch, fallbackGasLimit);
+    const txHash = await executeForAccount({ ...accountRun(ctx, agentKey), batch, fallbackGasLimit });
 
     const { logTradeResult } = await import("./logResult");
     const tradeId = quoteData.tradeId || crypto.randomUUID();
@@ -490,7 +501,7 @@ function withPasskeyGate(adapter: IntentAdapter): IntentAdapter {
   return {
     ...adapter,
     async execute(ctx, built) {
-      if (!ctx.walletAddress) throw new Error("No wallet to execute for.");
+      if (!ctx.walletAddress) throw new UserFacingError("No wallet to execute for.");
       await requirePasskeyToMoveFunds(ctx.walletAddress);
       return run(ctx, built);
     },

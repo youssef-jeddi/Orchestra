@@ -25,6 +25,9 @@ export const RULE_LABELS = {
   'unknown-intent': "Didn't understand",
   malformed: "Didn't understand",
   denylist: 'Token not allowed',
+  'pressure-wording': 'Pushy wording',
+  'unplanned-address': 'Extra address in message',
+  'pressure-refused': 'Refused for safety',
 };
 
 /** A slug we have no wording for still gets a readable chip, never the raw slug. */

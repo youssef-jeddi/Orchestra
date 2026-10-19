@@ -309,9 +309,13 @@ updateLimitBtn.addEventListener("click", async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ newLimitUSD: newLimit, ledgerAddress: fullWalletAddress }),
     });
-    const prepData = await prepRes.json();
+    const prepData: any = await prepRes.json();
     if (!prepRes.ok) throw new Error(prepData.error || "Failed to prepare tx");
 
+    // This page can't ask for a passkey: refuse a raise that needs one before anything is signed or sent.
+    if (prepData.confirmation === "passkey") {
+      throw new Error("Raising your limit needs your passkey. Use Limits in the main Orchestra app instead; nothing was changed.");
+    }
     const { unsignedTx } = prepData;
 
     // Step 2: Get nonce + gas for the Ledger EOA
