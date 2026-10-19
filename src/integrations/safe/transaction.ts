@@ -49,6 +49,9 @@ function safeRevertReason(err: any): string | null {
   return typeof reason === "string" && reason ? reason : null;
 }
 
+/** What the user reads when the transaction would fail (nothing was sent). */
+export const WOULD_FAIL_TEXT = "This didn't go through, so nothing was sent and your funds were not moved. Please try again in a moment.";
+
 /**
  * The gas limit for a Safe transaction from `estimate` (see executeBatchViaSafe).
  * Throws when the estimate reverts: the transaction would fail on-chain too.
@@ -62,10 +65,12 @@ export async function safeGasLimit(estimate: () => Promise<bigint>, fallbackGasL
     return limit;
   } catch (err: any) {
     if (err?.code === "CALL_EXCEPTION") {
+      // The estimate reverted, so the real transaction would too: nothing is sent. The technical
+      // reason (GS013 etc.) stays in the log; the user gets a plain sentence (shown in the chat,
+      // approval card and Telegram).
       const reason = safeRevertReason(err);
-      throw new Error(
-        `This transaction would fail${reason ? ` (${reason}${reason === "GS013" ? " — the inner call failed" : ""})` : ""}, so it wasn't sent. Nothing was spent.`
-      );
+      console.error(`[safe] estimate reverted${reason ? ` (${reason})` : ""} — transaction not sent`);
+      throw new Error(WOULD_FAIL_TEXT);
     }
     console.warn(`[safe] couldn't estimate gas (${safeErr(err)}); using ${fallbackGasLimit ?? "the SDK's default"}`);
     return fallbackGasLimit;

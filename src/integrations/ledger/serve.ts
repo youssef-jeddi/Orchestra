@@ -40,6 +40,7 @@ import { verifyPrivyUser, importPrivyPasskeys, noteEmailSignIn, verifyEmailForPa
 import { getAdapter, type Balances } from "../../executor/adapters";
 import { interpretIntent, assessAction } from "../../intent/pipeline";
 import { sanitizeHistory } from "../../intent/planner";
+import { INTENT_FALLBACK_ERROR } from "../../intent/messages";
 import { shortAddr, safeErr, requestId, logUserMessage, intentSummaryLine, intentOutcome, type IntentLogFields } from "../../utils/redact";
 import { fetchBalances, resolveEnsName } from "../../intent/context";
 import { describeAddresses, describeBalances } from "../../intent/replies";
@@ -643,8 +644,10 @@ app.post("/intent", async (req, res) => {
       timing: timing(),
     });
   } catch (err: any) {
+    // Not an AI-call failure (the planner answers those itself): a bug or a missing setting on the server.
+    // The detail stays in the log, without the user's message or full addresses; the user gets a plain sentence.
     console.error(`[intent ${rid}] Pipeline error: ${err?.name ?? "Error"}: ${safeErr(err)}`);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: INTENT_FALLBACK_ERROR });
   }
 });
 
