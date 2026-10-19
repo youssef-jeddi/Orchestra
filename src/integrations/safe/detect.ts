@@ -3,6 +3,7 @@ import { ethers } from 'ethers';
 import { read, write } from '../zero-g/storage';
 import { getAgentAddress } from './agentWallet';
 import { predictedSafeConfig } from './deploy';
+import { shortAddr, safeErr } from "../../utils/redact";
 
 const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
 
@@ -12,12 +13,12 @@ const ORCHESTRA_POLICY_ABI = [
 ];
 
 export async function detectExistingSafe(ledgerAddress: string): Promise<string | null> {
-  console.log(`[Safe] Detecting existing Safe for ${ledgerAddress}...`);
+  console.log(`[Safe] Detecting existing account for ${shortAddr(ledgerAddress)}...`);
 
   // 1. Check 0G Storage (fast path)
   const stored = await read(`safe:${ledgerAddress.toLowerCase()}`);
   if (stored && (stored as any).safeAddress) {
-    console.log(`[Safe] Found in storage: ${(stored as any).safeAddress}`);
+    console.log(`[Safe] Found in storage: ${shortAddr((stored as any).safeAddress)}`);
     return (stored as any).safeAddress;
   }
 
@@ -36,7 +37,7 @@ export async function detectExistingSafe(ledgerAddress: string): Promise<string 
     const code = await provider.getCode(predictedAddress);
 
     if (code !== '0x') {
-      console.log(`[Safe] Found deployed Safe at predicted address: ${predictedAddress} — syncing to storage`);
+      console.log(`[Safe] Found deployed account at predicted address: ${shortAddr(predictedAddress)} — syncing to storage`);
 
       // Recover spending limit from OrchestraPolicy if available
       let spendingLimitUSD = 100;
@@ -51,7 +52,7 @@ export async function detectExistingSafe(ledgerAddress: string): Promise<string 
             spendingLimitUSD = Number(policy.spendingLimitUSD) / 100;
           }
         } catch (e: any) {
-          console.warn(`[Safe] Policy read failed (using default limit): ${e.message}`);
+          console.warn(`[Safe] Policy read failed (using default limit): ${safeErr(e)}`);
         }
       }
 
@@ -66,9 +67,9 @@ export async function detectExistingSafe(ledgerAddress: string): Promise<string 
       return predictedAddress;
     }
   } catch (err: any) {
-    console.warn(`[Safe] Deterministic detection failed: ${err.message}`);
+    console.warn(`[Safe] Deterministic detection failed: ${safeErr(err)}`);
   }
 
-  console.log('[Safe] No existing Safe found — new user');
+  console.log('[Safe] No existing account found — new user');
   return null;
 }

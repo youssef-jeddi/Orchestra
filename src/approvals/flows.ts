@@ -7,6 +7,7 @@
 import { requirePending, claim, reject, getApproval, settle, ApprovalError, type PendingApproval } from "./index";
 import { sentRecipient } from "./describe";
 import { recordKnownRecipient } from "../policy/store";
+import { safeErr } from "../utils/redact";
 
 /**
  * After a send through the account actually went through, remember who it paid: the next send to
@@ -20,7 +21,7 @@ export async function rememberSentRecipient(wallet: string, intentType: string, 
   try {
     await recordKnownRecipient(wallet, to);
   } catch (err: any) {
-    console.warn(`[approval] sent, but couldn't remember the recipient: ${err.message}`);
+    console.warn(`[approval] sent, but couldn't remember the recipient: ${safeErr(err)}`);
   }
 }
 

@@ -2,6 +2,7 @@ import Safe from '@safe-global/protocol-kit';
 import { ethers } from 'ethers';
 import { getAgentWallet } from './agentWallet';
 import type { TxTracker } from './inflight';
+import { shortAddr } from "../../utils/redact";
 
 const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
 
@@ -35,7 +36,6 @@ export async function deploySafe(
   tracker?: TxTracker,
 ): Promise<string> {
   console.log('[Safe] Deploying new Safe...');
-  console.log(`[Safe]   owners: [${agentWalletAddress}, ${ledgerAddress}]`);
   console.log('[Safe]   threshold: 1');
 
   const agentWallet = getAgentWallet(provider);
@@ -47,7 +47,7 @@ export async function deploySafe(
   });
 
   const safeAddress = await safe.getAddress();
-  console.log(`[Safe] Predicted address: ${safeAddress}`);
+  console.log(`[Safe] Predicted address: ${shortAddr(safeAddress)}`);
 
   // Never deploy twice: the second CREATE2 would revert and burn the agent's gas.
   if ((await provider.getCode(safeAddress)) !== '0x') {
@@ -67,7 +67,7 @@ export async function deploySafe(
   await tracker?.sent(txResponse.hash);
   const receipt = await txResponse.wait();
   await tracker?.settled();
-  console.log(`[Safe] Deployed at: ${safeAddress} (block ${receipt?.blockNumber})`);
+  console.log(`[Safe] Deployed at: ${shortAddr(safeAddress)} (block ${receipt?.blockNumber})`);
 
   return safeAddress;
 }

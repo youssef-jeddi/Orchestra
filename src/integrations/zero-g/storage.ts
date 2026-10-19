@@ -5,6 +5,7 @@ import * as path from 'path';
 import * as os from 'os';
 import * as crypto from 'crypto';
 import { LocalStorage } from './memoryStorage';
+import { shortKey, safeErr } from '../../utils/redact';
 
 const INDEX_FILE = path.join(process.cwd(), 'storage-index.json');
 
@@ -34,7 +35,7 @@ class ZeroGStorage {
   }
 
   async write(key: string, data: unknown): Promise<void> {
-    console.log(`[0G Storage] WRITE ${key}`);
+    console.log(`[0G Storage] WRITE ${shortKey(key)}`);
     const json = JSON.stringify(data);
     const tmpFile = path.join(os.tmpdir(), `0g-write-${key.replace(/\//g, '_')}-${Date.now()}.json`);
 
@@ -50,7 +51,7 @@ class ZeroGStorage {
         const rootHash = 'rootHash' in tx ? tx.rootHash : tx.rootHashes[0];
         this.index.set(key, rootHash);
         this.saveIndex();
-        console.log(`[0G Storage] WRITE ${key} -> ${rootHash}`);
+        console.log(`[0G Storage] WRITE ${shortKey(key)} -> ${rootHash}`);
       } finally {
         await file.close();
       }
@@ -62,10 +63,10 @@ class ZeroGStorage {
   }
 
   async read(key: string): Promise<unknown | null> {
-    console.log(`[0G Storage] READ ${key}`);
+    console.log(`[0G Storage] READ ${shortKey(key)}`);
     const rootHash = this.index.get(key);
     if (!rootHash) {
-      console.log(`[0G Storage] READ ${key} -> not found in index`);
+      console.log(`[0G Storage] READ ${shortKey(key)} -> not found in index`);
       return null;
     }
 
@@ -74,13 +75,13 @@ class ZeroGStorage {
     try {
       const err = await this.indexer.download(rootHash, tmpFile, false);
       if (err) {
-        console.warn(`[0G Storage] READ ${key} download failed:`, err);
+        console.warn(`[0G Storage] READ ${shortKey(key)} download failed:`, err);
         return null;
       }
       const raw = fs.readFileSync(tmpFile, 'utf-8');
       return JSON.parse(raw);
     } catch (error) {
-      console.warn(`[0G Storage] READ ${key} error:`, error);
+      console.warn(`[0G Storage] READ ${shortKey(key)} error:`, error);
       return null;
     } finally {
       if (fs.existsSync(tmpFile)) {
@@ -118,7 +119,7 @@ class ZeroGStorage {
   }
 
   async delete(key: string): Promise<void> {
-    console.log(`[0G Storage] DELETE ${key}`);
+    console.log(`[0G Storage] DELETE ${shortKey(key)}`);
     this.index.delete(key);
     this.saveIndex();
   }

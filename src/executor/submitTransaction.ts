@@ -30,10 +30,8 @@ export async function executePlan(
 
   if (!to) throw new Error('No target address in plan step');
 
-  console.log(`[Executor] Executing via Safe: ${safeAddress}`);
+  console.log("[Executor] Executing via your account");
   console.log(`[Executor]   verdict: ${assessment.verdict}`);
-  console.log(`[Executor]   to: ${to}`);
-  console.log(`[Executor]   value: ${value}`);
 
   let txHash: string;
 

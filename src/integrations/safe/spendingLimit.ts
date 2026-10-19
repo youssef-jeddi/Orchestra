@@ -2,6 +2,7 @@ import Safe from '@safe-global/protocol-kit';
 import { ethers } from 'ethers';
 import { ALLOWANCE_MODULE_ADDRESS } from '../../types/safe';
 import type { TxTracker } from './inflight';
+import { shortAddr } from "../../utils/redact";
 
 const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
 
@@ -145,8 +146,7 @@ export async function setInitialSpendingLimits(
   limitUSD: number,
   signerPrivateKey: string
 ): Promise<void> {
-  console.log(`[Safe] Setting spending limits on ${safeAddress}...`);
-  console.log(`[Safe]   delegate: ${agentWalletAddress}`);
+  console.log(`[Safe] Setting spending limits on ${shortAddr(safeAddress)}...`);
   console.log(`[Safe]   limitUSD: $${limitUSD}`);
 
   await enableAllowanceModule(safeAddress, signerPrivateKey);

@@ -71,14 +71,14 @@ export async function planIntent(
   const started = Date.now();
   const messages: ChatMessage[] = [...history, { role: "user", content: message }];
   const raw: string[] = [];
-  let model = opts.model ?? "";
+  const provider = opts.provider ?? defaultProvider();
+  let model = opts.model ?? defaultModel(provider);
   let modelMs = 0;
   let waitedMs = 0;
   let jsonMode = true;
   // Set while the latest model call failed at the transport/API level (not a bad answer).
   let apiError: LlmError | null = null;
   const run = opts.completeFn ?? complete;
-  const provider = opts.provider ?? defaultProvider();
 
   for (let attempt = 1; attempt <= 2; attempt++) {
     let text: string;
@@ -130,7 +130,7 @@ export async function planIntent(
   // user's message, headers or the provider's response body, which can echo them.
   const failure = apiError as LlmError | null;
   (opts.log ?? console.error)(
-    `[planner] LLM failed: provider=${provider} model=${model || opts.model || defaultModel(provider)} step=planner ` +
+    `[planner] LLM failed: provider=${provider} model=${model} step=planner ` +
       (failure ? `status=${failure.status ?? "none"} type=${llmErrorType(failure)}` : `type=invalid_output attempts=${raw.length}`)
   );
 
