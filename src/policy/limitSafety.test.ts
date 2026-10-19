@@ -135,7 +135,7 @@ test("ordering: with the limits unreadable, a send gets the limits answer even t
   const send = JSON.stringify({ type: "actions", steps: [{ action: "send", token: "USDC", amount: "5", unit: "token", to: FRIEND }] });
   const chat = JSON.stringify({ type: "reply", text: "Hi" });
   const empty = { eth: 0, usdc: 0, weth: 0 } as any;
-  const ctx = (readable: boolean) => ({ connected: true, getBalances: async () => empty, resolveEns: async () => null, valueGate: async () => readable });
+  const ctx = (readable: boolean) => ({ connected: true, getBalances: async () => empty, resolveEns: async () => null, valueGate: async () => (readable ? null : LIMITS_UNREADABLE_REASON) });
   const run = (text: string, readable: boolean) => interpretIntent("x", [], ctx(readable), { provider: "groq", model: "m", log: () => {}, completeFn: async () => ok(text) as any });
   const blocked = await run(send, false);
   assert.deepEqual(blocked.outcome, { kind: "unsupported", reason: LIMITS_UNREADABLE_REASON });
