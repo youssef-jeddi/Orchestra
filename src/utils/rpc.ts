@@ -43,3 +43,16 @@ export async function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Pr
     clearTimeout(timer);
   }
 }
+
+/** Resolve `p`, or reject if it fails or takes longer than `ms`. For reads where "no answer" must not look like "answered nothing". */
+export async function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`no answer within ${ms} ms`)), ms);
+  });
+  try {
+    return await Promise.race([p, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}

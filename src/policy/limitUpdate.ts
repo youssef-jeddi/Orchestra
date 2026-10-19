@@ -37,7 +37,28 @@ export interface LimitUpdateDeps {
 
 export const LIMIT_NOT_SAVED = "I couldn't save your new limit. Please try again in a moment.";
 export const REGISTRY_NOT_UPDATED = "Your limit is lowered. The public record of it couldn't be updated this time, which doesn't make anything less safe.";
+export const LIMIT_TX_UNREADABLE = "I couldn't check the network for your transaction right now, so your limit wasn't changed. Please try again in a moment.";
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
+
+/**
+ * The chain reads behind `fetchTx`. A read that fails or times out is a 503 of its own: it must
+ * not look like "the transaction isn't mined yet" (the node answered null) or "too old" (no block time).
+ */
+export async function readLimitTx(reads: {
+  tx(): Promise<LimitTxInput["tx"]>;
+  receipt(): Promise<{ status: number | null; blockNumber: number } | null>;
+  blockTimeMs(blockNumber: number): Promise<number | null>;
+}): Promise<{ tx: LimitTxInput["tx"]; receipt: LimitTxInput["receipt"]; minedAtMs: number | null }> {
+  try {
+    const [tx, receipt] = await Promise.all([reads.tx(), reads.receipt()]);
+    const minedAtMs = receipt ? await reads.blockTimeMs(receipt.blockNumber) : null;
+    if (receipt && minedAtMs === null) throw new Error("the block of the receipt is not available");
+    return { tx, receipt, minedAtMs };
+  } catch (err) {
+    console.error(`[limit-update] couldn't read the transaction: ${safeErr(err)}`);
+    throw new LimitsError(503, LIMIT_TX_UNREADABLE, "chain_unreadable");
+  }
+}
 
 /** The requested limit as whole dollars, or a plain refusal. */
 export function requireLimit(value: unknown): number {

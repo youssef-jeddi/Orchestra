@@ -37,7 +37,7 @@ import {
 } from "../../policy";
 import { getRecentActivity, recordActivity, readPolicyInputs } from "../../policy/store";
 import { readLimits, requestConfirmation, applyChange } from "../../policy/limits";
-import { prepareLimitUpdate, finalizeLimitUpdate, type LimitUpdateDeps } from "../../policy/limitUpdate";
+import { prepareLimitUpdate, finalizeLimitUpdate, readLimitTx, type LimitUpdateDeps } from "../../policy/limitUpdate";
 import { loginRequest, login, issueToken, requireSession, sessionWallet, verifyToken, AuthError } from "../../auth";
 import { verifyPrivyUser, importPrivyPasskeys, noteEmailSignIn, verifyEmailForPasskey } from "../../auth/privy";
 import { getAdapter, type Balances } from "../../executor/adapters";
@@ -47,7 +47,7 @@ import { INTENT_FALLBACK_ERROR, LIMITS_UNREADABLE_REASON } from "../../intent/me
 import { shortAddr, safeErr, requestId, logUserMessage, intentSummaryLine, intentOutcome, type IntentLogFields } from "../../utils/redact";
 import { fetchBalances, resolveEnsName } from "../../intent/context";
 import { describeAddresses, describeBalances } from "../../intent/replies";
-import { makeSepoliaProvider, withTimeout } from "../../utils/rpc";
+import { makeSepoliaProvider, withTimeout, withDeadline } from "../../utils/rpc";
 import {
   createApproval,
   requirePending,
@@ -1252,14 +1252,11 @@ function limitUpdateDeps(req: express.Request): LimitUpdateDeps {
     account: async (w) => (await read(accountKey(w))) as any,
     saveAccount: (w, rec) => write(accountKey(w), rec),
     buildTx: (safe, w, usd) => buildLimitUpdateTx(safe, w, getAgentAddress(), usd),
-    fetchTx: async (hash) => {
-      const [tx, receipt] = await Promise.all([
-        withTimeout(provider.getTransaction(hash), 10_000, null),
-        withTimeout(provider.getTransactionReceipt(hash), 10_000, null),
-      ]);
-      const block = receipt ? await withTimeout(provider.getBlock(receipt.blockNumber), 10_000, null) : null;
-      return { tx, receipt, minedAtMs: block ? block.timestamp * 1000 : null };
-    },
+    fetchTx: (hash) => readLimitTx({
+      tx: () => withDeadline(provider.getTransaction(hash), 10_000),
+      receipt: () => withDeadline(provider.getTransactionReceipt(hash), 10_000),
+      blockTimeMs: async (n) => { const b = await withDeadline(provider.getBlock(n), 10_000); return b ? b.timestamp * 1000 : null; },
+    }),
     txUsed: async (h) => !!(await read(txKey(h))),
     markTxUsed: (h, w) => write(txKey(h), { wallet: w, at: new Date().toISOString() }),
     updateRegistry: (safe, usd) => updateRegistryLimit(provider, safe, usd),

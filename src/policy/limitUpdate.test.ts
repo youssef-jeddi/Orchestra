@@ -13,7 +13,7 @@ import * as pk from "../integrations/passkey";
 import { markEmailWallet, _resetEmailGate } from "../integrations/passkey/emailGate";
 import { ACCOUNT_NOT_READY_REASON } from "../integrations/safe/onboarding";
 import { LimitsError, _resetLimits } from "./limits";
-import { prepareLimitUpdate, finalizeLimitUpdate, LIMIT_NOT_SAVED, REGISTRY_NOT_UPDATED, type LimitUpdateDeps } from "./limitUpdate";
+import { prepareLimitUpdate, finalizeLimitUpdate, LIMIT_NOT_SAVED, LIMIT_TX_UNREADABLE, REGISTRY_NOT_UPDATED, readLimitTx, type LimitUpdateDeps } from "./limitUpdate";
 import { writeUserProfile, readUserProfile, _resetPolicyStoreCache } from "./store";
 // @ts-expect-error plain JS helper shared with the frontend, no type declarations
 import { finishLimitUpdate, needsPasskey } from "../../frontend/src/lib/limitUpdate.js";
@@ -339,8 +339,41 @@ test("page: a raise answers the passkey challenge and repeats the call with the 
   await assert.rejects(finishLimitUpdate(300, "0xabc", "0xhash", { finalize: async () => { throw ask; }, authenticate: async () => { throw cancel; } } as any), /cancelled/);
 });
 
+test("attack: a chain read that fails or times out is told apart from a transaction that isn't mined yet, and nothing is saved", async () => {
+  const w = world();
+  const user = await newUser(w, { dailyLimitUsd: 500 });
+  const good = w.mine(user.address, 50);
+  const chain = w.s.chain.get(good)!;
+  const boom = () => Promise.reject(new Error("503 from https://rpc.internal.example/v3/SECRETKEY"));
+  const hang = () => new Promise<never>((_, reject) => setTimeout(() => reject(new Error("no answer within 5 ms")), 5));
+  const reads = (o: Partial<Parameters<typeof readLimitTx>[0]>): Parameters<typeof readLimitTx>[0] => ({
+    tx: async () => chain.tx, receipt: async () => ({ ...chain.receipt, blockNumber: 7 }), blockTimeMs: async () => chain.minedAtMs, ...o,
+  });
+  const cases: Record<string, Parameters<typeof readLimitTx>[0]> = {
+    "failed tx read": reads({ tx: boom }),
+    "failed receipt read": reads({ receipt: boom }),
+    "timed-out read": reads({ tx: hang }),
+    "failed block read": reads({ blockTimeMs: boom }),
+    "block not found": reads({ blockTimeMs: async () => null }),
+  };
+  for (const [name, r] of Object.entries(cases)) {
+    const e = await fails(finalizeLimitUpdate(user.address, { newLimitUSD: 50, txHash: good }, { ...w.deps, fetchTx: () => readLimitTx(r) }));
+    assert.ok(e instanceof LimitsError && e.status === 503 && e.message === LIMIT_TX_UNREADABLE, `${name}: ${e?.message}`);
+  }
+  assert.equal(await limitOf(user), 500);
+  assert.equal(recordLimit(w, user), 100);
+  assert.deepEqual(w.s.registryCalls, []);
+  // The node answered "nothing": a genuine "not mined yet", not the network error.
+  const pending = await fails(finalizeLimitUpdate(user.address, { newLimitUSD: 50, txHash: good }, { ...w.deps, fetchTx: () => readLimitTx(reads({ tx: async () => null, receipt: async () => null })) }));
+  assert.ok(pending instanceof LimitsError && pending.status === 400);
+  assert.match(pending.message, /isn't mined yet/);
+  // With every read answering, the limit goes through.
+  const ok = await finalizeLimitUpdate(user.address, { newLimitUSD: 50, txHash: good }, { ...w.deps, fetchTx: () => readLimitTx(reads({})) });
+  assert.equal(ok.limitUsd, 50);
+});
+
 test("the messages are plain: no jargon, codes or internals", async () => {
-  for (const m of [LIMIT_NOT_SAVED, REGISTRY_NOT_UPDATED, ACCOUNT_NOT_READY_REASON]) {
+  for (const m of [LIMIT_NOT_SAVED, LIMIT_TX_UNREADABLE, REGISTRY_NOT_UPDATED, ACCOUNT_NOT_READY_REASON]) {
     assert.ok(!/GS0|revert|nonce|gas|rpc|undefined|error:|0x/i.test(m), m);
   }
 });
