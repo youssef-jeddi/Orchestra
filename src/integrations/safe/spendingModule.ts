@@ -1,9 +1,8 @@
 // ─── Safe — the on-chain $1000/day cap (SpendingLimitModule) ───
 // When SPENDING_MODULE_ADDRESS is set, the agent is not an owner of new accounts: it moves funds
-// only through SpendingLimitModule.exec, and the contract refuses anything past $1000 a day
-// whatever this server decides. Unset, nothing here is used and the owner path runs as before.
-// This file holds the ABI, the env parse, the pure over-the-cap check and the module call; the
-// "owner signs it themselves" fallback for an over-cap request is in ownerSign.ts.
+// only through SpendingLimitModule.exec(safe, calls[]), Call-only (no MultiSend / DelegateCall).
+// Unset, nothing here is used and the owner path runs as before.
+// Owner-sign fallback for an over-cap request is in ownerSign.ts (owner may still use MultiSend).
 
 import { ethers } from "ethers";
 import Safe from "@safe-global/protocol-kit";
@@ -13,22 +12,27 @@ import { safeErr } from "../../utils/redact";
 import { safeGasLimit } from "./transaction";
 
 export const SPENDING_MODULE_ABI = [
-  "function exec(address safe, address to, uint256 value, bytes data, uint8 operation)",
+  "function exec(address safe, (address to, uint256 value, bytes data)[] calls)",
   "function remainingToday(address safe) view returns (uint256)",
   "function spentToday(address safe) view returns (uint256)",
   "function DAILY_LIMIT_CENTS() view returns (uint256)",
   "error DailyLimitExceeded(uint256 spentCents, uint256 wouldSpendCents, uint256 limitCents)",
   "error ExecFailed()",
   "error TargetNotAllowed()",
-  "error DelegateNotAllowed()",
+  "error SelectorNotAllowed()",
+  "error BadSpender()",
+  "error BadRecipient()",
+  "error BadToken()",
+  "error BlockedTarget()",
   "error StalePrice()",
   "error BadPrice()",
+  "error EmptyBatch()",
 ];
 
 /** The module's fixed daily ceiling, for wording only; the contract is what enforces it. */
 export const DAILY_CAP_USD = 1000;
 
-/** Safe operation codes. */
+/** Safe operation codes (owner-sign path only; the module never DelegateCalls). */
 export const OPERATION = { Call: 0, DelegateCall: 1 } as const;
 
 /** The configured module (checksummed), or null when unset or not a valid address. */
@@ -86,9 +90,8 @@ export interface SafeCall {
 }
 
 /**
- * The single Safe call a batch becomes: the call itself for one transaction, a DelegateCall to
- * MultiSend for several. The Safe SDK builds it, so the module and an owner signature run exactly
- * the same thing the owner path would.
+ * Encode a batch the way the Safe owner path would (including MultiSend for several steps).
+ * Used only for the owner-sign fallback — the module path never DelegateCalls.
  */
 export async function safeCallFor(safeAddress: string, transactions: Array<{ to: string; value: string; data: string }>): Promise<SafeCall & { nonce: number }> {
   const safe = await Safe.init({ provider: sepoliaRpcUrl(), safeAddress });
@@ -103,9 +106,9 @@ export function isDailyCapRevert(err: any): boolean {
 }
 
 /**
- * Run a batch through SpendingLimitModule.exec with the agent key (the agent is not a Safe owner,
- * so this is the only way it can move funds). Gas comes from estimating the module call; an
- * estimate that reverts means nothing is sent. A DailyLimitExceeded revert throws DailyCapRevert.
+ * Run a batch through SpendingLimitModule.exec(safe, calls[]) with the agent key.
+ * Each step is a Call checked by the module; no MultiSend. A DailyLimitExceeded revert
+ * throws DailyCapRevert.
  */
 export async function execViaModule(
   safeAddress: string,
@@ -113,10 +116,14 @@ export async function execViaModule(
   transactions: Array<{ to: string; value: string; data: string }>,
   fallbackGasLimit?: string,
 ): Promise<string> {
-  const call = await safeCallFor(safeAddress, transactions);
+  const calls = transactions.map((t) => ({
+    to: t.to,
+    value: t.value ?? "0",
+    data: t.data && t.data !== "" ? t.data : "0x",
+  }));
   const wallet = new ethers.Wallet(agentPrivateKey, makeSepoliaProvider());
   const module = new ethers.Contract(spendingModuleAddress()!, SPENDING_MODULE_ABI, wallet);
-  const args = [safeAddress, call.to, call.value, call.data, call.operation] as const;
+  const args = [safeAddress, calls] as const;
 
   let capRevert = false;
   let gasLimit: string | undefined;
