@@ -1,15 +1,4 @@
-import { Playfair_Display, Inter } from 'next/font/google';
 import "./globals.css";
-
-const playfair = Playfair_Display({
-  variable: '--font-playfair',
-  subsets: ['latin'],
-});
-
-const inter = Inter({
-  variable: '--font-inter',
-  subsets: ['latin'],
-});
 
 export const metadata = {
   title: "Orchestra — Join the Waitlist",
@@ -18,7 +7,7 @@ export const metadata = {
 
 export default function RootLayout({ children }) {
   return (
-    <html lang="en" className={`${playfair.variable} ${inter.variable}`}>
+    <html lang="en">
       <body>{children}</body>
     </html>
   );

@@ -8,15 +8,7 @@ export default function WaitlistFooter() {
   return (
     <footer className="px-6 py-10 sm:px-8" style={{ borderTop: '1px solid var(--border)' }}>
       <div className="mx-auto flex max-w-5xl flex-col items-center gap-5 sm:flex-row sm:justify-between">
-        <span
-          className="text-[13px] uppercase"
-          style={{
-            fontFamily: 'var(--font-playfair, serif)',
-            color: 'var(--text-1)',
-            letterSpacing: '0.3em',
-            lineHeight: 1.6,
-          }}
-        >
+        <span className="wordmark" style={{ color: 'var(--text-1)' }}>
           Orchestra
         </span>
 
@@ -38,7 +30,7 @@ export default function WaitlistFooter() {
           </a>
 
           <span className="eyebrow" style={{ color: 'var(--text-3)' }}>
-            © 2026 Orchestra
+            © 2025 Orchestra
           </span>
         </div>
       </div>

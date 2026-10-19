@@ -22,15 +22,7 @@ export default function WaitlistNav() {
       className="fixed inset-x-0 top-0 z-50 px-4 pt-4 sm:px-6 sm:pt-5"
     >
       <div className="glass mx-auto flex max-w-5xl items-center justify-between rounded-full px-5 py-2.5 sm:px-6">
-        <span
-          className="text-[12px] uppercase sm:text-[13px]"
-          style={{
-            fontFamily: 'var(--font-playfair, serif)',
-            color: 'var(--text-1)',
-            letterSpacing: '0.3em',
-            lineHeight: 1.6,
-          }}
-        >
+        <span className="wordmark" style={{ color: 'var(--text-1)' }}>
           Orchestra
         </span>
 

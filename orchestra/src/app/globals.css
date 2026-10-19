@@ -17,10 +17,10 @@ html::-webkit-scrollbar {
 body {
   background: #0A0A0F;
   color: #E8E4DE;
-  font-family: var(--font-inter, sans-serif);
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI',
+               Roboto, Helvetica, Arial, sans-serif;
   font-weight: 300;
   line-height: 1.6;
-  cursor: none;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   overflow-x: hidden;
@@ -36,12 +36,6 @@ body::before {
   opacity: 0.035;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='a' x='0' y='0'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.75' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23a)'/%3E%3C/svg%3E");
   background-repeat: repeat;
-}
-
-/* Native cursor on touch */
-@media (hover: none) and (pointer: coarse) {
-  body { cursor: auto; }
-  button, a, [role="button"] { cursor: pointer; }
 }
 
 section {
@@ -64,27 +58,42 @@ section {
   --blue:      #007AFF;
   --red:       #FF453A;
 
-  /* Display stack — Apple / Lusion feel for every headline.
-     Playfair Display reste réservé au seul logo "Orchestra". */
-  --font-display: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI',
-                  Roboto, Helvetica, Arial, sans-serif;
-
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-/* ── Display type ── */
+/* ── Hiérarchie typo : une seule font, tout se joue sur weight et taille ── */
 .display {
-  font-family: var(--font-display);
   font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+
+.display-hero {
+  font-size: clamp(48px, 8vw, 96px);
+  font-weight: 700;
   letter-spacing: -0.03em;
   line-height: 1.02;
 }
 
+.display-section {
+  font-size: clamp(24px, 3vw, 36px);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+
 .eyebrow {
-  font-family: var(--font-display);
   font-size: 11px;
   font-weight: 500;
   letter-spacing: 0.15em;
+  text-transform: uppercase;
+  line-height: 1.6;
+}
+
+.wordmark {
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.2em;
   text-transform: uppercase;
   line-height: 1.6;
 }
@@ -151,22 +160,6 @@ section {
   opacity: 1;
 }
 
-/* ── Shiny metallic text (logo / accents) ── */
-.shiny-text {
-  background: linear-gradient(90deg, #E8E4DE 0%, #fff 45%, #E8E4DE 55%, #999 100%);
-  background-size: 200% 100%;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-  color: transparent;
-  animation: shiny-slide 8s linear infinite;
-}
-
-@keyframes shiny-slide {
-  0%   { background-position: 200% center; }
-  100% { background-position: -200% center; }
-}
-
 /* ── Scroll indicator ── */
 @keyframes chevron-drift {
   0%   { transform: translateY(-4px); opacity: 0; }
@@ -181,7 +174,6 @@ section {
 /* ── Respect reduced motion ── */
 @media (prefers-reduced-motion: reduce) {
   .cta-glow,
-  .shiny-text,
   .chevron-drift {
     animation: none;
   }

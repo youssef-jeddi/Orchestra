@@ -3,7 +3,6 @@
 import { useCallback, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ArrowRight, Check, ChevronDown } from 'lucide-react';
-import HeroVideo   from './HeroVideo';
 import AvatarStack from './AvatarStack';
 
 const SPARK_CL = ['#C084FC', '#FFD700', '#E8E4DE'];
@@ -64,10 +63,8 @@ export default function WaitlistHero() {
   return (
     <section
       id="hero"
-      className="relative flex min-h-[100svh] flex-col items-center justify-center overflow-hidden px-6 pt-32 pb-24 sm:px-8"
+      className="grainient-bg relative flex min-h-[100svh] flex-col items-center justify-center overflow-hidden px-6 pt-32 pb-24 sm:px-8"
     >
-      <HeroVideo opacity={0.4} />
-
       <div className="relative z-10 flex w-full max-w-4xl flex-col items-center text-center">
         {/* Badge */}
         <motion.div
@@ -83,20 +80,12 @@ export default function WaitlistHero() {
           <span className="eyebrow" style={{ color: 'var(--text-1)' }}>
             Launching Soon
           </span>
-          <span aria-hidden="true" style={{ color: 'var(--gold)', fontSize: 10, lineHeight: 1 }}>
-            ✦
-          </span>
         </motion.div>
 
         {/* Titre — reveal lettre par lettre, style Lusion */}
         <h1
-          className="display mt-9"
-          style={{
-            fontSize: 'clamp(48px, 8vw, 96px)',
-            fontWeight: 700,
-            color: 'var(--text-1)',
-            textWrap: 'balance',
-          }}
+          className="display-hero mt-9"
+          style={{ color: 'var(--text-1)', textWrap: 'balance' }}
         >
           <span className="sr-only">{TITLE}</span>
           {/* Mots groupés : le reveal est lettre par lettre, mais les retours
@@ -132,8 +121,8 @@ export default function WaitlistHero() {
           initial={{ opacity: 0, y: 30 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.8, delay: 0.7, ease: EASE }}
-          className="mt-7 max-w-xl text-base sm:text-lg"
-          style={{ color: 'var(--text-2)', fontWeight: 300, lineHeight: 1.6 }}
+          className="mt-7 max-w-xl"
+          style={{ color: 'var(--text-2)', fontSize: 18, fontWeight: 300, lineHeight: 1.6 }}
         >
           Three AI agents. One symphony. Your portfolio on autopilot.
         </motion.p>
