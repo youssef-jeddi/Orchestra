@@ -6,9 +6,9 @@
 
 import { requirePending, claim, reject, getApproval, settle, ApprovalError, type PendingApproval } from "./index";
 import { sentRecipient } from "./describe";
-import { recordKnownRecipient } from "../policy/store";
+import { recordKnownRecipient, recordActivity, spendActivity } from "../policy/store";
 import { safeErr } from "../utils/redact";
-import { UserFacingError } from "../utils/userFacing";
+import { UserFacingError, OverCapError } from "../utils/userFacing";
 import { isUserFacing, executionErrorMessage } from "../integrations/ledger/errors";
 
 /**
@@ -27,16 +27,93 @@ export async function rememberSentRecipient(wallet: string, intentType: string, 
   }
 }
 
+/** Token symbol/address for an activity row, matching what /intent auto-exec records when it can. */
+function activityToken(intentType: string, execution: Record<string, unknown> | undefined): string | undefined {
+  if (intentType === "swap") {
+    const t = (execution as any)?.quoteData?.tokenIn;
+    return typeof t === "string" ? t : undefined;
+  }
+  if (intentType === "send") {
+    const tx = (execution as any)?.sendData?.unsignedTx;
+    if (!tx) return undefined;
+    return String(tx.data || "0x") === "0x" ? "ETH" : (typeof tx.to === "string" ? tx.to : undefined);
+  }
+  return undefined;
+}
+
+/**
+ * After a claimed approval actually ran, record it like an auto-exec (once). Used by passkey and
+ * Telegram; the owner-signed path records in submitOwnerSignature the same way.
+ */
+async function recordApprovalActivity(a: PendingApproval, result: { txHash: string; explorerUrl: string }): Promise<void> {
+  try {
+    await recordActivity(a.wallet, spendActivity({
+      valueUsd: a.valueUsd,
+      to: sentRecipient(a.execution),
+      token: activityToken(a.intentType, a.execution),
+      txHash: result.txHash,
+      explorerUrl: result.explorerUrl,
+      source: "approved",
+    }));
+  } catch (err: any) {
+    console.warn(`[approval] ran, but couldn't record activity: ${safeErr(err)}`);
+  }
+}
+
+export const OVER_CAP_TELEGRAM_TEXT =
+  "Your account's daily ceiling wouldn't let me send this one. You can open Orchestra and sign it yourself with your wallet, or try again after the daily reset.";
+export const OVER_CAP_TELEGRAM_NO_LINK_TEXT =
+  "Your account's daily ceiling wouldn't let me send this one. Open Orchestra and ask again to sign it yourself with your wallet, or try again after the daily reset.";
+
+/** The Orchestra page that shows the owner-sign request again, or null without a PUBLIC_APP_URL. */
+export function ownerSignLink(id: string, publicAppUrl = process.env.PUBLIC_APP_URL): string | null {
+  if (!publicAppUrl) return null;
+  try {
+    return `${new URL(publicAppUrl).origin}/simple?ownerSign=${encodeURIComponent(id)}`;
+  } catch {
+    return null;
+  }
+}
+
+export interface OverCapNotifier {
+  link: (chatId: number, text: string, button: string, url: string) => Promise<void>;
+  text: (chatId: number, text: string) => Promise<void>;
+}
+
+const telegramNotifier: OverCapNotifier = {
+  link: async (...args) => (await import("../integrations/telegram")).sendLinkMessage(...args),
+  text: async (...args) => (await import("../integrations/telegram")).sendText(...args),
+};
+
+/**
+ * A Telegram approval stopped by the daily ceiling: send the link that opens the owner-sign
+ * request in the app. A follow-up only — the approval is already settled as failed.
+ */
+export async function notifyOverCap(a: PendingApproval, err: unknown, notifier: OverCapNotifier = telegramNotifier): Promise<void> {
+  if (!(err instanceof OverCapError) || a.channel !== "telegram" || !a.telegram?.chatId) return;
+  const id = typeof err.ownerSign?.id === "string" ? err.ownerSign.id : null;
+  if (!id) return;
+  try {
+    const url = ownerSignLink(id);
+    if (url) await notifier.link(a.telegram.chatId, OVER_CAP_TELEGRAM_TEXT, "Open Orchestra to sign as owner", url);
+    else await notifier.text(a.telegram.chatId, OVER_CAP_TELEGRAM_NO_LINK_TEXT);
+  } catch (e: any) {
+    console.warn(`[approval] ${a.id} couldn't send the over-ceiling follow-up: ${safeErr(e)}`);
+  }
+}
+
 /** Run a claimed approval's stored payload (`run`) and record the outcome; a successful send is remembered. */
 export async function executeApprovalFlow(
   a: PendingApproval,
   run: (a: PendingApproval) => Promise<{ txHash: string; explorerUrl: string } | null>,
+  notifier?: OverCapNotifier,
 ): Promise<{ txHash: string; explorerUrl: string }> {
   try {
     const exec = await run(a);
     if (!exec) throw new UserFacingError("It ran but gave no result, so I can't confirm it went through");
     const result = { txHash: exec.txHash, explorerUrl: exec.explorerUrl };
     await settle(a, { result });
+    await recordApprovalActivity(a, result);
     await rememberSentRecipient(a.wallet, a.intentType, a.execution);
     return result;
   } catch (err: any) {
@@ -44,6 +121,7 @@ export async function executeApprovalFlow(
     // for them goes in; anything else (an RPC URL, a library error) stays in the log.
     if (!isUserFacing(err)) console.error(`[approval] ${a.id} failed unexpectedly: ${safeErr(err)}`);
     await settle(a, { error: executionErrorMessage(err) });
+    await notifyOverCap(a, err, notifier);
     throw err;
   }
 }

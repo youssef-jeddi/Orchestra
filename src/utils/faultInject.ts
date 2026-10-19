@@ -5,12 +5,14 @@
 // (nothing executes), to check the user only ever sees a plain sentence.
 // `price-read` makes the price refresh fail; `price-stale` makes the cached prices count as too old
 // (checked by pricesUsable), to see that spends are refused when no fresh price exists.
+// `remaining-zero` makes the on-chain daily ceiling read as $0 left today, so a small send hits the
+// over-cap / owner-sign path without needing ~$1000 of Sepolia ETH (see remainingToday).
 // Never usable in production: ignored unless NODE_ENV isn't "production" and the storage is local
 // or in memory, and the bridge refuses to start with it set in production (faultInjectProblem).
 
-export type Fault = "profile-read" | "activity-read" | "profile-timeout" | "activity-timeout" | "execute" | "price-read" | "price-stale";
+export type Fault = "profile-read" | "activity-read" | "profile-timeout" | "activity-timeout" | "execute" | "price-read" | "price-stale" | "remaining-zero";
 
-const FAULTS: readonly string[] = ["profile-read", "activity-read", "profile-timeout", "activity-timeout", "execute", "price-read", "price-stale"];
+const FAULTS: readonly string[] = ["profile-read", "activity-read", "profile-timeout", "activity-timeout", "execute", "price-read", "price-stale", "remaining-zero"];
 
 function requested(env: NodeJS.ProcessEnv): string[] {
   return (env.ORCHESTRA_FAULT_INJECT ?? "").split(",").map((s) => s.trim()).filter(Boolean);

@@ -12,6 +12,8 @@ import { UserFacingError } from "../../utils/userFacing";
 import { makeSepoliaProvider, SEPOLIA_CHAIN_ID } from "../../utils/rpc";
 import { safeGasLimit } from "./transaction";
 import { safeCallFor, type SafeCall } from "./spendingModule";
+import { recordActivity, spendActivity } from "../../policy/store";
+import { safeErr } from "../../utils/redact";
 
 export const OWNER_SIGN_TTL_MS = 10 * 60_000;
 
@@ -45,6 +47,10 @@ export interface OwnerSignRecord {
   domain: { chainId: number; verifyingContract: string };
   message: Record<string, string | number>;
   safeTxHash: string;
+  /** What the owner is about to send, kept to record it in the activity list once it has gone through. */
+  valueUsd: number;
+  to?: string;
+  token?: string;
   expiresAt: number;
   status: "pending" | "executing" | "executed" | "expired";
 }
@@ -69,7 +75,7 @@ export function ownerSignView(r: OwnerSignRecord) {
 }
 
 /** Store the Safe transaction for `call` (a fresh nonce read) and return the offer to sign it. */
-export function holdOwnerSign(input: { wallet: string; safeAddress: string; summary: string; call: SafeCall & { nonce: number } }, now = Date.now()): OwnerSignRecord {
+export function holdOwnerSign(input: { wallet: string; safeAddress: string; summary: string; call: SafeCall & { nonce: number }; valueUsd?: number; to?: string; token?: string }, now = Date.now()): OwnerSignRecord {
   const { call } = input;
   const domain = { chainId: SEPOLIA_CHAIN_ID, verifyingContract: ethers.getAddress(input.safeAddress) };
   const message = {
@@ -80,6 +86,7 @@ export function holdOwnerSign(input: { wallet: string; safeAddress: string; summ
   const record: OwnerSignRecord = {
     id: crypto.randomUUID(), wallet: input.wallet.toLowerCase(), safeAddress: domain.verifyingContract,
     summary: input.summary, domain, message, safeTxHash: safeTxHashOf(domain, message),
+    valueUsd: input.valueUsd ?? 0, to: input.to, token: input.token,
     expiresAt: now + OWNER_SIGN_TTL_MS, status: "pending",
   };
   records.set(record.id, record);
@@ -87,9 +94,23 @@ export function holdOwnerSign(input: { wallet: string; safeAddress: string; summ
 }
 
 /** Build and hold the offer for a batch the module refused. */
-export async function offerOwnerSign(wallet: string, safeAddress: string, summary: string, batch: Array<{ to: string; value: string; data: string }>) {
+export async function offerOwnerSign(wallet: string, safeAddress: string, summary: string, batch: Array<{ to: string; value: string; data: string }>, meta: { valueUsd?: number; to?: string; token?: string } = {}) {
   const call = await safeCallFor(safeAddress, batch);
-  return ownerSignView(holdOwnerSign({ wallet, safeAddress, summary, call }));
+  return ownerSignView(holdOwnerSign({ wallet, safeAddress, summary, call, ...meta }));
+}
+
+/**
+ * The pending offer `id` for `wallet`, to show again in the app (e.g. from a Telegram link).
+ * Someone else's, missing, already used and expired requests all look the same: not found.
+ */
+export function getOwnerSign(wallet: string, id: unknown, now = Date.now()): OwnerSignRecord {
+  const r = typeof id === "string" ? records.get(id) : undefined;
+  if (!r || r.wallet !== wallet.toLowerCase() || r.status !== "pending") throw new UserFacingError("That request expired. Ask me again, or try again after the daily reset.", 404);
+  if (now > r.expiresAt) {
+    r.status = "expired";
+    throw new UserFacingError("That request expired. Ask me again, or try again after the daily reset.", 404);
+  }
+  return r;
 }
 
 export interface OwnerSignDeps {
@@ -123,7 +144,14 @@ export async function submitOwnerSignature(wallet: string, id: unknown, signatur
   try {
     const txHash = await deps.relay(r, signature);
     r.status = "executed";
-    return { txHash, explorerUrl: `https://sepolia.etherscan.io/tx/${txHash}` };
+    const explorerUrl = `https://sepolia.etherscan.io/tx/${txHash}`;
+    // Only after the relay returned a hash we got ourselves (never one the client reports).
+    try {
+      await recordActivity(r.wallet, spendActivity({ valueUsd: r.valueUsd, to: r.to, token: r.token, txHash, explorerUrl, source: "owner" }));
+    } catch (e) {
+      console.warn(`[owner-sign] sent, but couldn't record activity: ${safeErr(e)}`);
+    }
+    return { txHash, explorerUrl };
   } catch (err) {
     r.status = "pending"; // a repeat after a failure can't double-send: the Safe's nonce moves once, so a second run reverts
     throw err;

@@ -10,6 +10,7 @@ import { UserFacingError, OverCapError } from "../../utils/userFacing";
 import { makeSepoliaProvider, sepoliaRpcUrl } from "../../utils/rpc";
 import { safeErr } from "../../utils/redact";
 import { safeGasLimit } from "./transaction";
+import { faultOn } from "../../utils/faultInject";
 
 export const SPENDING_MODULE_ABI = [
   "function exec(address safe, (address to, uint256 value, bytes data)[] calls)",
@@ -78,6 +79,8 @@ export function exceedsRemaining(valueUsd: number, remainingCents: bigint): bool
 
 /** Cents the account can still spend today through the module. */
 export async function remainingToday(safeAddress: string, provider: ethers.ContractRunner = makeSepoliaProvider()): Promise<bigint> {
+  // Dev-only: pretend nothing is left today so the over-cap path can be exercised without funding.
+  if (faultOn("remaining-zero")) return 0n;
   const module = new ethers.Contract(spendingModuleAddress()!, SPENDING_MODULE_ABI, provider);
   return BigInt(await module.remainingToday(safeAddress));
 }

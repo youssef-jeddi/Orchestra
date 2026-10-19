@@ -5,6 +5,8 @@ import assert from "node:assert/strict";
 // @ts-expect-error plain JS helpers shared with the frontend, no type declarations
 import * as card from "../../frontend/src/lib/approvalCard.js";
 // @ts-expect-error plain JS helpers shared with the frontend, no type declarations
+import * as activity from "../../frontend/src/lib/activity.js";
+// @ts-expect-error plain JS helpers shared with the frontend, no type declarations
 import * as limits from "../../frontend/src/lib/limits.js";
 // @ts-expect-error plain JS helpers shared with the frontend, no type declarations
 import { HINT_COLOR, HINT_SIZE, SURFACES, contrastRatio } from "../../frontend/src/lib/contrast.js";
@@ -90,6 +92,29 @@ test("header: nothing is shown until the connection state is known, then the rig
   assert.equal(headerState({ ...base, privyConfigured: false }), "signed-out", "MetaMask/Ledger only: known at once");
   assert.equal(headerState({ ...base, gaveUp: true }), "signed-out", "never stuck on Connecting…");
   assert.ok(CONNECTING_GIVE_UP_MS >= 3000 && CONNECTING_GIVE_UP_MS <= 15000);
+});
+
+test("the activity list says in plain words who allowed each spend, and links the receipt", () => {
+  assert.equal(activity.sourceLabel("auto"), "Sent automatically");
+  assert.equal(activity.sourceLabel("approved"), "You approved");
+  assert.equal(activity.sourceLabel("owner"), "You signed");
+  assert.equal(activity.sourceLabel(undefined), "Sent", "older records have no source");
+  const row = activity.activityRow({ valueUsd: 12.5, at: "2026-10-19T10:30:00.000Z", to: "0x1234567890abcdef1234567890abcdef12345678", token: "USDC", txHash: "0xabc", source: "owner" });
+  assert.equal(row.amount, "USDC ~$12.50");
+  assert.equal(row.to, "0x1234…5678");
+  assert.equal(row.source, "You signed");
+  assert.equal(row.receiptUrl, "https://sepolia.etherscan.io/tx/0xabc");
+  const bare = activity.activityRow({ valueUsd: 3, at: "2026-10-19T10:30:00.000Z", token: "0x00000000000000000000000000000000000000e5" });
+  assert.equal(bare.amount, "~$3", "a contract address isn't shown as the token");
+  assert.equal(bare.receiptUrl, null);
+  assert.equal(bare.to, "");
+});
+
+test("the Telegram link's id is only read when it looks like a request id", () => {
+  assert.equal(activity.ownerSignIdFromSearch("?ownerSign=11111111-2222-3333-4444-555555555555"), "11111111-2222-3333-4444-555555555555");
+  assert.equal(activity.ownerSignIdFromSearch("?x=1"), null);
+  assert.equal(activity.ownerSignIdFromSearch("?ownerSign=<script>"), null);
+  assert.match(activity.EXPIRED_OWNER_SIGN, /expired.*daily reset/);
 });
 
 for (const [name, fn] of tests) {

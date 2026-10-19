@@ -10,7 +10,7 @@
 // would need a shared store (see the "Lightweight DB" option).
 
 import { read, write, readMany, append } from "../integrations/zero-g/storage";
-import type { PolicyProfile, ActivityRecord } from "./index";
+import type { PolicyProfile, ActivityRecord, ActivitySource } from "./index";
 import { injectFault } from "../utils/faultInject";
 import { withTimeout } from "../utils/rpc";
 import { safeErr } from "../utils/redact";
@@ -118,7 +118,7 @@ export async function getPolicyProfile(wallet?: string): Promise<PolicyProfile> 
   return value;
 }
 
-/** Recent (trailing 24h) auto-approved activity for a wallet. */
+/** Recent (trailing 24h) recorded activity for a wallet. */
 export async function getRecentActivity(wallet: string): Promise<ActivityRecord[]> {
   const key = wallet.toLowerCase();
   let list = activityCache.get(key);
@@ -142,7 +142,29 @@ export async function getRecentActivity(wallet: string): Promise<ActivityRecord[
   });
 }
 
-/** Record an auto-approved action (write-through: memory now, 0G async). */
+/**
+ * One activity row for a spend that actually moved funds (auto-exec, an approved action, or —
+ * when wired — an owner-signed over-cap send). Shared so each path records the same shape once.
+ */
+export function spendActivity(input: {
+  valueUsd: number;
+  to?: string | null;
+  token?: string | null;
+  txHash?: string | null;
+  explorerUrl?: string | null;
+  source?: ActivitySource;
+  at?: string;
+}): ActivityRecord {
+  const rec: ActivityRecord = { valueUsd: input.valueUsd, at: input.at ?? new Date().toISOString() };
+  if (input.to) rec.to = input.to;
+  if (input.token) rec.token = input.token;
+  if (input.txHash) rec.txHash = input.txHash;
+  if (input.explorerUrl) rec.explorerUrl = input.explorerUrl;
+  if (input.source) rec.source = input.source;
+  return rec;
+}
+
+/** Record a spend that executed (write-through: memory now, 0G async). */
 export async function recordActivity(wallet: string, rec: ActivityRecord): Promise<void> {
   const key = wallet.toLowerCase();
   if (!activityCache.has(key)) await getRecentActivity(key).catch(() => {}); // seed from storage first

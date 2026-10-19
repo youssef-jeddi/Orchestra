@@ -9,8 +9,9 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { OrchestraProvider, useOrchestra } from '@/context/OrchestraContext';
 import {
   sendIntent, getPrices, getPasskeyStatus, getApproval,
-  getTelegramStatus, telegramLinkRequest, telegramLink, listPasskeys, rejectApproval,
+  getTelegramStatus, telegramLinkRequest, telegramLink, listPasskeys, rejectApproval, getOwnerSign, getActivity,
 } from '@/lib/bridge';
+import { activityRow, ownerSignIdFromSearch, ACTIVITY_EMPTY, EXPIRED_OWNER_SIGN } from '@/lib/activity';
 import { signOwnerRequest } from '@/lib/signing';
 import { errorMessage } from '@/lib/ownerSign';
 import { registerPasskey, approveWithPasskey, setUpPhonePasskey, removePasskey } from '@/lib/passkey';
@@ -81,7 +82,14 @@ function SimpleChat() {
   }, [messages, busy]);
 
   const refreshBalances = safe.refreshBalances;
-  const movedFunds = useCallback(() => refreshSoon(refreshBalances), [refreshBalances]);
+  // The "Recent activity" list: re-read whenever something that moves funds has finished.
+  const [activity, setActivity] = useState(null); // null until loaded
+  const loadActivity = useCallback(() => {
+    if (!ledger.walletAddress || !session.ready) { setActivity(null); return; }
+    getActivity().then((d) => setActivity(d.activity || [])).catch(() => {});
+  }, [ledger.walletAddress, session.ready]);
+  useEffect(() => { loadActivity(); }, [loadActivity]);
+  const movedFunds = useCallback(() => { refreshSoon(refreshBalances); refreshSoon(loadActivity); }, [refreshBalances, loadActivity]);
   const [signingIdx, setSigningIdx] = useState(null);
   const [prices, setPrices] = useState(null);
   const [passkeyReg, setPasskeyReg] = useState(false);
@@ -122,13 +130,13 @@ function SimpleChat() {
       const data = await sendIntent(text, ledger.walletAddress, { history });
       if (isPasskeyRequired(data)) held.current.hold(text, history);
       setMessages((m) => [...m, { role: 'agent', data }]);
-      if (shouldRefreshBalances(data)) refreshSoon(refreshBalances);
+      if (shouldRefreshBalances(data)) movedFunds();
     } catch (err) {
       setMessages((m) => [...m, errorMessage(err)]);
     } finally {
       setBusy(false);
     }
-  }, [ledger.walletAddress, refreshBalances]);
+  }, [ledger.walletAddress, movedFunds]);
 
   const send = useCallback(async (raw) => {
     const text = (raw ?? input).trim();
@@ -189,7 +197,7 @@ function SimpleChat() {
     try {
       const result = await approveWithPasskey(ledger.walletAddress, data.approval.id);
       settleCard(idx, doneOutcome(result));
-      refreshSoon(refreshBalances);
+      movedFunds();
     } catch (err) {
       // If the server already settled it (it ran and failed, or lapsed), the card says so and loses
       // its buttons; if it is still waiting (prompt cancelled, check failed) it stays open.
@@ -202,7 +210,7 @@ function SimpleChat() {
     } finally {
       setSigningIdx(null);
     }
-  }, [ledger.walletAddress, settleCard, refreshBalances]);
+  }, [ledger.walletAddress, settleCard, movedFunds]);
 
   // Sign a request that went past the daily ceiling, as the account's owner. The server holds the
   // exact transaction; the wallet signs its hash and the server sends it.
@@ -211,13 +219,31 @@ function SimpleChat() {
     try {
       const result = await signOwnerRequest(ledger, offer, { emailWallet, hasPasskey: session.hasPasskey });
       setMessages((m) => [...m, { role: 'system', txHash: result.txHash, explorerUrl: result.explorerUrl }]);
-      refreshSoon(refreshBalances);
+      movedFunds();
     } catch (err) {
       setMessages((m) => [...m, { role: 'agent', error: err.message }]);
     } finally {
       setSigningIdx(null);
     }
-  }, [ledger, emailWallet, session.hasPasskey, refreshBalances]);
+  }, [ledger, emailWallet, session.hasPasskey, movedFunds]);
+
+  // Opened from the Telegram link (?ownerSign=<id>): show the held request again with its Sign button.
+  // The id is removed from the address first, so a refresh doesn't ask again.
+  useEffect(() => {
+    if (!session.ready || !ledger.walletAddress || typeof window === 'undefined') return;
+    const id = ownerSignIdFromSearch(window.location.search);
+    if (!id) return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete('ownerSign');
+    window.history.replaceState(null, '', url.pathname + url.search + url.hash);
+    getOwnerSign(id)
+      .then((offer) => setMessages((m) => [...m, errorMessage({
+        code: 'over_daily_cap',
+        message: 'To send this, sign it with your wallet. ' + (offer.summary || ''),
+        data: { ownerSign: offer },
+      })]))
+      .catch(() => setMessages((m) => [...m, { role: 'agent', error: EXPIRED_OWNER_SIGN }]));
+  }, [session.ready, ledger.walletAddress]);
 
   const registerPk = useCallback(async () => {
     if (!ledger.walletAddress) return;
@@ -355,7 +381,9 @@ function SimpleChat() {
       {connected && session.ready && showLimits && (
         <LimitsSheet ledger={ledger} onClose={() => setShowLimits(false)} buttonStyle={approveBtn} />
       )}
-      {connected && session.ready && <SafeSetup safe={safe} canFund={userMaySign({ emailWallet, hasPasskey: session.hasPasskey }, 'deposit')} ledger={ledger} onError={(msg) => setMessages((m) => [...m, { role: 'agent', error: msg }])} />}
+      {connected && session.ready && <SafeSetup safe={safe} canFund={userMaySign({ emailWallet, hasPasskey: session.hasPasskey }, 'deposit')} ledger={ledger} onMoved={movedFunds} onError={(msg) => setMessages((m) => [...m, { role: 'agent', error: msg }])} />}
+
+      {connected && session.ready && <RecentActivity rows={activity} />}
 
       {/* Messages */}
       <main style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 16, padding: '24px 0' }}>
@@ -865,14 +893,38 @@ function PhoneSetupButton({ session, onDone, onError }) {
   );
 }
 
-function SafeSetup({ safe, canFund, ledger, onError }) {
+function RecentActivity({ rows }) {
+  if (!rows) return null;
+  return (
+    <section style={{ marginTop: 12, padding: '10px 12px', border: '1px solid #1c1c22', borderRadius: 12 }}>
+      <p style={{ margin: '0 0 6px', fontSize: 13, color: '#B9B5AE' }}>Recent activity</p>
+      {rows.length === 0 && <p style={{ margin: 0, fontSize: 13, color: HINT_COLOR }}>{ACTIVITY_EMPTY}</p>}
+      {rows.slice(0, 20).map((rec) => {
+        const r = activityRow(rec);
+        return (
+          <div key={r.key} style={{ display: 'flex', flexWrap: 'wrap', gap: 8, padding: '4px 0', fontSize: 13, color: '#E8E4DE' }}>
+            <span style={{ color: '#8d8a84' }}>{r.when}</span>
+            <span>{r.amount}</span>
+            {r.to && <span style={{ color: '#B9B5AE' }}>to {r.to}</span>}
+            <span style={{ color: '#B9B5AE' }}>· {r.source}</span>
+            {r.receiptUrl && <a href={r.receiptUrl} target="_blank" rel="noreferrer" style={{ color: ACCENT, textDecoration: 'none' }}>View receipt ↗</a>}
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
+function SafeSetup({ safe, canFund, ledger, onMoved, onError }) {
   const [busy, setBusy] = useState(null); // 'eth' | 'usdc' | null
 
   const fund = async (token, amount) => {
     setBusy(token);
     try {
       await safe.deposit(token, amount);
-      setTimeout(() => safe.refreshBalances(), 4000);
+      // Deposits aren't in the activity list (no server record), but balances refresh; keep the list in sync too.
+      if (onMoved) onMoved();
+      else setTimeout(() => safe.refreshBalances(), 4000);
     } catch (err) { onError(err.message); }
     finally { setBusy(null); }
   };
