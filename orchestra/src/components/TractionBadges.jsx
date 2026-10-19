@@ -12,15 +12,15 @@ const BADGES = [
 
 export default function TractionBadges() {
   return (
-    <section className="px-6 py-20 sm:px-8">
+    <section className="px-6 pb-24 sm:px-8 sm:pb-32">
       <div className="mx-auto flex max-w-4xl flex-col items-center">
         <motion.p
-          initial={{ opacity: 0 }}
-          whileInView={{ opacity: 1 }}
+          initial={{ opacity: 0, y: 30 }}
+          whileInView={{ opacity: 1, y: 0 }}
           viewport={{ once: true, amount: 0.5 }}
           transition={{ duration: 0.8, ease: EASE }}
-          className="text-[10px] uppercase sm:text-[11px]"
-          style={{ color: 'var(--text-3)', letterSpacing: '0.24em', lineHeight: 1.6 }}
+          className="eyebrow"
+          style={{ color: 'var(--text-3)' }}
         >
           Backed by the stage we played on
         </motion.p>
@@ -29,16 +29,11 @@ export default function TractionBadges() {
           {BADGES.map(({ glyph, label, sub }, i) => (
             <motion.div
               key={label}
-              initial={{ opacity: 0, y: 16 }}
+              initial={{ opacity: 0, y: 30 }}
               whileInView={{ opacity: 1, y: 0 }}
               viewport={{ once: true, amount: 0.3 }}
-              transition={{ duration: 0.6, delay: 0.1 * i, ease: EASE }}
-              className="flex items-center gap-3 rounded-full px-5 py-3"
-              style={{
-                background: 'rgba(255,255,255,0.08)',
-                backdropFilter: 'blur(20px)',
-                border: '1px solid rgba(255,255,255,0.12)',
-              }}
+              transition={{ duration: 0.8, delay: 0.12 * i, ease: EASE }}
+              className="glass flex items-center gap-3 rounded-full px-5 py-3"
             >
               <span aria-hidden="true" className="text-sm">
                 {glyph}
@@ -46,14 +41,11 @@ export default function TractionBadges() {
               <span className="flex min-w-0 flex-col">
                 <span
                   className="truncate text-xs"
-                  style={{ color: 'var(--text-1)', lineHeight: 1.5 }}
+                  style={{ color: 'var(--text-1)', fontWeight: 400, lineHeight: 1.5 }}
                 >
                   {label}
                 </span>
-                <span
-                  className="truncate text-[9px] uppercase"
-                  style={{ color: 'var(--text-3)', letterSpacing: '0.18em', lineHeight: 1.6 }}
-                >
+                <span className="eyebrow truncate" style={{ color: 'var(--text-3)', fontSize: 9 }}>
                   {sub}
                 </span>
               </span>

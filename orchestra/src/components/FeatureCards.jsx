@@ -31,86 +31,81 @@ const AGENTS = [
 
 export default function FeatureCards() {
   return (
-    <section className="px-6 py-20 sm:px-8 sm:py-28">
+    <section className="px-6 py-24 sm:px-8 sm:py-32">
       <div className="mx-auto max-w-5xl">
         <motion.h2
-          initial={{ opacity: 0, y: 20 }}
+          initial={{ opacity: 0, y: 30 }}
           whileInView={{ opacity: 1, y: 0 }}
           viewport={{ once: true, amount: 0.5 }}
           transition={{ duration: 0.8, ease: EASE }}
-          className="text-center text-2xl sm:text-4xl"
+          className="display text-center"
           style={{
-            fontFamily: 'var(--font-playfair, serif)',
-            fontWeight: 400,
+            fontSize: 'clamp(32px, 5vw, 56px)',
+            fontWeight: 600,
             color: 'var(--text-1)',
-            lineHeight: 1.3,
           }}
         >
           Three agents. One score.
         </motion.h2>
 
         <motion.p
-          initial={{ opacity: 0, y: 20 }}
+          initial={{ opacity: 0, y: 30 }}
           whileInView={{ opacity: 1, y: 0 }}
           viewport={{ once: true, amount: 0.5 }}
-          transition={{ duration: 0.8, delay: 0.1, ease: EASE }}
-          className="mx-auto mt-5 max-w-lg text-center text-sm"
-          style={{ color: 'var(--text-2)', lineHeight: 1.8 }}
+          transition={{ duration: 0.8, delay: 0.12, ease: EASE }}
+          className="mx-auto mt-6 max-w-lg text-center text-base"
+          style={{ color: 'var(--text-2)', fontWeight: 300, lineHeight: 1.6 }}
         >
           A Planner, a Gatekeeper and an Executor — each one plays its part before
           a single transaction leaves your wallet.
         </motion.p>
 
-        <div className="mt-14 grid grid-cols-1 gap-5 sm:grid-cols-3 sm:gap-6">
+        <div className="mt-16 grid grid-cols-1 gap-5 sm:grid-cols-3 sm:gap-6">
           {AGENTS.map(({ Icon, glyph, name, role, line }, i) => (
             <motion.article
               key={name}
-              initial={{ opacity: 0, y: 24 }}
+              initial={{ opacity: 0, y: 30 }}
               whileInView={{ opacity: 1, y: 0 }}
               viewport={{ once: true, amount: 0.3 }}
-              transition={{ duration: 0.7, delay: 0.1 * i, ease: EASE }}
-              whileHover={{ scale: 1.02 }}
-              className="group flex flex-col rounded-2xl p-7"
+              transition={{ duration: 0.8, delay: 0.12 * i, ease: EASE }}
+              whileHover={{ scale: 1.03 }}
+              className="glass flex flex-col rounded-3xl p-8"
               style={{
-                background: 'var(--bg-card)',
-                border: '1px solid var(--border)',
                 transition:
-                  'border-color 0.3s cubic-bezier(0.16,1,0.3,1), box-shadow 0.3s cubic-bezier(0.16,1,0.3,1)',
+                  'border-color 0.4s var(--ease), box-shadow 0.4s var(--ease)',
               }}
               onMouseEnter={(e) => {
                 e.currentTarget.style.borderColor = 'var(--border-hi)';
-                e.currentTarget.style.boxShadow   = '0 0 30px rgba(192,132,252,0.1)';
+                e.currentTarget.style.boxShadow   = '0 0 40px rgba(192,132,252,0.12)';
               }}
               onMouseLeave={(e) => {
-                e.currentTarget.style.borderColor = 'var(--border)';
+                e.currentTarget.style.borderColor = '';
                 e.currentTarget.style.boxShadow   = 'none';
               }}
             >
               <div className="flex items-center justify-between">
                 <span
-                  className="flex h-10 w-10 items-center justify-center rounded-xl"
+                  className="flex h-11 w-11 items-center justify-center rounded-2xl"
                   style={{
                     background: 'rgba(192,132,252,0.08)',
                     border: '1px solid rgba(192,132,252,0.18)',
                   }}
                 >
-                  <Icon size={17} strokeWidth={1.4} style={{ color: 'var(--accent)' }} />
+                  <Icon size={18} strokeWidth={1.4} style={{ color: 'var(--accent)' }} />
                 </span>
-                <span
-                  className="text-[9px] uppercase"
-                  style={{ color: 'var(--text-3)', letterSpacing: '0.2em', lineHeight: 1.6 }}
-                >
+                <span className="eyebrow" style={{ color: 'var(--text-3)', fontSize: 10 }}>
                   {role}
                 </span>
               </div>
 
               <h3
-                className="mt-7 text-xl"
+                className="display mt-8"
                 style={{
-                  fontFamily: 'var(--font-playfair, serif)',
-                  fontWeight: 400,
+                  fontSize: 22,
+                  fontWeight: 600,
+                  letterSpacing: '-0.02em',
                   color: 'var(--text-1)',
-                  lineHeight: 1.4,
+                  lineHeight: 1.3,
                 }}
               >
                 <span aria-hidden="true" className="mr-2">
@@ -119,7 +114,10 @@ export default function FeatureCards() {
                 {name}
               </h3>
 
-              <p className="mt-3 text-sm" style={{ color: 'var(--text-2)', lineHeight: 1.8 }}>
+              <p
+                className="mt-3.5 text-sm"
+                style={{ color: 'var(--text-2)', fontWeight: 300, lineHeight: 1.6 }}
+              >
                 {line}
               </p>
             </motion.article>

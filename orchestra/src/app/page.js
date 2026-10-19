@@ -10,7 +10,7 @@ import WaitlistFooter  from '@/components/WaitlistFooter';
 
 export default function Home() {
   return (
-    <>
+    <div className="grainient-bg">
       <CustomCursor />
       <WaitlistNav />
 
@@ -22,6 +22,6 @@ export default function Home() {
       </main>
 
       <WaitlistFooter />
-    </>
+    </div>
   );
 }

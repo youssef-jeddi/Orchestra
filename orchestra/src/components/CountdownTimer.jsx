@@ -42,58 +42,47 @@ export default function CountdownTimer({ date = LAUNCH_DATE }) {
     nowSec === null || Number.isNaN(target) ? null : remaining(target, nowSec);
 
   return (
-    <motion.section
-      initial={{ opacity: 0, y: 24 }}
-      whileInView={{ opacity: 1, y: 0 }}
-      viewport={{ once: true, amount: 0.4 }}
-      transition={{ duration: 0.8, ease: EASE }}
-      className="px-6 py-20 sm:px-8"
-    >
-      <div className="mx-auto flex max-w-3xl flex-col items-center">
-        <p
-          className="text-[10px] uppercase sm:text-[11px]"
-          style={{ color: 'var(--text-3)', letterSpacing: '0.24em', lineHeight: 1.6 }}
+    <section className="px-6 py-24 sm:px-8 sm:py-32">
+      <div className="mx-auto flex max-w-4xl flex-col items-center">
+        <motion.p
+          initial={{ opacity: 0, y: 30 }}
+          whileInView={{ opacity: 1, y: 0 }}
+          viewport={{ once: true, amount: 0.4 }}
+          transition={{ duration: 0.8, ease: EASE }}
+          className="eyebrow"
+          style={{ color: 'var(--text-3)' }}
         >
-          The first movement begins in
-        </p>
+          Launching in
+        </motion.p>
 
-        <div className="mt-8 grid w-full max-w-md grid-cols-2 gap-3 sm:max-w-none sm:grid-cols-4 sm:gap-4">
+        <div className="mt-10 grid w-full max-w-lg grid-cols-2 gap-3 sm:max-w-none sm:grid-cols-4 sm:gap-4">
           {UNITS.map(([key, label], i) => (
             <motion.div
               key={key}
-              initial={{ opacity: 0, y: 16 }}
+              initial={{ opacity: 0, y: 30 }}
               whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true, amount: 0.4 }}
-              transition={{ duration: 0.6, delay: 0.1 * i, ease: EASE }}
-              className="flex flex-col items-center rounded-2xl px-4 py-6"
-              style={{
-                background: 'rgba(255,255,255,0.08)',
-                backdropFilter: 'blur(20px)',
-                border: '1px solid rgba(255,255,255,0.12)',
-              }}
+              viewport={{ once: true, amount: 0.3 }}
+              transition={{ duration: 0.8, delay: 0.12 * i, ease: EASE }}
+              className="glass flex flex-col items-center rounded-3xl px-4 py-8"
             >
               <span
-                className="text-3xl sm:text-4xl"
+                className="display"
                 style={{
-                  fontFamily: 'var(--font-playfair, serif)',
-                  fontWeight: 400,
-                  color: 'var(--gold)',
-                  lineHeight: 1.2,
+                  fontSize: 'clamp(36px, 5vw, 64px)',
+                  fontWeight: 600,
+                  color: 'var(--text-1)',
                   fontVariantNumeric: 'tabular-nums',
                 }}
               >
                 {left ? String(left[key]).padStart(2, '0') : '--'}
               </span>
-              <span
-                className="mt-2 text-[9px] uppercase sm:text-[10px]"
-                style={{ color: 'var(--text-2)', letterSpacing: '0.2em', lineHeight: 1.6 }}
-              >
+              <span className="eyebrow mt-3" style={{ color: 'var(--text-3)', fontSize: 10 }}>
                 {label}
               </span>
             </motion.div>
           ))}
         </div>
       </div>
-    </motion.section>
+    </section>
   );
 }

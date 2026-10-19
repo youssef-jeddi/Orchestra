@@ -2,11 +2,24 @@
 
 import { useCallback, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ArrowRight, Check } from 'lucide-react';
+import { ArrowRight, Check, ChevronDown } from 'lucide-react';
+import HeroVideo   from './HeroVideo';
 import AvatarStack from './AvatarStack';
 
 const SPARK_CL = ['#C084FC', '#FFD700', '#E8E4DE'];
 const EASE     = [0.16, 1, 0.3, 1];
+const TITLE    = 'DeFi, conducted.';
+
+// Index de chaque lettre dans le titre complet, pour un stagger continu
+// même lorsque le reveal est groupé par mots.
+const WORDS = (() => {
+  let offset = 0;
+  return TITLE.split(' ').map((word) => {
+    const entry = { word, offset };
+    offset += word.length + 1;
+    return entry;
+  });
+})();
 
 export default function WaitlistHero() {
   const [email,  setEmail]  = useState('');
@@ -17,9 +30,9 @@ export default function WaitlistHero() {
 
   // Burst de sparks à la palette Orchestra — même esprit que LoadingIntro.
   const burst = useCallback(() => {
-    const next = Array.from({ length: 18 }, (_, k) => {
-      const angle = (k / 18) * Math.PI * 2 + Math.random() * 0.3;
-      const dist  = 50 + Math.random() * 70;
+    const next = Array.from({ length: 22 }, (_, k) => {
+      const angle = (k / 22) * Math.PI * 2 + Math.random() * 0.3;
+      const dist  = 55 + Math.random() * 75;
       return {
         id: sparkId.current++,
         x:  Math.cos(angle) * dist,
@@ -49,71 +62,87 @@ export default function WaitlistHero() {
   );
 
   return (
-    <section className="relative flex min-h-[100svh] flex-col items-center justify-center px-6 pt-28 pb-20 sm:px-8">
-      {/* Halo violet très diffus derrière le hero */}
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-x-0 top-1/4 mx-auto h-[420px] max-w-3xl"
-        style={{
-          background: 'radial-gradient(ellipse at center, rgba(192,132,252,0.08), transparent 70%)',
-          filter: 'blur(40px)',
-        }}
-      />
+    <section
+      id="hero"
+      className="relative flex min-h-[100svh] flex-col items-center justify-center overflow-hidden px-6 pt-32 pb-24 sm:px-8"
+    >
+      <HeroVideo opacity={0.4} />
 
-      <div className="relative flex w-full max-w-3xl flex-col items-center text-center">
+      <div className="relative z-10 flex w-full max-w-4xl flex-col items-center text-center">
         {/* Badge */}
         <motion.div
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.6, ease: EASE }}
-          className="inline-flex items-center gap-2 rounded-full px-4 py-1.5"
-          style={{
-            background: 'rgba(255,255,255,0.08)',
-            backdropFilter: 'blur(20px)',
-            border: '1px solid rgba(255,255,255,0.12)',
-          }}
+          transition={{ duration: 0.8, ease: EASE }}
+          className="glass inline-flex items-center gap-2.5 rounded-full px-4 py-1.5"
         >
           <span
             className="h-1.5 w-1.5 rounded-full"
             style={{ background: 'var(--accent)', boxShadow: '0 0 8px 1px rgba(192,132,252,0.6)' }}
           />
-          <span
-            className="text-[10px] uppercase sm:text-[11px]"
-            style={{ color: 'var(--text-1)', letterSpacing: '0.2em', lineHeight: 1.6 }}
-          >
-            Launching soon
+          <span className="eyebrow" style={{ color: 'var(--text-1)' }}>
+            Launching Soon
+          </span>
+          <span aria-hidden="true" style={{ color: 'var(--gold)', fontSize: 10, lineHeight: 1 }}>
+            ✦
           </span>
         </motion.div>
 
-        {/* Titre */}
-        <motion.h1
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.8, delay: 0.1, ease: EASE }}
-          className="shiny-text mt-8 text-[2.5rem] leading-[1.1] sm:text-6xl md:text-7xl"
-          style={{ fontFamily: 'var(--font-playfair, serif)', fontWeight: 400 }}
+        {/* Titre — reveal lettre par lettre, style Lusion */}
+        <h1
+          className="display mt-9"
+          style={{
+            fontSize: 'clamp(48px, 8vw, 96px)',
+            fontWeight: 700,
+            color: 'var(--text-1)',
+            textWrap: 'balance',
+          }}
         >
-          Your AI-Powered
-          <br />
-          DeFi Conductor
-        </motion.h1>
+          <span className="sr-only">{TITLE}</span>
+          {/* Mots groupés : le reveal est lettre par lettre, mais les retours
+              à la ligne ne tombent qu'entre les mots. */}
+          <span aria-hidden="true">
+            {WORDS.map(({ word, offset }, w) => (
+              <span key={`${word}-${w}`}>
+                {w > 0 ? ' ' : null}
+                <span style={{ display: 'inline-block', whiteSpace: 'nowrap' }}>
+                  {word.split('').map((ch, c) => (
+                    <motion.span
+                      key={`${ch}-${c}`}
+                      initial={{ opacity: 0, y: 26, filter: 'blur(6px)' }}
+                      animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
+                      transition={{
+                        duration: 0.9,
+                        delay: 0.12 + (offset + c) * 0.035,
+                        ease: EASE,
+                      }}
+                      style={{ display: 'inline-block' }}
+                    >
+                      {ch}
+                    </motion.span>
+                  ))}
+                </span>
+              </span>
+            ))}
+          </span>
+        </h1>
 
         {/* Sous-titre */}
         <motion.p
-          initial={{ opacity: 0, y: 20 }}
+          initial={{ opacity: 0, y: 30 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.8, delay: 0.2, ease: EASE }}
-          className="mt-7 max-w-xl text-[15px] italic sm:text-base"
-          style={{ color: 'var(--text-2)', lineHeight: 1.8 }}
+          transition={{ duration: 0.8, delay: 0.7, ease: EASE }}
+          className="mt-7 max-w-xl text-base sm:text-lg"
+          style={{ color: 'var(--text-2)', fontWeight: 300, lineHeight: 1.6 }}
         >
-          Three AI agents orchestrate your DeFi portfolio — so you can focus on the music.
+          Three AI agents. One symphony. Your portfolio on autopilot.
         </motion.p>
 
         {/* Email CTA */}
         <motion.div
-          initial={{ opacity: 0, y: 20 }}
+          initial={{ opacity: 0, y: 30 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.8, delay: 0.3, ease: EASE }}
+          transition={{ duration: 0.8, delay: 0.82, ease: EASE }}
           className="relative mt-12 w-full max-w-md"
         >
           {/* Sparks au-dessus du formulaire */}
@@ -136,14 +165,9 @@ export default function WaitlistHero() {
                 initial={{ opacity: 0, scale: 0.97 }}
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.97 }}
-                transition={{ duration: 0.35, ease: EASE }}
-                className="flex items-center justify-center gap-3 rounded-full px-6 py-4"
-                style={{
-                  background: 'rgba(255,255,255,0.08)',
-                  backdropFilter: 'blur(20px)',
-                  border: '1px solid rgba(192,132,252,0.3)',
-                  boxShadow: '0 0 30px rgba(192,132,252,0.1)',
-                }}
+                transition={{ duration: 0.4, ease: EASE }}
+                className="glass flex items-center justify-center gap-3 rounded-full px-6 py-4"
+                style={{ borderColor: 'rgba(192,132,252,0.3)' }}
               >
                 <Check size={16} strokeWidth={1.5} style={{ color: 'var(--accent)' }} />
                 <span className="text-sm" style={{ color: 'var(--text-1)' }}>
@@ -157,13 +181,8 @@ export default function WaitlistHero() {
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
-                transition={{ duration: 0.25, ease: EASE }}
-                className="flex flex-col gap-2 rounded-2xl p-2 sm:flex-row sm:rounded-full"
-                style={{
-                  background: 'rgba(255,255,255,0.08)',
-                  backdropFilter: 'blur(20px)',
-                  border: '1px solid rgba(255,255,255,0.12)',
-                }}
+                transition={{ duration: 0.3, ease: EASE }}
+                className="glass flex flex-col gap-2 rounded-2xl p-2 sm:flex-row sm:rounded-full"
               >
                 <label htmlFor="waitlist-email" className="sr-only">
                   Email address
@@ -179,26 +198,21 @@ export default function WaitlistHero() {
                   placeholder="you@protocol.xyz"
                   autoComplete="email"
                   className="min-w-0 flex-1 bg-transparent px-5 py-3 text-sm outline-none"
-                  style={{ color: 'var(--text-1)', lineHeight: 1.6 }}
+                  style={{ color: 'var(--text-1)', fontWeight: 300 }}
                 />
                 <button
                   type="submit"
-                  className="flex items-center justify-center gap-2 rounded-full px-6 py-3 text-[11px] uppercase"
+                  className="eyebrow cta-glow flex items-center justify-center gap-2 rounded-full px-6 py-3"
                   style={{
                     background: 'var(--text-1)',
                     color: 'var(--bg)',
-                    letterSpacing: '0.14em',
-                    lineHeight: 1.6,
-                    transition:
-                      'transform 0.3s cubic-bezier(0.16,1,0.3,1), box-shadow 0.3s cubic-bezier(0.16,1,0.3,1)',
+                    transition: 'transform 0.4s var(--ease)',
                   }}
                   onMouseEnter={(e) => {
                     e.currentTarget.style.transform = 'translateY(-1px)';
-                    e.currentTarget.style.boxShadow = '0 0 30px rgba(192,132,252,0.25)';
                   }}
                   onMouseLeave={(e) => {
                     e.currentTarget.style.transform = 'translateY(0)';
-                    e.currentTarget.style.boxShadow = 'none';
                   }}
                 >
                   Join the Waitlist
@@ -214,9 +228,9 @@ export default function WaitlistHero() {
                 initial={{ opacity: 0, y: -4 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -4 }}
-                transition={{ duration: 0.25, ease: EASE }}
+                transition={{ duration: 0.3, ease: EASE }}
                 className="mt-3 text-center text-xs"
-                style={{ color: '#FF453A' }}
+                style={{ color: 'var(--red)' }}
                 role="alert"
               >
                 {error}
@@ -227,14 +241,30 @@ export default function WaitlistHero() {
 
         {/* Social proof */}
         <motion.div
-          initial={{ opacity: 0, y: 16 }}
+          initial={{ opacity: 0, y: 30 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.8, delay: 0.45, ease: EASE }}
-          className="mt-10"
+          transition={{ duration: 0.8, delay: 0.94, ease: EASE }}
+          className="mt-11"
         >
-          <AvatarStack count={500} />
+          <AvatarStack target={500} />
         </motion.div>
       </div>
+
+      {/* Scroll indicator */}
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ duration: 1, delay: 1.5, ease: EASE }}
+        className="absolute bottom-9 left-1/2 z-10 -translate-x-1/2"
+        aria-hidden="true"
+      >
+        <ChevronDown
+          size={18}
+          strokeWidth={1.2}
+          className="chevron-drift"
+          style={{ color: 'var(--text-3)' }}
+        />
+      </motion.div>
     </section>
   );
 }
