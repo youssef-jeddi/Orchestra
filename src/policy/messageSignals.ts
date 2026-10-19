@@ -46,13 +46,18 @@ const ADDRESS = /0x[0-9a-fA-F]{40}(?![0-9a-fA-F])/g;
 // Same shape as the ENS check in intent/resolve.ts, but unanchored to find names inside a sentence.
 const ENS = /\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.eth\b/gi;
 
+// Look-alike characters must not hide the wording: NFKC folds full-width and compatibility
+// letters, invisible format characters (zero-width spaces, joiners, soft hyphens) are dropped,
+// and every dash and space variant becomes a plain one.
 function normalise(message: string): string {
   return message
+    .normalize("NFKC")
+    .replace(/[\p{Cf}\u00AD]/gu, "")
     .toLowerCase()
-    .replace(/[‘’‛′]/g, "'")
-    .replace(/[“”„″]/g, '"')
-    .replace(/[‐-―−]/g, "-")
-    .replace(/\s+/g, " ")
+    .replace(/[‘’‛′`´]/g, "'")
+    .replace(/[“”„″«»]/g, '"')
+    .replace(/[\p{Pd}−]/gu, "-")
+    .replace(/[\s\p{Zs}]+/gu, " ")
     .trim();
 }
 
