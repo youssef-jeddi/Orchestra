@@ -14,6 +14,7 @@ import {
   type ActivityRecord,
   type IntentType,
 } from "../policy";
+import { messageSignals, type MessageSignals } from "../policy/messageSignals";
 import { planIntent, type PlanOptions, type PlanResult } from "./planner";
 import { LIMITS_UNREADABLE_REASON } from "./messages";
 import { resolveSteps, type ResolveContext, type ResolvedStep, type PlanStep } from "./resolve";
@@ -32,6 +33,8 @@ export interface ActionPlan {
   steps: PlanStep[];
   params: Record<string, any>;
   valueUsd: number;
+  /** Pressure wording and addresses from the raw message. Signals only, never the text (ORC-90). */
+  signals?: MessageSignals;
 }
 
 export interface InterpretResult {
@@ -87,6 +90,7 @@ export async function interpretIntent(
         steps: [step.plan],
         params: step.plan.params,
         valueUsd: step.valueUsd,
+        signals: messageSignals(message),
       },
     },
   };
@@ -137,6 +141,7 @@ export function assessAction(action: ActionPlan, input: AssessInput = {}): Polic
     profile,
     history: input.history,
     now: input.now,
+    signals: action.signals,
   });
   return { ...decision, typicalMaxUsd };
 }

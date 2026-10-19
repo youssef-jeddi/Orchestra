@@ -499,7 +499,9 @@ app.post("/intent", async (req, res) => {
     li.riskScore = riskScore;
     console.log(`[intent ${rid}] ${intentType} → ${verdict} (risk ${riskScore}) rules: ${decision.triggered.length ? decision.triggered.join(",") : "none"}`);
 
-    append("plans", { ...action, flagId: "user-message", createdAt: new Date().toISOString() }).catch(() => {});
+    // The message signals stay out of storage: they can name addresses the plan doesn't use.
+    const { signals: _signals, ...storedPlan } = action;
+    append("plans", { ...storedPlan, flagId: "user-message", createdAt: new Date().toISOString() }).catch(() => {});
     append("assessments", {
       planId: action.id, verdict, riskScore, reasons: [decision.reason],
       requiresLedger: decision.requiresLedger, assessedAt: new Date().toISOString(),

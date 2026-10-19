@@ -12,6 +12,7 @@
 
 import { estimateUsd, resolveValuationSymbol } from "./prices";
 import { formatUsd } from "./money";
+import type { MessageSignals } from "./messageSignals";
 
 export type Verdict = "AUTO_EXECUTE" | "NEEDS_APPROVAL" | "BLOCKED" | "INFO";
 
@@ -128,6 +129,8 @@ export interface DecisionInput {
   history?: ActivityRecord[];
   /** Injectable clock (ms) for deterministic velocity tests. Defaults to Date.now(). */
   now?: number;
+  /** Wording and addresses found in the user's raw message (never the message itself). */
+  signals?: MessageSignals;
 }
 
 /**
@@ -241,6 +244,8 @@ function sendRecipient(steps: any[]): string | null {
  *        · unknown recipient       (profile.knownAddresses, send only, always on)
  *        · daily count velocity    (profile.maxAutoTxPerDay + history)
  *        · habit anomaly           (profile.typicalMaxUsd)
+ *        · pressure wording        (signals.pressure: the message pushes to skip checks or hurry)
+ *        · unplanned address       (signals.mentions: an address in the message the plan doesn't use)
  *   6. otherwise               → AUTO_EXECUTE
  */
 export function decide(input: DecisionInput): PolicyDecision {
@@ -309,6 +314,34 @@ export function decide(input: DecisionInput): PolicyDecision {
           ? "You haven't sent to this address before, so it needs your OK."
           : "I couldn't tell who this goes to, so it needs your OK.",
         risk: 60,
+      });
+    }
+  }
+
+  // 5g. Pressure wording ("pre-approved", "urgent", "system override"): only ever escalates,
+  // whatever the planner understood, so a persuasive message can't earn an auto-execution.
+  const signals = input.signals;
+  if (signals && signals.pressure.length > 0) {
+    escalations.push({
+      rule: "pressure-wording",
+      reason: "Your message asks me to skip my usual checks or to hurry, so I'm checking with you before anything moves.",
+      risk: 75,
+    });
+  }
+
+  // 5h. An address typed in the message that the plan doesn't use (e.g. a swap whose send the
+  // planner dropped). A 0x mention is fine as the send recipient or a known address; an ENS name
+  // is fine when it appears in the plan summary (resolve.ts puts the label there).
+  if (signals && signals.mentions.length > 0) {
+    const to = sendRecipient(steps)?.toLowerCase();
+    const known = new Set((profile?.knownAddresses ?? []).filter((a) => typeof a === "string").map((a) => a.toLowerCase()));
+    const summary = String(plan.summary).toLowerCase();
+    const unplanned = signals.mentions.some((m) => (m.startsWith("0x") ? m !== to && !known.has(m) : !summary.includes(m)));
+    if (unplanned) {
+      escalations.push({
+        rule: "unplanned-address",
+        reason: "Your message mentions an address that isn't part of what I'm about to do, so I'm checking with you first.",
+        risk: 70,
       });
     }
   }
