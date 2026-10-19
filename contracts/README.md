@@ -45,11 +45,20 @@ $ forge snapshot
 $ anvil
 ```
 
-### Deploy
+### Deploy OrchestraPolicy (Sepolia)
 
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
+The registry keeps one entry per account (Safe address). Only the **agent** may register accounts, so the contract is deployed with the agent's address:
+
+1. Deploy with the agent key (or pass the agent's address explicitly with `AGENT_ADDRESS`). This sends a real transaction, so only run it on purpose:
+   ```shell
+   $ AGENT_ADDRESS=<agent wallet address> forge script script/DeployOrchestraPolicy.s.sol:DeployOrchestraPolicy \
+       --rpc-url <sepolia_rpc_url> --private-key <deployer_key> --broadcast
+   ```
+   Without `AGENT_ADDRESS` the address broadcasting the deployment becomes the agent, so use the agent key.
+2. Set `ORCHESTRA_POLICY_ADDRESS` on the server to the printed address and restart the bridge.
+3. Accounts set up earlier are registered on the new contract by the agent at their next sign-in (one agent-paid transaction each). They stay usable meanwhile.
+
+An older deployment (entries keyed by the sender) can't be upgraded; it is simply no longer used.
 
 ### Cast
 
