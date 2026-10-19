@@ -44,6 +44,7 @@ export async function bridgeFetch(path, options = {}) {
     const err = new Error(data.error || `HTTP ${res.status}`);
     err.status = res.status;
     err.code = data.code; // e.g. 'session_required', so callers can sign in and retry
+    err.data = data; // the whole answer, e.g. the passkey challenge of a 'confirmation_required'
     throw err;
   }
   return data;
@@ -126,10 +127,11 @@ export async function prepareLimitUpdate(newLimitUSD, ledgerAddress) {
   });
 }
 
-export async function finalizeLimitUpdate(newLimitUSD, ledgerAddress, txHash) {
+/** `confirmation` ({ nonce, response }) answers the passkey challenge of a raise; see finishLimitUpdate. */
+export async function finalizeLimitUpdate(newLimitUSD, ledgerAddress, txHash, confirmation) {
   return bridgeFetch('/finalize-limit-update', {
     method: 'POST',
-    body: JSON.stringify({ newLimitUSD, ledgerAddress, txHash }),
+    body: JSON.stringify({ newLimitUSD, ledgerAddress, txHash, ...(confirmation ? { confirmation } : {}) }),
   });
 }
 

@@ -4,7 +4,9 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import { X, Send, Feather, Bot, ShieldCheck, Zap, ExternalLink, Settings, ChevronDown } from 'lucide-react';
 import { useOrchestra } from '@/context/OrchestraContext';
-import { sendIntent, broadcast, submitSwap, getNonce, prepareLimitUpdate, finalizeLimitUpdate } from '@/lib/bridge';
+import { sendIntent, broadcast, submitSwap, getNonce, prepareLimitUpdate } from '@/lib/bridge';
+import { finishLimitUpdate, PASSKEY_TO_RAISE } from '@/lib/limitUpdate';
+import { isCancel } from '@/lib/limits';
 
 const DEFAULT_MESSAGES = [
   {
@@ -193,6 +195,7 @@ export default function FuturisticNotebook({ onClose, initialMessage = '' }) {
   const [signingId, setSigningId] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
   const [spendingLimit, setSpendingLimit] = useState(100);
+  const limitTxRef = useRef(null); // { limit, txHash }: a limit transaction that was sent but not yet saved by the server
   const [limitInput, setLimitInput] = useState('100');
   const [limitUpdating, setLimitUpdating] = useState(false);
   const messagesEndRef = useRef(null);
@@ -340,14 +343,28 @@ export default function FuturisticNotebook({ onClose, initialMessage = '' }) {
   };
 
   const handleLimitSave = async () => {
-    const val = parseInt(limitInput, 10);
-    if (!val || val <= 0 || val === spendingLimit || !ledger.walletAddress) return;
+    const val = Number(limitInput);
+    // The server checks the value (whole dollars, $0 to $1,000) and answers in plain words.
+    if (limitInput.trim() === '' || Number.isNaN(val) || val === spendingLimit || !ledger.walletAddress) return;
     if (limitUpdating) return;
 
     setLimitUpdating(true);
     try {
+      // A transaction already sent for this limit whose last step (the passkey) didn't finish: just finish it.
+      const resume = limitTxRef.current?.limit === val ? limitTxRef.current.txHash : null;
+      if (resume) {
+        const done = await finishLimitUpdate(val, ledger.walletAddress, resume);
+        limitTxRef.current = null;
+        setSpendingLimit(val);
+        setMessages((prev) => [...prev, { id: Date.now(), role: 'scholar', text: `✓ Spending limit updated to $${val}.${done.notice ? ` ${done.notice}` : ''}`, isNew: true }]);
+        return;
+      }
+
       // Step 1: Get unsigned tx from backend
-      const { unsignedTx } = await prepareLimitUpdate(val, ledger.walletAddress);
+      const { unsignedTx, confirmation } = await prepareLimitUpdate(val, ledger.walletAddress);
+      if (confirmation === 'passkey') {
+        setMessages((prev) => [...prev, { id: Date.now(), role: 'scholar', text: PASSKEY_TO_RAISE, isNew: true }]);
+      }
 
       // Step 2: Send to Ledger for signing
       const { ethers } = await import('ethers');
@@ -372,19 +389,27 @@ export default function FuturisticNotebook({ onClose, initialMessage = '' }) {
       const broadcastResult = await broadcast(signedTx.serialized);
       const txHash = broadcastResult.txHash || broadcastResult.hash;
 
-      // Step 4: Finalize — update storage + on-chain policy
-      await finalizeLimitUpdate(val, ledger.walletAddress, txHash);
+      // Step 4: Finalize — the server saves the limit; a raise on a wallet with a passkey asks for it here.
+      // If this step fails after the transaction was sent, pressing Save again repeats only this step.
+      limitTxRef.current = { limit: val, txHash };
+      const done = await finishLimitUpdate(val, ledger.walletAddress, txHash);
+      limitTxRef.current = null;
 
       setSpendingLimit(val);
       setMessages((prev) => [...prev, {
-        id: Date.now(), role: 'scholar', text: `✓ Spending limit updated to $${val}. On-chain tx confirmed.`, isNew: true,
+        id: Date.now(), role: 'scholar', text: `✓ Spending limit updated to $${val}.${done.notice ? ` ${done.notice}` : ''}`, isNew: true,
       }]);
     } catch (err) {
       console.error('Limit update failed:', err);
+      const waiting = limitTxRef.current && isCancel(err);
       setMessages((prev) => [...prev, {
-        id: Date.now(), role: 'scholar', text: `Failed to update limit: ${err.message}`, isNew: true,
+        id: Date.now(), role: 'scholar',
+        text: waiting
+          ? 'Your wallet transaction went through, but the new limit is not active until you confirm with your passkey. Press Save again to finish.'
+          : `Failed to update limit: ${err.message}`,
+        isNew: true,
       }]);
-      setLimitInput(String(spendingLimit)); // revert input
+      if (!waiting) setLimitInput(String(spendingLimit)); // revert input
     } finally {
       setLimitUpdating(false);
     }

@@ -15,6 +15,7 @@ import {
   type IntentType,
 } from "../policy";
 import { planIntent, type PlanOptions, type PlanResult } from "./planner";
+import { LIMITS_UNREADABLE_REASON } from "./messages";
 import { resolveSteps, type ResolveContext, type ResolvedStep, type PlanStep } from "./resolve";
 
 export type IntentOutcome =
@@ -52,6 +53,12 @@ export async function interpretIntent(
   if (out.type === "reply") return { planner, outcome: { kind: "reply", text: out.text } };
   if (out.type === "clarify") return { planner, outcome: { kind: "clarify", question: out.question } };
   if (out.type === "unsupported") return { planner, outcome: { kind: "unsupported", reason: out.reason } };
+
+  // Asked before resolution, so a balance answer ("not enough USDC") never takes the place of
+  // the limits answer: with the limits or the day's activity unreadable, nothing about a spend is built.
+  if (ctx.valueGate && out.steps.some((s) => VALUE_BEARING.has(s.action)) && !(await ctx.valueGate())) {
+    return { planner, outcome: { kind: "unsupported", reason: LIMITS_UNREADABLE_REASON } };
+  }
 
   const resolved = await resolveSteps(out.steps, ctx);
   if (resolved.kind === "clarify") return { planner, outcome: { kind: "clarify", question: resolved.question } };

@@ -44,7 +44,7 @@ export function useSafe(ledger, session) {
       setSafeAddress(data.safeAddress);
       setSafeStatus(safeStatusFor(data.status));
       setFinishing(!!data.resumed);
-      if (data.spendingLimitUSD) setSpendingLimit(data.spendingLimitUSD);
+      if (typeof data.spendingLimitUSD === 'number') setSpendingLimit(data.spendingLimitUSD); // 0 is a real limit
       if (data.status === 'ready') {
         refreshBalances(data.safeAddress);
         ledger.log(`Account ready: ${data.safeAddress}`);

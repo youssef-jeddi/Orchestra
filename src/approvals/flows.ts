@@ -8,6 +8,7 @@ import { requirePending, claim, reject, getApproval, settle, ApprovalError, type
 import { sentRecipient } from "./describe";
 import { recordKnownRecipient } from "../policy/store";
 import { safeErr } from "../utils/redact";
+import { UserFacingError } from "../utils/userFacing";
 
 /**
  * After a send through the account actually went through, remember who it paid: the next send to
@@ -32,7 +33,7 @@ export async function executeApprovalFlow(
 ): Promise<{ txHash: string; explorerUrl: string }> {
   try {
     const exec = await run(a);
-    if (!exec) throw new Error("It ran but gave no result, so I can't confirm it went through");
+    if (!exec) throw new UserFacingError("It ran but gave no result, so I can't confirm it went through");
     const result = { txHash: exec.txHash, explorerUrl: exec.explorerUrl };
     settle(a, { result });
     await rememberSentRecipient(a.wallet, a.intentType, a.execution);
