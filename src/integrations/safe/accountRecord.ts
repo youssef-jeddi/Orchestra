@@ -29,7 +29,6 @@ export async function writeAccountRecord(o: { user: string; safeAddress: string;
     address: o.user,
     safeAddress: o.safeAddress,
     riskTolerance: profile.riskTolerance || "moderate",
-    autoApproveLimit: DEFAULT_SPENDING_LIMIT_USD,
     preferredTokens: profile.preferredTokens || ["USDC", "WETH", "ETH"],
     createdAt: profile.createdAt || now(),
     updatedAt: now(),

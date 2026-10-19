@@ -87,6 +87,7 @@ test("the account-record setup step copies nothing from the shared record and wr
   assert.equal(own.createdAt, "2026-01-01T00:00:00.000Z");
   assert.equal(((await storage.read(`safe:${w.toLowerCase()}`)) as any).spendingLimitUSD, 100);
   assert.equal(resolveDailyLimit((await getPolicyProfile(w)).dailyLimitUsd), 100);
+  assert.equal("autoApproveLimit" in (await readUserProfile(w)), false, "the unenforced field is not written");
   await sharedUntouched();
 });
 
@@ -101,7 +102,8 @@ test("a wallet's own settings are kept when its account record is written", asyn
 test("the old planner's profile provider ignores the shared record", async () => {
   await seedShared();
   const profile = JSON.parse(await userProfileProvider.handler());
-  assert.equal(profile.autoApproveLimit, 100);
+  assert.equal("autoApproveLimit" in profile, false, "the planner is told no limit; the policy decides");
+  assert.equal(Object.keys(profile).some((k) => /limit/i.test(k)), false);
   assert.deepEqual(profile.knownAddresses, []);
   assert.equal(JSON.stringify(profile).includes("1000"), false);
   assert.equal(JSON.stringify(profile).includes("aggressive"), false);
