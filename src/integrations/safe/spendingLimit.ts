@@ -3,6 +3,7 @@ import { ethers } from 'ethers';
 import { ALLOWANCE_MODULE_ADDRESS } from '../../types/safe';
 import type { TxTracker } from './inflight';
 import { shortAddr } from "../../utils/redact";
+import { POLICY_ABI } from './policyContract';
 
 const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
 
@@ -19,10 +20,6 @@ const ALLOWANCE_ABI = [
   'function getDelegates(address safe, uint48 start, uint8 pageSize) view returns (address[] results, address next)',
 ];
 
-// OrchestraPolicy ABI for updateSpendingLimit
-const POLICY_ABI = [
-  'function updateSpendingLimit(uint256 newLimitUSD) external',
-];
 
 // Helper: fresh Safe SDK instance (avoids stale nonce after tx execution)
 async function initSafe(safeAddress: string, signerPrivateKey: string) {
@@ -190,7 +187,7 @@ export async function updateSpendingLimit(
     const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC);
     const wallet = new ethers.Wallet(signerPrivateKey, provider);
     const policy = new ethers.Contract(policyAddress, POLICY_ABI, wallet);
-    const policyTx = await policy.updateSpendingLimit(newLimitUSD * 100);
+    const policyTx = await policy.updateSpendingLimit(safeAddress, newLimitUSD * 100);
     await policyTx.wait();
     txHashes.push(policyTx.hash);
     console.log(`[Safe] OrchestraPolicy updated: ${policyTx.hash}`);

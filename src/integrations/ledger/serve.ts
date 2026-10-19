@@ -18,6 +18,7 @@ import { executeSwap } from "../uniswap/execution";
 import { WETH_SEPOLIA, USDC_SEPOLIA, CHAIN_ID } from "../uniswap/types";
 import { write, read, append } from "../zero-g/storage";
 import { detectExistingSafe } from "../safe/detect";
+import { POLICY_ABI, NOT_PER_ACCOUNT_REGISTRY, isPerAccountRegistry } from "../safe/policyContract";
 import { onboarding, storedSpendingLimit, isAccountReady } from "../safe/onboard";
 import { OnboardingError, ACCOUNT_NOT_READY_REASON } from "../safe/onboarding";
 import { setInitialSpendingLimits, updateSpendingLimit, buildLimitUpdateTx } from "../safe/spendingLimit";
@@ -1285,10 +1286,11 @@ app.post("/finalize-limit-update", requireSession, async (req, res) => {
       try {
         const agentKey = process.env.AGENT_PRIVATE_KEY!;
         const wallet = new ethers.Wallet(agentKey, provider);
-        const policy = new ethers.Contract(policyAddress, [
-          'function updateSpendingLimit(uint256 newLimitUSD) external',
-        ], wallet);
-        const policyTx = await policy.updateSpendingLimit(newLimitUSD * 100);
+        // Never write to a contract that isn't the per-account registry (the old one is keyed by sender).
+        if (!(await isPerAccountRegistry(provider, policyAddress, wallet.address))) throw new Error(NOT_PER_ACCOUNT_REGISTRY);
+        const policy = new ethers.Contract(policyAddress, POLICY_ABI, wallet);
+        // Entries are keyed by account, so this can only change this wallet's own entry.
+        const policyTx = await policy.updateSpendingLimit(safeAddress, newLimitUSD * 100);
         await policyTx.wait();
         console.log(`[finalize-limit-update] OrchestraPolicy updated: ${policyTx.hash}`);
       } catch (policyErr: any) {

@@ -1,75 +1,68 @@
+// ─── Safe — find the account a wallet owns, without writing anything ───
+// /intent needs the account address even when storage was lost (in-memory storage after a restart).
+// The address is deterministic, so it is predicted and checked for code. Read-only on purpose:
+// an account that is deployed but not finished (module, allowances, registration still to do) is
+// found here too, and must not be recorded as the user's own. `safe:<wallet>` is written only by
+// the last setup step (accountRecord.ts), and no limit is read from anywhere: another account's
+// registry entry can't leak into this one.
+
 import Safe from '@safe-global/protocol-kit';
-import { ethers } from 'ethers';
-import { read, write } from '../zero-g/storage';
+import { read } from '../zero-g/storage';
 import { getAgentAddress } from './agentWallet';
 import { predictedSafeConfig } from './deploy';
+import { makeSepoliaProvider } from '../../utils/rpc';
 import { shortAddr, safeErr } from "../../utils/redact";
 
-const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
+/** Everything detection reads; injected so the rules are tested without network. */
+export interface DetectReads {
+  /** The account recorded for the wallet (`safe:<wallet>`), if any. */
+  storedAccount(wallet: string): Promise<string | null>;
+  /** The wallet's deterministic account address. */
+  predict(wallet: string): Promise<string>;
+  hasCode(address: string): Promise<boolean>;
+}
 
-const ORCHESTRA_POLICY_ABI = [
-  'function hasPolicy(address user) external view returns (bool)',
-  'function getPolicy(address user) external view returns (tuple(address safeAddress, address agentWallet, uint256 spendingLimitUSD, bool initialized))',
-];
+const CACHE_TTL_MS = 60_000;
+const found = new Map<string, { address: string; expires: number }>();
+
+/**
+ * The wallet's account address if it exists: the stored one, else the predicted one when it has
+ * code. Only a positive answer is remembered (briefly, so a chat doesn't redo the chain reads on
+ * every message); "not found" is asked again so a deployment is noticed at once.
+ */
+export async function detectWith(reads: DetectReads, wallet: string, now = Date.now()): Promise<string | null> {
+  const key = wallet.toLowerCase();
+  const stored = await reads.storedAccount(key);
+  if (stored) return stored;
+  const hit = found.get(key);
+  if (hit && hit.expires > now) return hit.address;
+  const predicted = await reads.predict(wallet);
+  if (!(await reads.hasCode(predicted))) return null;
+  found.set(key, { address: predicted, expires: now + CACHE_TTL_MS });
+  return predicted;
+}
+
+/** Test hook — forget remembered detections. */
+export function _resetDetectCache(): void {
+  found.clear();
+}
+
+const realReads: DetectReads = {
+  storedAccount: async (wallet) => ((await read(`safe:${wallet}`)) as { safeAddress?: string } | null)?.safeAddress ?? null,
+  predict: async (wallet) => (await Safe.init({
+    provider: process.env.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com',
+    predictedSafe: predictedSafeConfig(wallet, getAgentAddress()),
+  })).getAddress(),
+  hasCode: async (address) => (await makeSepoliaProvider().getCode(address)) !== '0x',
+};
 
 export async function detectExistingSafe(ledgerAddress: string): Promise<string | null> {
-  console.log(`[Safe] Detecting existing account for ${shortAddr(ledgerAddress)}...`);
-
-  // 1. Check 0G Storage (fast path)
-  const stored = await read(`safe:${ledgerAddress.toLowerCase()}`);
-  if (stored && (stored as any).safeAddress) {
-    console.log(`[Safe] Found in storage: ${shortAddr((stored as any).safeAddress)}`);
-    return (stored as any).safeAddress;
-  }
-
-  // 2. Predict the deterministic Safe address and check if code exists
-  //    This works across clones — no registry or storage needed.
   try {
-    const agentAddress = getAgentAddress();
-    const safe = await Safe.init({
-      provider: SEPOLIA_RPC,
-      signer: process.env.AGENT_PRIVATE_KEY!,
-      predictedSafe: predictedSafeConfig(ledgerAddress, agentAddress),
-    });
-
-    const predictedAddress = await safe.getAddress();
-    const provider = new ethers.JsonRpcProvider(SEPOLIA_RPC);
-    const code = await provider.getCode(predictedAddress);
-
-    if (code !== '0x') {
-      console.log(`[Safe] Found deployed account at predicted address: ${shortAddr(predictedAddress)} — syncing to storage`);
-
-      // Recover spending limit from OrchestraPolicy if available
-      let spendingLimitUSD = 100;
-      const policyAddress = process.env.ORCHESTRA_POLICY_ADDRESS;
-      if (policyAddress) {
-        try {
-          const contract = new ethers.Contract(policyAddress, ORCHESTRA_POLICY_ABI, provider);
-          // Policy is keyed by msg.sender (agent wallet), not ledger
-          const exists = await contract.hasPolicy(agentAddress);
-          if (exists) {
-            const policy = await contract.getPolicy(agentAddress);
-            spendingLimitUSD = Number(policy.spendingLimitUSD) / 100;
-          }
-        } catch (e: any) {
-          console.warn(`[Safe] Policy read failed (using default limit): ${safeErr(e)}`);
-        }
-      }
-
-      // Sync back to 0G Storage so future checks are fast
-      await write(`safe:${ledgerAddress.toLowerCase()}`, {
-        safeAddress: predictedAddress,
-        agentWallet: agentAddress,
-        spendingLimitUSD,
-        deployedAt: new Date().toISOString(),
-      });
-
-      return predictedAddress;
-    }
+    const address = await detectWith(realReads, ledgerAddress);
+    if (address) console.log(`[Safe] Found account for ${shortAddr(ledgerAddress)}: ${shortAddr(address)}`);
+    return address;
   } catch (err: any) {
-    console.warn(`[Safe] Deterministic detection failed: ${safeErr(err)}`);
+    console.warn(`[Safe] Account detection failed: ${safeErr(err)}`);
+    return null;
   }
-
-  console.log('[Safe] No existing account found — new user');
-  return null;
 }
