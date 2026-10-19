@@ -22,7 +22,8 @@ import { detectExistingSafe } from "../safe/detect";
 import { onboarding, isAccountReady } from "../safe/onboard";
 import { OnboardingError, ACCOUNT_NOT_READY_REASON } from "../safe/onboarding";
 import { errorResponse, isUserFacing, executionErrorMessage } from "./errors";
-import { UserFacingError } from "../../utils/userFacing";
+import { UserFacingError, OverCapError } from "../../utils/userFacing";
+import { submitOwnerSignature, relayWithAgent } from "../safe/ownerSign";
 import { readPositions, type Position } from "../uniswap/liquidity";
 import { tokenByAddress } from "../../intent/tokens";
 import { executePlan } from "../../executor";
@@ -580,8 +581,11 @@ app.post("/intent", async (req, res) => {
         }
       } catch (err: any) {
         console.error(`[intent ${rid}] ${intentType} auto-execute failed: ${safeErr(err)}`);
-        res.status(502).json({
+        // Past the on-chain daily ceiling: the app offers to have the owner's wallet sign it instead.
+        const overCap = err instanceof OverCapError ? { code: err.code, ...(err.ownerSign ? { ownerSign: err.ownerSign } : {}) } : null;
+        res.status(overCap ? 409 : 502).json({
           error: executionErrorMessage(err),
+          ...overCap,
           intentType,
           autoExecuted: false,
           plan,
@@ -895,6 +899,20 @@ app.post("/passkey/approve", requireSession, async (req, res) => {
       },
     });
     res.json({ status: "ok", approvalId: a.id, ...result });
+  } catch (e: any) { sendError(res, e); }
+});
+
+// A request past the on-chain daily ceiling that the owner signs with their own wallet. The server
+// holds the exact Safe transaction (from /intent or an approve); the body carries only the id and the
+// signature over its hash, never a transaction. The agent key only pays gas, and the same passkey
+// rule as every other way of moving funds applies.
+app.post("/owner-sign/:id/submit", requireSession, async (req, res) => {
+  try {
+    const wallet = res.locals.wallet as string;
+    await requirePasskeyToMoveFunds(wallet);
+    const result = await submitOwnerSignature(wallet, req.params.id, req.body?.signature, { relay: relayWithAgent });
+    console.log(`[owner-sign] ${req.params.id} signed by ${shortAddr(wallet)} — sent`);
+    res.json({ status: "ok", ...result });
   } catch (e: any) { sendError(res, e); }
 });
 

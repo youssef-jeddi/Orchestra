@@ -10,7 +10,7 @@ import { ApprovalError } from "../../approvals";
 import { AuthError } from "../../auth";
 import { LimitsError } from "../../policy/limits";
 import { INTENT_FALLBACK_ERROR, EXECUTION_FAILED_REASON } from "../../intent/messages";
-import { UserFacingError } from "../../utils/userFacing";
+import { UserFacingError, OverCapError } from "../../utils/userFacing";
 
 /** The sentence for an error nobody wrote a message for. */
 export const UNEXPECTED_ERROR = INTENT_FALLBACK_ERROR;
@@ -25,6 +25,7 @@ export function isUserFacing(err: unknown): boolean {
 export function errorResponse(err: any): { status: number; body: Record<string, unknown> } {
   if (err instanceof LimitsError) return { status: err.status, body: { error: err.message, ...(err.code ? { code: err.code } : {}), ...err.extra } };
   if (err instanceof PasskeyError || err instanceof OnboardingError) return { status: err.status, body: { error: err.message, code: err.code } };
+  if (err instanceof OverCapError) return { status: err.status, body: { error: err.message, code: err.code, ...(err.ownerSign ? { ownerSign: err.ownerSign } : {}) } };
   if (err instanceof ApprovalError || err instanceof AuthError || err instanceof UserFacingError) return { status: err.status, body: { error: err.message } };
   return { status: 500, body: { error: UNEXPECTED_ERROR } };
 }

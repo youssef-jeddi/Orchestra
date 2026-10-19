@@ -1,0 +1,149 @@
+// ─── Safe — the on-chain $1000/day cap (SpendingLimitModule) ───
+// When SPENDING_MODULE_ADDRESS is set, the agent is not an owner of new accounts: it moves funds
+// only through SpendingLimitModule.exec, and the contract refuses anything past $1000 a day
+// whatever this server decides. Unset, nothing here is used and the owner path runs as before.
+// This file holds the ABI, the env parse, the pure over-the-cap check and the module call; the
+// "owner signs it themselves" fallback for an over-cap request is in ownerSign.ts.
+
+import { ethers } from "ethers";
+import Safe from "@safe-global/protocol-kit";
+import { UserFacingError, OverCapError } from "../../utils/userFacing";
+import { makeSepoliaProvider, sepoliaRpcUrl } from "../../utils/rpc";
+import { safeErr } from "../../utils/redact";
+import { safeGasLimit } from "./transaction";
+
+export const SPENDING_MODULE_ABI = [
+  "function exec(address safe, address to, uint256 value, bytes data, uint8 operation)",
+  "function remainingToday(address safe) view returns (uint256)",
+  "function spentToday(address safe) view returns (uint256)",
+  "function DAILY_LIMIT_CENTS() view returns (uint256)",
+  "error DailyLimitExceeded(uint256 spentCents, uint256 wouldSpendCents, uint256 limitCents)",
+  "error ExecFailed()",
+  "error TargetNotAllowed()",
+  "error DelegateNotAllowed()",
+  "error StalePrice()",
+  "error BadPrice()",
+];
+
+/** The module's fixed daily ceiling, for wording only; the contract is what enforces it. */
+export const DAILY_CAP_USD = 1000;
+
+/** Safe operation codes. */
+export const OPERATION = { Call: 0, DelegateCall: 1 } as const;
+
+/** The configured module (checksummed), or null when unset or not a valid address. */
+export function spendingModuleAddress(): string | null {
+  const raw = process.env.SPENDING_MODULE_ADDRESS?.trim();
+  if (!raw || !ethers.isAddress(raw)) return null;
+  return ethers.getAddress(raw);
+}
+
+/** Does this server run the on-chain cap? Unset or malformed means no: behaviour is unchanged. */
+export function isSpendingModuleEnabled(): boolean {
+  return spendingModuleAddress() !== null;
+}
+
+/** What the user reads when a request would go past the on-chain daily ceiling. */
+export const OVER_CAP_TEXT =
+  `Your account's on-chain daily ceiling is $${DAILY_CAP_USD}, and this would go over what's left today. ` +
+  "You can sign this yourself with your wallet as the account owner, or try again after the daily reset.";
+
+/** Same limit, when signing it yourself isn't available for this session. */
+export const OVER_CAP_NO_OWNER_TEXT =
+  `Your account's on-chain daily ceiling is $${DAILY_CAP_USD}, and this would go over what's left today. ` +
+  "Try a smaller amount, or try again after the daily reset.";
+
+export { OverCapError };
+
+/** The module reverted with DailyLimitExceeded (the real spend went past the ceiling). */
+export class DailyCapRevert extends Error {}
+
+/** Tolerance on the USD estimate: the contract measures the real outflow, this is only the early check. */
+const ESTIMATE_TOLERANCE_PERCENT = 1n;
+
+/**
+ * Would a request worth `valueUsd` go past what's left of today's ceiling (`remainingCents`)?
+ * Pure; an unreadable amount fails closed (counts as over).
+ */
+export function exceedsRemaining(valueUsd: number, remainingCents: bigint): boolean {
+  if (!Number.isFinite(valueUsd) || valueUsd < 0) return true;
+  const cents = BigInt(Math.ceil(valueUsd * 100));
+  const allowed = remainingCents + (remainingCents * ESTIMATE_TOLERANCE_PERCENT) / 100n;
+  return cents > allowed;
+}
+
+/** Cents the account can still spend today through the module. */
+export async function remainingToday(safeAddress: string, provider: ethers.ContractRunner = makeSepoliaProvider()): Promise<bigint> {
+  const module = new ethers.Contract(spendingModuleAddress()!, SPENDING_MODULE_ABI, provider);
+  return BigInt(await module.remainingToday(safeAddress));
+}
+
+export interface SafeCall {
+  to: string;
+  value: string;
+  data: string;
+  operation: number;
+}
+
+/**
+ * The single Safe call a batch becomes: the call itself for one transaction, a DelegateCall to
+ * MultiSend for several. The Safe SDK builds it, so the module and an owner signature run exactly
+ * the same thing the owner path would.
+ */
+export async function safeCallFor(safeAddress: string, transactions: Array<{ to: string; value: string; data: string }>): Promise<SafeCall & { nonce: number }> {
+  const safe = await Safe.init({ provider: sepoliaRpcUrl(), safeAddress });
+  const tx = await safe.createTransaction({ transactions });
+  const d = tx.data;
+  return { to: d.to, value: String(d.value), data: d.data, operation: Number(d.operation), nonce: Number(d.nonce) };
+}
+
+/** Did this error come from the module's DailyLimitExceeded revert? */
+export function isDailyCapRevert(err: any): boolean {
+  return err?.revert?.name === "DailyLimitExceeded" || err?.errorName === "DailyLimitExceeded";
+}
+
+/**
+ * Run a batch through SpendingLimitModule.exec with the agent key (the agent is not a Safe owner,
+ * so this is the only way it can move funds). Gas comes from estimating the module call; an
+ * estimate that reverts means nothing is sent. A DailyLimitExceeded revert throws DailyCapRevert.
+ */
+export async function execViaModule(
+  safeAddress: string,
+  agentPrivateKey: string,
+  transactions: Array<{ to: string; value: string; data: string }>,
+  fallbackGasLimit?: string,
+): Promise<string> {
+  const call = await safeCallFor(safeAddress, transactions);
+  const wallet = new ethers.Wallet(agentPrivateKey, makeSepoliaProvider());
+  const module = new ethers.Contract(spendingModuleAddress()!, SPENDING_MODULE_ABI, wallet);
+  const args = [safeAddress, call.to, call.value, call.data, call.operation] as const;
+
+  let capRevert = false;
+  let gasLimit: string | undefined;
+  try {
+    gasLimit = await safeGasLimit(async () => {
+      try {
+        return await module.exec.estimateGas(...args);
+      } catch (err: any) {
+        if (isDailyCapRevert(err)) capRevert = true;
+        throw err;
+      }
+    }, fallbackGasLimit);
+  } catch (err) {
+    if (capRevert) throw new DailyCapRevert("DailyLimitExceeded");
+    throw err;
+  }
+
+  const tx = await module.exec(...args, gasLimit ? { gasLimit } : {});
+  const receipt = await tx.wait();
+  if (receipt && Number(receipt.status) === 0) {
+    console.error(`[safe] module transaction reverted on-chain: ${tx.hash}`);
+    throw new UserFacingError(`This didn't go through, so your funds were not moved. You can see what happened here: https://sepolia.etherscan.io/tx/${tx.hash}`);
+  }
+  return tx.hash;
+}
+
+/** Log a read failure without its detail reaching the user. */
+export function logCapReadFailure(err: unknown): void {
+  console.warn(`[safe] couldn't read today's remaining ceiling: ${safeErr(err)}`);
+}

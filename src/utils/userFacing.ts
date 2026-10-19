@@ -9,3 +9,15 @@ export class UserFacingError extends Error {
     super(message);
   }
 }
+
+/**
+ * A request refused because it would pass the account's on-chain daily ceiling. `ownerSign` is the
+ * offer to sign it as the account owner (held by the server, see integrations/safe/ownerSign.ts);
+ * absent when signing it yourself isn't available. The frontend reacts to `code`.
+ */
+export class OverCapError extends UserFacingError {
+  readonly code = "over_daily_cap";
+  constructor(message: string, public ownerSign?: Record<string, unknown>) {
+    super(message, 409);
+  }
+}
