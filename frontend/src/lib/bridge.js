@@ -225,6 +225,14 @@ export async function passkeyApprove(walletAddress, approvalId, response) {
   });
 }
 
+/**
+ * Send the owner's signature for a request held past the on-chain daily ceiling. Only the id and
+ * the signature go: the server relays the transaction it holds, never one from here.
+ */
+export async function submitOwnerSignature(id, signature) {
+  return bridgeFetch(`/owner-sign/${encodeURIComponent(id)}/submit`, { method: 'POST', body: JSON.stringify({ signature }) });
+}
+
 // ── Server-held approvals ──
 
 export async function getApproval(approvalId) {

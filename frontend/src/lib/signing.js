@@ -7,7 +7,7 @@
 //                 (eth_sendTransaction), which signs and broadcasts it itself.
 // Used by the /simple route; the full app has its own inline copy of this flow.
 
-import { broadcast, submitSwap, getNonce } from './bridge';
+import { broadcast, submitSwap, getNonce, submitOwnerSignature } from './bridge';
 import { userMaySign, SIGN_REFUSED } from './emailPasskey';
 
 const CHAIN_ID = 11155111; // Sepolia
@@ -96,6 +96,22 @@ async function sendTx(ledger, tx, gasLimit) {
   return usesProvider(ledger)
     ? providerSend(ledger, tx)
     : ledgerSendTx(ledger, tx, gasLimit);
+}
+
+// ── Sign a request that went past the account's on-chain daily ceiling ──
+// `offer` is what the server held and returned (id + the EIP-712 typed data of that exact Safe
+// transaction). The wallet signs it as the account's owner and only the signature goes back; the
+// server relays what it stored. Nothing here builds or changes the transaction.
+export async function signOwnerRequest(ledger, offer, who) {
+  assertMaySign(who, 'safe-owner');
+  if (!offer?.id || !offer?.typedData) throw new Error('There is nothing to sign any more. Ask again.');
+  const { ethers } = await import('ethers');
+  if (usesProvider(ledger)) await ensureSepolia(ledger.getProvider()); // the typed data is bound to Sepolia
+  const sig = await ledger.signTyped(offer.typedData);
+  // Ledger returns {v,r,s}; provider wallets return a serialized hex string.
+  const signature = typeof sig === 'string' ? sig : ethers.Signature.from({ v: sig.v, r: sig.r, s: sig.s }).serialized;
+  const result = await submitOwnerSignature(offer.id, signature);
+  return { txHash: result.txHash, explorerUrl: result.explorerUrl || explorer(result.txHash) };
 }
 
 // ── Fund a Safe from the connected wallet (ETH or ERC-20) ──
