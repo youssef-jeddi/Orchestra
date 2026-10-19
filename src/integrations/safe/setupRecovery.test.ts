@@ -20,7 +20,7 @@ const test = (name: string, fn: () => void | Promise<void>) => tests.push([name,
 const USER = "0x00000000000000000000000000000000000000B2";
 const ADDRESS = "0xSAFE-of-B2"; // the same on every inspect: the account's address never changes
 const TX_STEPS = SETUP_STEPS.filter((s) => s !== "record"); // "record" is our own storage, no transaction
-const none = (): SetupSteps => ({ deploy: false, module: false, delegate: false, allowances: false, register: false, record: false });
+const none = (): SetupSteps => ({ deploy: false, register: false, record: false });
 
 /** The agent's account on a fake chain: transactions it sent, which are mined, which setup steps hold. */
 class FakeChain {
@@ -188,25 +188,25 @@ test("record (our own storage) fails → not ready; the retry runs only that ste
 
 test("a dropped transaction is re-sent, but only after the wait", async () => {
   const r = rig();
-  r.modes.set("module", "hang_after_send");
+  r.modes.set("register", "hang_after_send");
   await r.queue.start(USER, "1.1.1.1");
   await r.settle();
-  r.chain.drop("0xhash1"); // deploy was hash0, module hash1; the network forgot it
+  r.chain.drop("0xhash1"); // deploy was hash0, register hash1; the network forgot it
   r.advance(INFLIGHT_MIN_DROP_MS - 1);
   await r.queue.start(USER, "1.1.1.1");
   await r.settle();
-  assert.equal(sendsOf(r.chain, "module"), 1, "too soon to be sure it was dropped");
+  assert.equal(sendsOf(r.chain, "register"), 1, "too soon to be sure it was dropped");
   r.advance(2);
   await r.queue.start(USER, "1.1.1.1");
   await r.settle();
   assert.equal((await r.queue.status(USER)).status, "ready");
-  assert.equal(sendsOf(r.chain, "module"), 2, "re-sent once it can no longer confirm");
+  assert.equal(sendsOf(r.chain, "register"), 2, "re-sent once it can no longer confirm");
   assert.equal(sendsOf(r.chain, "deploy"), 1);
 });
 
 test("two retries at once share one run: one set of transactions", async () => {
   const r = rig();
-  r.modes.set("delegate", "fail_before_send");
+  r.modes.set("register", "fail_before_send");
   await r.queue.start(USER, "1.1.1.1");
   await r.settle();
   const results = await Promise.all(["1.1.1.1", "2.2.2.2", "3.3.3.3", "1.1.1.1", "4.4.4.4"].map((ip) => r.queue.start(USER, ip)));
@@ -219,7 +219,7 @@ test("two retries at once share one run: one set of transactions", async () => {
 test("a timed-out run cannot send its next transaction while the retry runs", async () => {
   const r = rig();
   let cancelled = false;
-  const t = makeTracker("allowances", { store: r.store, probes: r.chain.probes, isCancelled: () => cancelled });
+  const t = makeTracker("register", { store: r.store, probes: r.chain.probes, isCancelled: () => cancelled });
   cancelled = true; // the job timed out
   await assert.rejects(t.begin(), /timed out/);
   assert.equal(r.record(), null);
@@ -228,7 +228,7 @@ test("a timed-out run cannot send its next transaction while the retry runs", as
 
 test("attack: asking again and again while a transaction is unconfirmed is capped and sends nothing", async () => {
   const r = rig({ completion: { globalPerWindow: 50, perIpPerWindow: 3, windowMs: 3_600_000 } });
-  r.modes.set("module", "hang_after_send");
+  r.modes.set("register", "hang_after_send");
   await r.queue.start(USER, "1.1.1.1");
   await r.settle();
   let refused: unknown;
@@ -236,7 +236,7 @@ test("attack: asking again and again while a transaction is unconfirmed is cappe
     try { await r.queue.start(USER, `9.9.9.${i}`); await r.settle(); } catch (e) { refused = e; }
   }
   assert.ok(refused instanceof OnboardingError && refused.status === 429 && refused.code === "onboarding_rate_limited");
-  assert.equal(r.chain.sends.length, 2, "deploy and the one module transaction, nothing more");
+  assert.equal(r.chain.sends.length, 2, "deploy and the one register transaction, nothing more");
 });
 
 test("judgeInflight: mined, pending, replaced, dropped, never sent", async () => {
@@ -245,7 +245,7 @@ test("judgeInflight: mined, pending, replaced, dropped, never sent", async () =>
     receipt: async () => (o.receipt ? { ok: true } : null), known: async () => !!o.known,
     pendingNonce: async () => o.pending ?? 0, latestNonce: async () => o.latest ?? 0,
   });
-  const rec = (over: Partial<InflightRecord> = {}): InflightRecord => ({ step: "module", agentNonce: 5, startedAt: now, hash: "0xh", ...over });
+  const rec = (over: Partial<InflightRecord> = {}): InflightRecord => ({ step: "register", agentNonce: 5, startedAt: now, hash: "0xh", ...over });
   assert.equal(await judgeInflight(rec(), probes({ receipt: true }), now + 1), "settled");
   assert.equal(await judgeInflight(rec(), probes({ known: true, latest: 9 }), now + INFLIGHT_GRACE_MS * 5), "pending", "a transaction the network still holds is always waited for");
   assert.equal(await judgeInflight(rec(), probes({ latest: 6 }), now + 1000), "pending", "an RPC that doesn't show it yet proves nothing");
@@ -261,10 +261,10 @@ test("judgeInflight: mined, pending, replaced, dropped, never sent", async () =>
 
 test("a crash between recording the intent and the send: the next run waits, then sends once", async () => {
   const r = rig();
-  const t = makeTracker("module", { store: r.store, probes: r.chain.probes, isCancelled: () => false, now: () => 5_000_000 });
+  const t = makeTracker("register", { store: r.store, probes: r.chain.probes, isCancelled: () => false, now: () => 5_000_000 });
   await t.begin(); // recorded; then the process died (maybe after broadcasting)
   r.chain.pending++; // a transaction did leave the agent
-  const next = makeTracker("module", { store: r.store, probes: r.chain.probes, isCancelled: () => false, now: () => 5_000_000 + 1000 });
+  const next = makeTracker("register", { store: r.store, probes: r.chain.probes, isCancelled: () => false, now: () => 5_000_000 + 1000 });
   await assert.rejects(next.begin(), (e: unknown) => e instanceof SetupPendingError && e.status === 409 && e.code === "setup_pending");
 });
 

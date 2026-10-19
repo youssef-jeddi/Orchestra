@@ -9,6 +9,7 @@ frontend/build/
 frontend/.next/
 contracts/out/
 contracts/cache/
+contracts/broadcast/
 storage-index.json
 STATUS.md
 

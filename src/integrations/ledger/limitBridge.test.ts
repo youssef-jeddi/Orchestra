@@ -33,7 +33,7 @@ function call(port: number, method: string, path: string, token: string, body?: 
   return new Promise((resolve, reject) => {
     const req = http.request({ host: "127.0.0.1", port, path, method, headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` } }, (res) => {
       let data = ""; res.on("data", (d) => (data += d));
-      res.on("end", () => resolve({ status: res.statusCode!, body: JSON.parse(data || "{}"), text: data }));
+      res.on("end", () => { let body: any = {}; try { body = JSON.parse(data || "{}"); } catch { /* not JSON, e.g. a 404 page */ } resolve({ status: res.statusCode!, body, text: data }); });
     });
     req.on("error", reject); if (method !== "GET") req.write(JSON.stringify(body ?? {})); req.end();
   });
@@ -125,22 +125,14 @@ test("the day's activity hangs: a send does nothing once the 2s timeout passes",
   } finally { bridge.child.kill(); }
 });
 
-test("the limit endpoints refuse bad input in plain words, and an unfinished account, without internals", async () => {
+test("attack: the old limit-update routes are gone, so no route changes a limit outside the policy rules", async () => {
   const bridge = await startBridge({});
   try {
     const token = issueToken(WALLET).token;
-    for (const newLimitUSD of ["1e6", 5000, -3, 12.5, null]) {
-      const r = await call(bridge.port, "POST", "/prepare-limit-update", token, { newLimitUSD });
-      assert.equal(r.status, 400, JSON.stringify(newLimitUSD));
-      assert.match(r.body.error, /whole number of dollars from \$0 to \$1,000/);
+    for (const path of ["/prepare-limit-update", "/finalize-limit-update"]) {
+      const r = await call(bridge.port, "POST", path, token, { newLimitUSD: 5000, txHash: "0x" + "ab".repeat(32) });
+      assert.equal(r.status, 404, path);
     }
-    const noAccount = await call(bridge.port, "POST", "/prepare-limit-update", token, { newLimitUSD: 50 });
-    assert.equal(noAccount.status, 409);
-    assert.match(noAccount.body.error, /isn't fully set up yet/);
-    const fin = await call(bridge.port, "POST", "/finalize-limit-update", token, { newLimitUSD: 50, txHash: "0x" + "ab".repeat(32) });
-    assert.equal(fin.status, 409);
-    const noSession = await call(bridge.port, "POST", "/finalize-limit-update", "not-a-token", { newLimitUSD: 50 });
-    assert.equal(noSession.status, 401);
   } finally { bridge.child.kill(); }
 });
 

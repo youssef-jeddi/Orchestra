@@ -3,8 +3,7 @@ import { ethers } from 'ethers';
 import { getAgentWallet } from './agentWallet';
 import type { TxTracker } from './inflight';
 import { shortAddr } from "../../utils/redact";
-
-const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
+import { sepoliaRpcUrl } from '../../utils/rpc';
 
 /**
  * The one Safe configuration every user's account is created from. The address is
@@ -23,7 +22,7 @@ export function predictedSafeConfig(userAddress: string, agentWalletAddress: str
 /** The user's account address, known before it is deployed. */
 export async function predictSafeAddress(userAddress: string, agentWalletAddress: string): Promise<string> {
   const safe = await Safe.init({
-    provider: SEPOLIA_RPC,
+    provider: sepoliaRpcUrl(),
     predictedSafe: predictedSafeConfig(userAddress, agentWalletAddress),
   });
   return safe.getAddress();
@@ -41,7 +40,7 @@ export async function deploySafe(
   const agentWallet = getAgentWallet(provider);
 
   const safe = await Safe.init({
-    provider: SEPOLIA_RPC,
+    provider: sepoliaRpcUrl(),
     signer: agentWallet.privateKey,
     predictedSafe: predictedSafeConfig(ledgerAddress, agentWalletAddress),
   });
