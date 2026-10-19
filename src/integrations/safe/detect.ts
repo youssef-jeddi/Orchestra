@@ -10,7 +10,7 @@ import Safe from '@safe-global/protocol-kit';
 import { read } from '../zero-g/storage';
 import { getAgentAddress } from './agentWallet';
 import { predictedSafeConfig } from './deploy';
-import { makeSepoliaProvider } from '../../utils/rpc';
+import { makeSepoliaProvider, sepoliaRpcUrl } from '../../utils/rpc';
 import { shortAddr, safeErr } from "../../utils/redact";
 
 /** Everything detection reads; injected so the rules are tested without network. */
@@ -50,7 +50,7 @@ export function _resetDetectCache(): void {
 const realReads: DetectReads = {
   storedAccount: async (wallet) => ((await read(`safe:${wallet}`)) as { safeAddress?: string } | null)?.safeAddress ?? null,
   predict: async (wallet) => (await Safe.init({
-    provider: process.env.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com',
+    provider: sepoliaRpcUrl(),
     predictedSafe: predictedSafeConfig(wallet, getAgentAddress()),
   })).getAddress(),
   hasCode: async (address) => (await makeSepoliaProvider().getCode(address)) !== '0x',
