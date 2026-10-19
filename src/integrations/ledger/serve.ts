@@ -21,7 +21,7 @@ import { write, read, append } from "../zero-g/storage";
 import { detectExistingSafe } from "../safe/detect";
 import { onboarding, isAccountReady } from "../safe/onboard";
 import { OnboardingError, ACCOUNT_NOT_READY_REASON } from "../safe/onboarding";
-import { errorResponse, isUserFacing } from "./errors";
+import { errorResponse, isUserFacing, executionErrorMessage } from "./errors";
 import { UserFacingError } from "../../utils/userFacing";
 import { readPositions, type Position } from "../uniswap/liquidity";
 import { tokenByAddress } from "../../intent/tokens";
@@ -40,6 +40,7 @@ import { getAdapter, type Balances } from "../../executor/adapters";
 import { interpretIntent, assessAction } from "../../intent/pipeline";
 import { sanitizeHistory } from "../../intent/planner";
 import { INTENT_FALLBACK_ERROR, LIMITS_UNREADABLE_REASON } from "../../intent/messages";
+import { injectFault } from "../../utils/faultInject";
 import { shortAddr, safeErr, requestId, logUserMessage, intentSummaryLine, intentOutcome, type IntentLogFields } from "../../utils/redact";
 import { fetchBalances, resolveEnsName } from "../../intent/context";
 import { describeAddresses, describeBalances } from "../../intent/replies";
@@ -228,8 +229,7 @@ app.post("/quote", requireSession, async (req, res) => {
       approvalTx,
     });
   } catch (err: any) {
-    console.error("[serve] /quote error:", safeErr(err));
-    res.status(500).json({ error: err.message });
+    sendError(res, err);
   }
 });
 
@@ -270,8 +270,7 @@ app.post("/swap", requireSession, async (req, res) => {
       unsignedTx: swapTx, // { to, data, value, gasLimit, ... }
     });
   } catch (err: any) {
-    console.error("[serve] /swap error:", safeErr(err));
-    res.status(500).json({ error: err.message });
+    sendError(res, err);
   }
 });
 
@@ -303,8 +302,7 @@ app.post("/broadcast", requireSession, async (req, res) => {
       explorerUrl: `https://sepolia.etherscan.io/tx/${txResponse.hash}`,
     });
   } catch (err: any) {
-    console.error("[serve] /broadcast error:", safeErr(err));
-    res.status(500).json({ error: err.message });
+    sendError(res, err); // an RPC rejection of the transaction is unexpected here: logged, plain sentence
   }
 });
 
@@ -327,8 +325,7 @@ app.get("/nonce/:address", requireSession, async (req, res) => {
       maxPriorityFeePerGas: maxPriority.toString(),
     });
   } catch (err: any) {
-    console.error("[serve] /nonce error:", safeErr(err));
-    res.status(500).json({ error: err.message });
+    sendError(res, err);
   }
 });
 
@@ -555,6 +552,7 @@ app.post("/intent", async (req, res) => {
     // Auto-execute when policy allows and the adapter supports it.
     if (adapter.execute && verdict === "AUTO_EXECUTE" && safeAddress) {
       try {
+        await injectFault("execute");
         const exec = await adapter.execute(ctx, result);
         if (exec) {
           console.log(`[intent ${rid}] ✓ ${intentType} auto-executed: ${exec.txHash}`);
@@ -581,7 +579,7 @@ app.post("/intent", async (req, res) => {
       } catch (err: any) {
         console.error(`[intent ${rid}] ${intentType} auto-execute failed: ${safeErr(err)}`);
         res.status(502).json({
-          error: err.message,
+          error: executionErrorMessage(err),
           intentType,
           autoExecuted: false,
           plan,
@@ -635,7 +633,8 @@ app.post("/intent", async (req, res) => {
           console.log(`[intent ${rid}] [approval] ${approval.id} sent to Telegram (${approval.factor})`);
         } catch (err: any) {
           // Fail closed: never fall back to a weaker factor because the phone was unreachable.
-          await settle(approval, { error: `I couldn't send the approval to Telegram: ${err.message}` });
+          console.error(`[intent ${rid}] [approval] ${approval.id} couldn't be sent to Telegram: ${safeErr(err)}`);
+          await settle(approval, { error: "I couldn't send the approval to Telegram, so nothing will execute." });
           const reason = "I couldn't deliver the approval to your Telegram, so nothing will execute. Try again in a moment.";
           res.json({ status: "unsupported", intentType, reason, reasoning: reason, plan, timing: timing() });
           return;
@@ -692,13 +691,15 @@ async function executeApproval(a: PendingApproval): Promise<{ txHash: string; ex
         walletAddress: a.wallet, safeAddress: a.safeAddress, balanceAddress: a.safeAddress, provider,
         params: {}, planSummary: a.summary, planSteps: [], totalEstimatedValueUsd: a.valueUsd, balances: null,
       };
+      await injectFault("execute");
       return adapter.execute(ctx, { payload: a.execution });
     });
     console.log(`[approval] ${a.id} executed: ${result.txHash}`);
     return result;
   } catch (err: any) {
     console.error(`[approval] ${a.id} failed: ${safeErr(err)}`);
-    throw err;
+    // The approve routes answer with this error: the same sentence as the record, not "try again".
+    throw isUserFacing(err) ? err : new UserFacingError(executionErrorMessage(err), 502);
   }
 }
 
@@ -784,7 +785,7 @@ app.get("/passkey/status", requireSession, async (req, res) => {
     if (!requireOwnWallet(res, req.query.wallet)) return;
     const wallet = res.locals.wallet as string;
     res.json({ registered: await hasPasskey(wallet, rpForOrigin(req.headers.origin) ?? browserRp()) });
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
+  } catch (e: any) { sendError(res, e); }
 });
 
 // Registering a passkey for a wallet requires a session for that wallet;
@@ -1049,7 +1050,7 @@ app.post("/telegram/link-request", requireSession, (req, res) => {
     if (!requireOwnWallet(res, req.body?.walletAddress)) return;
     if (!telegramEnabled()) { res.status(400).json({ error: "Telegram approvals aren't configured on this server." }); return; }
     res.json(linkRequest(res.locals.wallet));
-  } catch (e: any) { res.status(400).json({ error: e.message }); }
+  } catch (e: any) { sendError(res, e); }
 });
 
 app.post("/telegram/link", async (req, res) => {
@@ -1057,7 +1058,7 @@ app.post("/telegram/link", async (req, res) => {
     const { walletAddress, code, signature } = req.body || {};
     if (!walletAddress || !code || !signature) { res.status(400).json({ error: "walletAddress, code and signature required" }); return; }
     res.json(await confirmLink(walletAddress, code, signature));
-  } catch (e: any) { res.status(400).json({ error: e.message }); }
+  } catch (e: any) { sendError(res, e); }
 });
 
 // ─── Live prices (cached) ───
@@ -1072,7 +1073,7 @@ app.get("/prices", async (_req, res) => {
 app.post("/auth/login-request", (req, res) => {
   try {
     res.json(loginRequest(req.body?.walletAddress));
-  } catch (e: any) { res.status(e instanceof AuthError ? e.status : 400).json({ error: e.message }); }
+  } catch (e: any) { sendError(res, e); }
 });
 
 app.post("/auth/login", (req, res) => {
@@ -1081,7 +1082,7 @@ app.post("/auth/login", (req, res) => {
     const session = login(walletAddress, nonce, signature);
     console.log(`[auth] session issued for ${shortAddr(session.wallet)}`);
     res.json(session);
-  } catch (e: any) { res.status(e instanceof AuthError ? e.status : 400).json({ error: e.message }); }
+  } catch (e: any) { sendError(res, e); }
 });
 
 // Privy sign-in (passkey/email with an embedded wallet, or an external wallet):
@@ -1105,7 +1106,7 @@ app.post("/auth/privy", async (req, res) => {
       }
     }
     res.json({ ...session, emailWallet });
-  } catch (e: any) { res.status(e instanceof AuthError ? e.status : 400).json({ error: e.message }); }
+  } catch (e: any) { sendError(res, e); }
 });
 
 // Where the session's wallet stands for passkeys: the chat asks an email wallet without one to add it.

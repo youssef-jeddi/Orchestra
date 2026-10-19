@@ -13,6 +13,7 @@ import https from "https";
 import { ethers } from "ethers";
 import { read, write, deleteKey } from "../zero-g/storage";
 import { safeErr } from "../../utils/redact";
+import { UserFacingError } from "../../utils/userFacing";
 
 const API = "https://api.telegram.org";
 const LINK_TTL_MS = 10 * 60_000;
@@ -163,7 +164,7 @@ function linkTypedData(wallet: string, code: string) {
 
 /** Step 1: typed data for the wallet to sign (EIP712Domain included for eth_signTypedData_v4). */
 export function linkRequest(wallet: string) {
-  if (!ethers.isAddress(wallet)) throw new Error("invalid wallet address");
+  if (!ethers.isAddress(wallet)) throw new UserFacingError("That isn't a valid wallet address.", 400);
   const code = crypto.randomBytes(12).toString("base64url");
   linkCodes.set(code, { wallet: wallet.toLowerCase(), expires: Date.now() + LINK_TTL_MS, verified: false });
   const td = linkTypedData(wallet, code);
@@ -186,12 +187,18 @@ export function linkRequest(wallet: string) {
 /** Step 2: verify the wallet's signature over the code; returns the t.me deep link. */
 export async function confirmLink(wallet: string, code: string, signature: string): Promise<{ url: string }> {
   const entry = linkCodes.get(code);
-  if (!entry || entry.expires < Date.now() || entry.wallet !== wallet.toLowerCase()) {
-    throw new Error("Link request expired. Start again.");
+  if (typeof wallet !== "string" || !entry || entry.expires < Date.now() || entry.wallet !== wallet.toLowerCase()) {
+    throw new UserFacingError("Link request expired. Start again.", 400);
   }
   const td = linkTypedData(wallet, code);
-  const signer = ethers.verifyTypedData(td.domain, td.types, td.message, signature);
-  if (signer.toLowerCase() !== entry.wallet) throw new Error("Signature doesn't match this wallet.");
+  let signer: string;
+  try {
+    signer = ethers.verifyTypedData(td.domain, td.types, td.message, signature);
+  } catch {
+    // A malformed signature makes ethers throw its own text; the user only needs to know to start again.
+    throw new UserFacingError("That signature didn't work. Start again.", 400);
+  }
+  if (signer.toLowerCase() !== entry.wallet) throw new UserFacingError("Signature doesn't match this wallet.", 400);
   entry.verified = true;
   return { url: `https://t.me/${await getBotUsername()}?start=${code}` };
 }

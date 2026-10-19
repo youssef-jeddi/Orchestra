@@ -9,6 +9,7 @@ import { sentRecipient } from "./describe";
 import { recordKnownRecipient } from "../policy/store";
 import { safeErr } from "../utils/redact";
 import { UserFacingError } from "../utils/userFacing";
+import { isUserFacing, executionErrorMessage } from "../integrations/ledger/errors";
 
 /**
  * After a send through the account actually went through, remember who it paid: the next send to
@@ -39,7 +40,10 @@ export async function executeApprovalFlow(
     await rememberSentRecipient(a.wallet, a.intentType, a.execution);
     return result;
   } catch (err: any) {
-    await settle(a, { error: err.message });
+    // The record is shown to the user (approval card, phone page, Telegram): only a message written
+    // for them goes in; anything else (an RPC URL, a library error) stays in the log.
+    if (!isUserFacing(err)) console.error(`[approval] ${a.id} failed unexpectedly: ${safeErr(err)}`);
+    await settle(a, { error: executionErrorMessage(err) });
     throw err;
   }
 }
