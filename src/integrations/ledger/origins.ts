@@ -1,21 +1,22 @@
 // ─── Bridge — which websites may talk to it (CORS + WebSocket origin allowlist) ───
 // The browser sends an Origin header on cross-site requests and on every WebSocket upgrade. A
 // site that isn't on the list is refused outright (not just left without CORS headers), so a
-// page on another domain can't drive the bridge from a visitor's browser. Requests with no Origin
-// (curl, server-to-server, the bridge's own pages) pass this check; sessions still gate the routes.
+// page on another domain can't drive the bridge from a visitor's browser. Plain HTTP requests with
+// no Origin (curl, server-to-server, the bridge's own pages) pass this check; sessions still gate
+// the routes. A WebSocket upgrade must carry an allowed Origin (browsers always send one).
+// In production ALLOWED_ORIGINS must be set (assertOriginConfig stops the bridge starting without it).
 // Pure and env-driven so it is tested without network. Used by serve.ts and bridge.ts.
 
 import type { NextFunction, Request, Response } from "express";
 
-/** Used when ALLOWED_ORIGINS is unset: the production site and its subdomains, local dev, this project's Vercel previews. */
-export const DEFAULT_ALLOWED_ORIGINS = [
-  "https://getorchestra.xyz",
-  "https://*.getorchestra.xyz",
-  "http://localhost:*",
-  "http://127.0.0.1:*",
-  "https://orchestra-*-youssefs-projects-822ed3d0.vercel.app",
-].join(",");
+/**
+ * Used when ALLOWED_ORIGINS is unset and NODE_ENV isn't production: local development only. A
+ * deployed bridge must list its frontends explicitly (the production site, previews of a staging
+ * bridge), so no domain or team name is built in.
+ */
+export const DEFAULT_ALLOWED_ORIGINS = ["http://localhost:*", "http://127.0.0.1:*"].join(",");
 
+const isProduction = () => process.env.NODE_ENV === "production";
 interface Rule {
   protocol: string;
   host: RegExp;
@@ -65,6 +66,36 @@ function publicAppOrigin(): string | null {
   try { return new URL(process.env.PUBLIC_APP_URL || "").origin; } catch { return null; }
 }
 
+/** The configured list; unset means local dev, and in production nothing (never localhost or previews by default). */
+function listFromEnv(): string {
+  const configured = process.env.ALLOWED_ORIGINS?.trim();
+  if (configured) return configured;
+  return isProduction() ? "" : DEFAULT_ALLOWED_ORIGINS;
+}
+
+/**
+ * Startup check. In production ALLOWED_ORIGINS must hold at least one valid origin, otherwise the
+ * bridge would silently serve nobody (or, worse, be configured by copy-paste from dev). Throws with
+ * what to set; returns warnings (e.g. localhost listed in production, which is honoured as explicit config).
+ */
+export function assertOriginConfig(): string[] {
+  if (!isProduction()) return [];
+  const configured = process.env.ALLOWED_ORIGINS?.trim();
+  const example = "ALLOWED_ORIGINS=https://getorchestra.xyz,https://www.getorchestra.xyz";
+  if (!configured) {
+    throw new Error(`ALLOWED_ORIGINS must be set when NODE_ENV=production: list the exact https origins of your frontend, comma-separated, e.g. ${example}`);
+  }
+  const rules = parseAllowedOrigins(configured);
+  if (!rules.length) {
+    throw new Error(`None of the entries in ALLOWED_ORIGINS is a valid origin (use scheme://host[:port]), e.g. ${example}`);
+  }
+  const warnings: string[] = [];
+  if (rules.some((r) => r.host.test("localhost") || r.host.test("127.0.0.1"))) {
+    warnings.push("ALLOWED_ORIGINS lists localhost or 127.0.0.1 while NODE_ENV=production: any page running on a visitor's own machine can call this bridge.");
+  }
+  return warnings;
+}
+
 /** Is this Origin header value one of the allowed sites? Strict: scheme, host and port are compared after parsing. */
 export function isOriginAllowed(origin: string): boolean {
   let url: URL;
@@ -72,29 +103,36 @@ export function isOriginAllowed(origin: string): boolean {
   // "null" (sandboxed pages), paths, credentials and the like are never a legitimate Origin.
   if (url.origin === "null" || url.origin !== origin) return false;
   if (origin === publicAppOrigin()) return true;
-  const configured = process.env.ALLOWED_ORIGINS?.trim();
-  const rules = parseAllowedOrigins(configured || DEFAULT_ALLOWED_ORIGINS);
+  const rules = parseAllowedOrigins(listFromEnv());
   return rules.some((r) =>
     r.protocol === url.protocol &&
     r.host.test(url.hostname) &&
     (r.port === "*" || r.port === url.port));
 }
 
-/** For an incoming header: no Origin is fine (not a browser cross-site call); otherwise it must be allowed. */
+/** For plain HTTP: no Origin is fine (not a browser cross-site call); otherwise it must be allowed. */
 export function originPermitted(origin: string | undefined): boolean {
   return origin === undefined || isOriginAllowed(origin);
+}
+
+/** For a WebSocket upgrade: browsers always send Origin, so a missing one is refused too. */
+export function wsOriginPermitted(origin: string | undefined): boolean {
+  return origin !== undefined && isOriginAllowed(origin);
 }
 
 /** Express middleware: refuse a disallowed Origin with 403, answer preflights, add CORS headers for allowed sites. */
 export function originGuard(req: Request, res: Response, next: NextFunction): void {
   const origin = req.headers.origin;
+  // The answer depends on Origin, so say so on every response (allowed, refused, or none sent):
+  // a cache must never serve one site's answer to another. No Allow-Credentials is ever sent: the
+  // session travels in the Authorization header, not a cookie.
+  res.vary("Origin");
   if (origin !== undefined) {
     if (!isOriginAllowed(origin)) {
       res.status(403).json({ error: "This website isn't allowed to use Orchestra.", code: "origin_not_allowed" });
       return;
     }
     res.header("Access-Control-Allow-Origin", origin);
-    res.header("Vary", "Origin");
     res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
     res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   }

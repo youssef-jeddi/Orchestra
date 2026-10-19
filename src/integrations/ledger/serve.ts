@@ -9,7 +9,7 @@ import http from "http";
 import crypto from "crypto";
 import { ethers } from "ethers";
 import { BridgeServer } from "./bridge";
-import { originGuard, originPermitted, mockTradeEnabled } from "./origins";
+import { originGuard, wsOriginPermitted, assertOriginConfig, mockTradeEnabled } from "./origins";
 import { requireOwnAddress, requireOwnWallet, approvalBelongsTo, broadcastSenderProblem } from "./access";
 import type { ApprovalRequest, ProposedTrade } from "./types";
 import { assessRisk } from "./riskEngine";
@@ -100,6 +100,14 @@ import {
 import { createSetupToken, getSetup, consumeSetup } from "../passkey/phoneSetup";
 import { isEmailWallet, hasEmailVerification, verificationAccountTypes } from "../passkey/emailGate";
 
+// A production bridge with no explicit allowlist must not start (nothing is listening yet).
+try {
+  for (const w of assertOriginConfig()) console.warn(`[origins] ${w}`);
+} catch (err: any) {
+  console.error(`[origins] ${err.message}`);
+  process.exit(1);
+}
+
 const provider = makeSepoliaProvider();
 const PORT = Number(process.env.PORT) || Number(process.env.LEDGER_BRIDGE_PORT) || 3001;
 
@@ -110,7 +118,7 @@ app.use(express.json());
 app.use(originGuard);
 
 const server = http.createServer(app);
-const bridge = new BridgeServer(server, { verifyOrigin: originPermitted, verifySession: verifyToken });
+const bridge = new BridgeServer(server, { verifyOrigin: wsOriginPermitted, verifySession: verifyToken });
 
 // ─── POST /mock-trade ───
 // Inject a test approval request (from curl, Postman, or the UI button). Local dev only:
