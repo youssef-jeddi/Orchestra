@@ -177,7 +177,7 @@ test("chat: a verdict we don't know never reads as 'done'", () => {
 });
 
 test("chat: every rule the policy can trigger has a plain chip, never the raw slug", () => {
-  const slugs = ["daily-limit", "daily-count-velocity", "unverified-token", "unknown-recipient", "habit-anomaly", "unknown-intent", "malformed", "denylist"];
+  const slugs = ["daily-limit", "daily-count-velocity", "unverified-token", "unknown-recipient", "habit-anomaly", "unknown-intent", "malformed", "denylist", "pressure-wording", "unplanned-address", "pressure-refused"];
   for (const slug of slugs) {
     const label: string = ui.ruleLabel(slug);
     assert.notEqual(label, slug);

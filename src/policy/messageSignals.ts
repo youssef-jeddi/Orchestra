@@ -9,7 +9,17 @@ export interface MessageSignals {
   pressure: string[];
   /** Lowercased 0x addresses and ENS names written in the message, deduplicated. */
   mentions: string[];
+  /** The wording says all or most of the funds ("all my usdc", "everything", "max"). */
+  allFunds: boolean;
 }
+
+const ALL_FUNDS = [
+  /\ball (of )?my\b/,
+  /\ball (the |my )?(eth|usdc|weth|usdt|funds|money|balance|tokens|coins)\b/,
+  /\beverything\b/,
+  /\b(entire|whole) (balance|account)\b/,
+  /\b(max|maximum)\b/,
+];
 
 const GROUPS: [string, RegExp[]][] = [
   ["override", [
@@ -51,5 +61,5 @@ export function messageSignals(message: string): MessageSignals {
   const text = normalise(String(message ?? ""));
   const pressure = GROUPS.filter(([, res]) => res.some((re) => re.test(text))).map(([slug]) => slug);
   const found = [...text.matchAll(ADDRESS), ...text.matchAll(ENS)].map((m) => m[0].toLowerCase());
-  return { pressure, mentions: [...new Set(found)] };
+  return { pressure, mentions: [...new Set(found)], allFunds: ALL_FUNDS.some((re) => re.test(text)) };
 }

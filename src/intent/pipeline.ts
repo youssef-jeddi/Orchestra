@@ -35,11 +35,64 @@ export interface ActionPlan {
   valueUsd: number;
   /** Pressure wording and addresses from the raw message. Signals only, never the text (ORC-90). */
   signals?: MessageSignals;
+  /** All or most of the account's funds in this one action (see movesMostFunds). Decided by code, not the model. */
+  movesAllFunds?: boolean;
 }
 
 export interface InterpretResult {
   outcome: IntentOutcome;
   planner: PlanResult;
+}
+
+/**
+ * At or above this share of a balance an action counts as moving "most of the funds". A
+ * pressured message that empties an account is the shape of a drain, and 90% leaves no room
+ * to dodge the check by asking for "all but a few dollars".
+ */
+export const MOST_OF_BALANCE = 0.9;
+
+const SYMBOL_KEY: Record<string, "eth" | "weth" | "usdc"> = { ETH: "eth", WETH: "weth", USDC: "usdc" };
+
+/** True when the planner step asks for everything: "all", "max" or a percentage of 90 or more. */
+function isAllAmount(amount: unknown): boolean {
+  if (typeof amount !== "string") return false;
+  if (amount === "all" || amount === "max") return true;
+  return amount.endsWith("%") && Number(amount.slice(0, -1)) / 100 >= MOST_OF_BALANCE;
+}
+
+/**
+ * Whether the action moves all or most of the funds: the planner step says all/max/90%+, the
+ * message says so, or the resolved amount is 90%+ of the balance. Balances are read only when the
+ * message has pressure wording; an unreadable balance counts as "not all" (the pressure rule still asks).
+ */
+async function movesMostFunds(
+  planned: { action: string; amount?: unknown; amountA?: unknown; amountB?: unknown } | undefined,
+  step: ResolvedStep,
+  signals: MessageSignals,
+  ctx: ResolveContext
+): Promise<boolean> {
+  if (signals.allFunds) return true;
+  if (step.action === "remove_liquidity") return false; // the user's own position, it comes back to the account
+  if (planned && [planned.amount, planned.amountA, planned.amountB].some(isAllAmount)) return true;
+  if (signals.pressure.length === 0) return false;
+
+  const p = step.plan.params;
+  const spends: [unknown, unknown][] =
+    step.action === "swap" ? [[p.amount, p.symbolIn]]
+    : step.action === "send" ? [[p.amount, p.symbol]]
+    : step.action === "add_liquidity" ? [[p.amountA, p.symbolA], [p.amountB, p.symbolB]]
+    : [];
+  if (spends.length === 0) return false;
+  try {
+    const balances = await ctx.getBalances();
+    if (!balances) return false;
+    return spends.some(([amount, symbol]) => {
+      const held = (balances as any)[SYMBOL_KEY[String(symbol).toUpperCase()]];
+      return typeof held === "number" && held > 0 && Number(amount) >= held * MOST_OF_BALANCE;
+    });
+  } catch {
+    return false;
+  }
 }
 
 const VALUE_BEARING = new Set(["swap", "send", "add_liquidity", "remove_liquidity", "deposit"]);
@@ -79,6 +132,8 @@ export async function interpretIntent(
   }
 
   const step = actions[0];
+  const signals = messageSignals(message);
+  const movesAllFunds = await movesMostFunds(out.steps[resolved.steps.indexOf(step)], step, signals, ctx);
   return {
     planner,
     outcome: {
@@ -90,7 +145,8 @@ export async function interpretIntent(
         steps: [step.plan],
         params: step.plan.params,
         valueUsd: step.valueUsd,
-        signals: messageSignals(message),
+        signals,
+        movesAllFunds,
       },
     },
   };
@@ -142,6 +198,7 @@ export function assessAction(action: ActionPlan, input: AssessInput = {}): Polic
     history: input.history,
     now: input.now,
     signals: action.signals,
+    movesAllFunds: action.movesAllFunds,
   });
   return { ...decision, typicalMaxUsd };
 }

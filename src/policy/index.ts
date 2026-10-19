@@ -131,7 +131,13 @@ export interface DecisionInput {
   now?: number;
   /** Wording and addresses found in the user's raw message (never the message itself). */
   signals?: MessageSignals;
+  /** The plan moves all or most of the funds (computed by code in the intent pipeline). */
+  movesAllFunds?: boolean;
 }
+
+/** Shown when pressure wording comes with moving everything or a new address: nothing is held or built. */
+export const REFUSAL =
+  "I won't do this one. Your message pushes me to skip my usual checks, and it would move all your money or send it somewhere new. If you really want to do this, ask again in your own words, without the rush, and I'll ask for your OK first.";
 
 /**
  * Per-user deterministic policy. Every field is optional — an absent field
@@ -246,6 +252,8 @@ function sendRecipient(steps: any[]): string | null {
  *        · habit anomaly           (profile.typicalMaxUsd)
  *        · pressure wording        (signals.pressure: the message pushes to skip checks or hurry)
  *        · unplanned address       (signals.mentions: an address in the message the plan doesn't use)
+ *      then, pressure wording together with moving all or most of the funds, an unknown
+ *      recipient or an unplanned address → BLOCKED (refused outright, no approval is held)
  *   6. otherwise               → AUTO_EXECUTE
  */
 export function decide(input: DecisionInput): PolicyDecision {
@@ -376,6 +384,21 @@ export function decide(input: DecisionInput): PolicyDecision {
         risk: 55,
       });
     }
+  }
+
+  // Pressure wording plus a drain-shaped or new-destination action is refused, not held for approval.
+  if (
+    signals && signals.pressure.length > 0 &&
+    (input.movesAllFunds || escalations.some((e) => e.rule === "unknown-recipient" || e.rule === "unplanned-address"))
+  ) {
+    return {
+      verdict: "BLOCKED",
+      riskScore: 95,
+      reason: REFUSAL,
+      requiresLedger: false,
+      triggered: ["pressure-refused", ...escalations.map((e) => e.rule)],
+      approvalMethod: "none",
+    };
   }
 
   // 6. Verdict.
