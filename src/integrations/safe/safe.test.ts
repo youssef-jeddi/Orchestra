@@ -2,7 +2,8 @@
 // Run with `npm run test:safe`.
 
 import assert from "node:assert/strict";
-import { predictedSafeConfig } from "./deploy";
+import { ethers } from "ethers";
+import { predictedSafeConfig, SAFE_MODULE_SETUP } from "./deploy";
 // @ts-expect-error plain JS helper shared with the frontend, no type declarations
 import { safeStatusFor, shouldPoll, pollAction, onboardingErrorMessage, shortAddress } from "../../../frontend/src/lib/onboarding.js";
 import { OnboardingLimiter, OnboardingQueue, OnboardingError, type OnboardingLimits } from "./onboarding";
@@ -47,10 +48,43 @@ function setup(over: Partial<Deps> = {}, limits = LIMITS, opts: { failAt?: Setup
   return { queue, chain, complete, stepsOf, log, release, settle, tick: (ms: number) => { clock += ms; } };
 }
 
+/** Run `fn` with SPENDING_MODULE_ADDRESS set to `value` (or unset), restoring it after. */
+function withModuleEnv<T>(value: string | undefined, fn: () => T): T {
+  const before = process.env.SPENDING_MODULE_ADDRESS;
+  if (value === undefined) delete process.env.SPENDING_MODULE_ADDRESS; else process.env.SPENDING_MODULE_ADDRESS = value;
+  try { return fn(); } finally {
+    if (before === undefined) delete process.env.SPENDING_MODULE_ADDRESS; else process.env.SPENDING_MODULE_ADDRESS = before;
+  }
+}
+
 test("the predicted-address config is pinned: owners [agent, user], threshold 1, no salt", () => {
   // Changing any of this moves every user's account address. Do not "fix" this test.
-  assert.deepEqual(predictedSafeConfig(USER, AGENT), { safeAccountConfig: { owners: [AGENT, USER], threshold: 1 } });
-  assert.deepEqual(Object.keys(predictedSafeConfig(USER, AGENT)), ["safeAccountConfig"]); // no saltNonce / safeDeploymentConfig
+  withModuleEnv(undefined, () => {
+    assert.deepEqual(predictedSafeConfig(USER, AGENT), { safeAccountConfig: { owners: [AGENT, USER], threshold: 1 } });
+    assert.deepEqual(Object.keys(predictedSafeConfig(USER, AGENT)), ["safeAccountConfig"]); // no saltNonce / safeDeploymentConfig
+  });
+});
+
+test("with SPENDING_MODULE_ADDRESS set the config is pinned too: owner only, threshold 1, the module enabled at setup", () => {
+  const MODULE = "0x00000000000000000000000000000000000000C3";
+  const config = withModuleEnv(` ${MODULE.toLowerCase()} `, () => predictedSafeConfig(USER, AGENT));
+  const iface = new ethers.Interface(["function enableModules(address[] modules)"]);
+  assert.deepEqual(config, {
+    safeAccountConfig: {
+      owners: [USER], // the agent is not an owner: it can only act through the module
+      threshold: 1,
+      to: SAFE_MODULE_SETUP,
+      data: iface.encodeFunctionData("enableModules", [[ethers.getAddress(MODULE.toLowerCase())]]),
+    },
+  });
+  assert.equal(SAFE_MODULE_SETUP, "0x2dd68b007B46fBe91B9A7c3EDa5A7a1063cB5b47");
+  assert.ok(!config.safeAccountConfig.owners.includes(AGENT));
+});
+
+test("a malformed SPENDING_MODULE_ADDRESS counts as unset: the owner config, never a half-configured one", () => {
+  for (const bad of ["", "   ", "0x123", "not-an-address"]) {
+    assert.deepEqual(withModuleEnv(bad, () => predictedSafeConfig(USER, AGENT)), { safeAccountConfig: { owners: [AGENT, USER], threshold: 1 } });
+  }
 });
 
 test("concurrent starts for one wallet share a single deployment", async () => {

@@ -158,6 +158,7 @@ cp .env.example .env
 | `ZERO_G_PRIVATE_KEY`, `ZERO_G_RPC_URL`, `ZERO_G_INDEXER_URL` | Only with `STORAGE_BACKEND=0g` — tokens at [faucet.0g.ai](https://faucet.0g.ai) |
 | `ZERO_G_API_KEY` | 0G Compute for the agent runtime |
 | `ORCHESTRA_POLICY_ADDRESS` | On-chain policy registry (optional) |
+| `SPENDING_MODULE_ADDRESS` | Turns on the on-chain $1000/day cap (optional). New accounts then have the user as their only owner; the agent calls `SpendingLimitModule.exec(safe, calls[])` (Call-only batches, no MultiSend). A request past what is left today is refused and the user can sign it themselves. Unset, behaviour is unchanged. Deploy as in [`contracts/README.md`](contracts/README.md). |
 | `LEDGER_APPROVAL=on` | Require a Ledger above the hardware threshold |
 | `TELEGRAM_BOT_TOKEN` | Telegram approvals — create a bot with @BotFather |
 | `PUBLIC_APP_URL` | Phone passkey approvals — the frontend's public **https** address |

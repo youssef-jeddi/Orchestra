@@ -4,6 +4,10 @@ import { getAgentWallet } from './agentWallet';
 import type { TxTracker } from './inflight';
 import { shortAddr } from "../../utils/redact";
 import { sepoliaRpcUrl } from '../../utils/rpc';
+import { spendingModuleAddress } from './spendingModule';
+
+/** Safe's SafeModuleSetup helper on Sepolia: its enableModules runs by delegatecall during setup. */
+export const SAFE_MODULE_SETUP = '0x2dd68b007B46fBe91B9A7c3EDa5A7a1063cB5b47';
 
 /**
  * The one Safe configuration every user's account is created from. The address is
@@ -11,10 +15,23 @@ import { sepoliaRpcUrl } from '../../utils/rpc';
  * saltNonce would silently move every user's account — safe.test.ts pins it.
  */
 export function predictedSafeConfig(userAddress: string, agentWalletAddress: string) {
+  const module = spendingModuleAddress();
+  if (!module) {
+    return {
+      safeAccountConfig: {
+        owners: [agentWalletAddress, userAddress],
+        threshold: 1,
+      },
+    };
+  }
+  // With the on-chain cap the user is the only owner and the agent acts through the module,
+  // which Safe enables while setting itself up (a delegatecall to SafeModuleSetup).
   return {
     safeAccountConfig: {
-      owners: [agentWalletAddress, userAddress],
+      owners: [userAddress],
       threshold: 1,
+      to: SAFE_MODULE_SETUP,
+      data: new ethers.Interface(["function enableModules(address[] modules)"]).encodeFunctionData("enableModules", [[module]]),
     },
   };
 }

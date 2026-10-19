@@ -12,7 +12,7 @@ import { OnboardingError, OnboardingLimiter, OnboardingQueue, accountReady } fro
 import { type InflightRecord, type InflightStore, type TxTracker, chainProbes, makeTracker } from "./inflight";
 import { type SetupInspection, type SetupStep } from "./setupSteps";
 import { type AccountReads, type SetupRecord, finishWith, inspectWith, registerAccount } from "./inspect";
-import { POLICY_ABI, isPerAccountRegistry, policyAddress as configuredPolicy } from "./policyContract";
+import { POLICY_ABI, isPerAccountRegistry, registerSafeArgs, policyAddress as configuredPolicy } from "./policyContract";
 import { DEFAULT_SPENDING_LIMIT_USD, writeAccountRecord } from "./accountRecord";
 import { shortAddr } from "../../utils/redact";
 
@@ -77,7 +77,8 @@ function registerOnPolicy(user: string, reads: AccountReads, track: (step: Setup
     const tracker = track("register");
     await tracker.begin();
     const policy = new ethers.Contract(reads.policyAddress!, POLICY_ABI, new ethers.Wallet(process.env.AGENT_PRIVATE_KEY!, makeSepoliaProvider()));
-    const tx = await policy.registerSafe(reads.safeAddress, user, DEFAULT_SPENDING_LIMIT_USD * 100);
+    // The registry is a record only; the on-chain ceiling lives in the spending module, so no limit is written here.
+    const tx = await policy.registerSafe(...registerSafeArgs(reads.safeAddress, user));
     await tracker.sent(tx.hash);
     await tx.wait();
     await tracker.settled();

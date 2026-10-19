@@ -12,6 +12,14 @@ export const POLICY_ABI = [
   "function agent() view returns (address)",
 ];
 
+/** The limit written to the registry: always 0. The registry is a record; the real ceiling is the spending module's. */
+export const REGISTERED_SPENDING_LIMIT = 0;
+
+/** The arguments of `registerSafe` for an account, never carrying a meaningful limit. */
+export function registerSafeArgs(safeAddress: string, owner: string): [string, string, number] {
+  return [safeAddress, owner, REGISTERED_SPENDING_LIMIT];
+}
+
 /** The configured registry (lowercased), or null when this server has none. */
 export function policyAddress(): string | null {
   return process.env.ORCHESTRA_POLICY_ADDRESS?.trim().toLowerCase() || null;
