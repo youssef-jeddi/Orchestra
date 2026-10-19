@@ -12,6 +12,12 @@ export type SetupSteps = Record<SetupStep, boolean>;
 export interface SetupInspection {
   safeAddress: string;
   steps: SetupSteps;
+  /**
+   * A finished account that isn't registered on the registry this server now uses (it was set up
+   * before the registry was configured or replaced). It stays ready: the registry is a record, it
+   * doesn't gate spending, so the registration is done in the background at the next sign-in.
+   */
+  registrationPending?: boolean;
 }
 
 /** The steps still to do, in the order they must run. Later steps need the earlier ones. */
@@ -36,7 +42,7 @@ export interface SetupFacts {
   allowancesMissing: number;
   /** OrchestraPolicy is configured for this server; without it there is nothing to register. */
   policyConfigured: boolean;
-  /** Registered: our own flag, the policy contract pointing at this account, or an account from before step tracking. */
+  /** Registered on the configured registry: our record says so for that registry, or the registry has an entry for this account. */
   registered: boolean;
   /** Our stored account record and profile are written. */
   recorded: boolean;

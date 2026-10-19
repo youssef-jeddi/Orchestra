@@ -5,19 +5,21 @@
 import { ethers } from "ethers";
 import { makeSepoliaProvider } from "../../utils/rpc";
 import { read, write, deleteKey } from "../zero-g/storage";
-import { readUserProfile, writeUserProfile } from "../../policy/store";
+import { readUserProfile } from "../../policy/store";
 import Safe from "@safe-global/protocol-kit";
 import { deploySafe, predictSafeAddress } from "./deploy";
 import { getAgentAddress } from "./agentWallet";
 import { enableAllowanceModule, addAgentDelegate, setAgentAllowances, isAgentDelegate, tokensWithoutAllowance } from "./spendingLimit";
 import { ALLOWANCE_MODULE_ADDRESS } from "../../types/safe";
 import { OnboardingError, OnboardingLimiter, OnboardingQueue, accountReady } from "./onboarding";
-import { type InflightRecord, type InflightStore, chainProbes, makeTracker } from "./inflight";
+import { type InflightRecord, type InflightStore, type TxTracker, chainProbes, makeTracker } from "./inflight";
 import { type SetupInspection, type SetupStep } from "./setupSteps";
-import { type AccountReads, type SetupRecord, finishWith, inspectWith } from "./inspect";
+import { type AccountReads, type SetupRecord, finishWith, inspectWith, registerAccount } from "./inspect";
+import { POLICY_ABI, isPerAccountRegistry, policyAddress as configuredPolicy } from "./policyContract";
+import { DEFAULT_SPENDING_LIMIT_USD, writeAccountRecord } from "./accountRecord";
 import { shortAddr } from "../../utils/redact";
 
-export const DEFAULT_SPENDING_LIMIT_USD = 100;
+export { DEFAULT_SPENDING_LIMIT_USD };
 
 async function agentAddress(): Promise<string> {
   try {
@@ -29,7 +31,6 @@ async function agentAddress(): Promise<string> {
 
 const setupKey = (user: string) => `onboard:${user.toLowerCase()}`;
 const inflightKey = (user: string) => `inflight:${user.toLowerCase()}`;
-const POLICY_READ_ABI = ["function getPolicy(address user) view returns (tuple(address safeAddress, address agentWallet, uint256 spendingLimitUSD, bool initialized))"];
 
 /** The real reads for one wallet's account: our storage and Sepolia. Rules live in inspect.ts. */
 async function accountReads(wallet: string): Promise<AccountReads> {
@@ -37,11 +38,11 @@ async function accountReads(wallet: string): Promise<AccountReads> {
   const agent = await agentAddress();
   const safeAddress = await predictSafeAddress(user, agent);
   const provider = makeSepoliaProvider();
-  const policyAddress = process.env.ORCHESTRA_POLICY_ADDRESS;
+  const policyAddress = configuredPolicy();
   const rpc = process.env.SEPOLIA_RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com";
   return {
     safeAddress,
-    policyConfigured: !!policyAddress,
+    policyAddress,
     setupRecord: async () => (await read(setupKey(user))) as SetupRecord | null,
     saveSetupRecord: (rec) => write(setupKey(user), rec),
     storedAccount: async () => (await read(`safe:${user.toLowerCase()}`)) as { safeAddress?: string } | null,
@@ -50,18 +51,55 @@ async function accountReads(wallet: string): Promise<AccountReads> {
     moduleEnabled: async () => (await Safe.init({ provider: rpc, safeAddress })).isModuleEnabled(ALLOWANCE_MODULE_ADDRESS),
     agentIsDelegate: () => isAgentDelegate(safeAddress, agent),
     allowancesMissing: async () => (await tokensWithoutAllowance(safeAddress, agent)).length,
-    registeredOnChain: async () => {
-      const policy = new ethers.Contract(policyAddress!, POLICY_READ_ABI, provider);
-      return String((await policy.getPolicy(agent)).safeAddress).toLowerCase() === safeAddress.toLowerCase();
-    },
+    registryIsCurrent: () => isPerAccountRegistry(provider, policyAddress!, agent),
+    registeredOnChain: async () => new ethers.Contract(policyAddress!, POLICY_ABI, provider).hasPolicy(safeAddress),
     now: () => new Date().toISOString(),
   };
 }
 
 /** Reads where the wallet's account stands: its address, and each setup step from the chain. */
 async function inspectAccount(wallet: string): Promise<SetupInspection> {
-  const { safeAddress, steps } = await inspectWith(await accountReads(wallet));
-  return { safeAddress, steps };
+  return inspectWith(await accountReads(wallet));
+}
+
+/** Every transaction is recorded before and after it is sent, so a run that stops while one is unconfirmed makes the next run wait for it instead of sending it again. */
+function trackerFor(user: string, agent: string, isCancelled: () => boolean) {
+  const store: InflightStore = {
+    load: async () => (await read(inflightKey(user))) as InflightRecord | null,
+    save: (rec) => write(inflightKey(user), rec),
+    clear: () => deleteKey(inflightKey(user)),
+  };
+  const probes = chainProbes(makeSepoliaProvider(), agent);
+  return (step: SetupStep) => makeTracker(step, { store, probes, isCancelled });
+}
+
+/**
+ * Registers the account on the configured registry, unless the registry already has it (then only
+ * our record is updated). Safe to retry: the chain is asked first, the transaction is tracked, and a
+ * second `registerSafe` for the same account would revert rather than overwrite anything.
+ */
+function registerOnPolicy(user: string, reads: AccountReads, track: (step: SetupStep) => TxTracker): Promise<void> {
+  // The rules (no registry: nothing; not the per-account registry: refuse before sending anything) are in registerAccount.
+  return registerAccount(reads, async () => {
+    const tracker = track("register");
+    await tracker.begin();
+    const policy = new ethers.Contract(reads.policyAddress!, POLICY_ABI, new ethers.Wallet(process.env.AGENT_PRIVATE_KEY!, makeSepoliaProvider()));
+    const tx = await policy.registerSafe(reads.safeAddress, user, DEFAULT_SPENDING_LIMIT_USD * 100);
+    await tracker.sent(tx.hash);
+    await tx.wait();
+    await tracker.settled();
+    console.log(`[onboard] Policy registered: ${tx.hash}`);
+  });
+}
+
+/**
+ * Registers a finished account that the current registry doesn't know yet. The account stays ready
+ * meanwhile (the registry doesn't gate spending); a failure is logged and tried again at the next sign-in.
+ */
+async function registerFinishedAccount(wallet: string): Promise<void> {
+  const user = ethers.getAddress(wallet);
+  const agent = await agentAddress();
+  await registerOnPolicy(user, await accountReads(user), trackerFor(user, agent, () => false));
 }
 
 /** Runs the account's missing setup steps, in order, each checked against the chain first. */
@@ -73,56 +111,17 @@ async function finishAccount(wallet: string, isCancelled: () => boolean): Promis
   const limit = DEFAULT_SPENDING_LIMIT_USD;
   const reads = await accountReads(user);
   const { safeAddress } = reads;
-
-  // Every transaction below is recorded before and after it is sent, so a run that stops while one
-  // is unconfirmed makes the next run wait for it instead of sending it again.
-  const store: InflightStore = {
-    load: async () => (await read(inflightKey(user))) as InflightRecord | null,
-    save: (rec) => write(inflightKey(user), rec),
-    clear: () => deleteKey(inflightKey(user)),
-  };
-  const probes = chainProbes(provider, agent);
-  const track = (step: SetupStep) => makeTracker(step, { store, probes, isCancelled });
+  const track = trackerFor(user, agent, isCancelled);
 
   const ran = await finishWith(reads, {
     deploy: async () => { await deploySafe(user, agent, provider, track("deploy")); },
     module: () => enableAllowanceModule(safeAddress, agentKey, track("module")),
     delegate: () => addAgentDelegate(safeAddress, agent, agentKey, track("delegate")),
     allowances: async () => setAgentAllowances(safeAddress, agent, limit, agentKey, await tokensWithoutAllowance(safeAddress, agent), track("allowances")),
-    register: async () => {
-      // An earlier run's registration may have confirmed since this run read the chain.
-      if ((await inspectAccount(user)).steps.register) return;
-      const tracker = track("register");
-      await tracker.begin();
-      const abi = ["function registerSafe(address safeAddress, address agentWallet, uint256 spendingLimitUSD) external"];
-      const policy = new ethers.Contract(process.env.ORCHESTRA_POLICY_ADDRESS!, abi, new ethers.Wallet(agentKey, provider));
-      const tx = await policy.registerSafe(safeAddress, agent, limit * 100);
-      await tracker.sent(tx.hash);
-      await tx.wait();
-      await tracker.settled();
-      console.log(`[onboard] Policy registered: ${tx.hash}`);
-      const rec = await reads.setupRecord(); // always there: finishWith writes it before any transaction
-      await write(setupKey(user), { ...rec!, registeredAt: new Date().toISOString() } satisfies SetupRecord);
-    },
-    record: async () => {
-      // Keep what an account from before step tracking already has (its limit, its deploy date).
-      const stored = ((await reads.storedAccount()) ?? {}) as { spendingLimitUSD?: number; deployedAt?: string };
-      await write(`safe:${user.toLowerCase()}`, {
-        safeAddress, agentWallet: agent, spendingLimitUSD: stored.spendingLimitUSD ?? limit, deployedAt: stored.deployedAt ?? new Date().toISOString(),
-      });
-      // Merge: keep any existing guardrail policy instead of wiping it.
-      const profile = await readUserProfile(user);
-      await writeUserProfile(user, {
-        ...profile,
-        address: user,
-        safeAddress,
-        riskTolerance: profile.riskTolerance || "moderate",
-        autoApproveLimit: limit,
-        preferredTokens: profile.preferredTokens || ["USDC", "WETH", "ETH"],
-        createdAt: profile.createdAt || new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      });
-    },
+    // The chain is asked first (a registration from an earlier run may have confirmed since this run read it).
+    register: () => registerOnPolicy(user, reads, track),
+    // The only writer of `safe:<wallet>`, and the last step: an unfinished account is never recorded as the user's own.
+    record: () => writeAccountRecord({ user, safeAddress, agent }),
   }, isCancelled, async () => {
     await deleteKey(inflightKey(user)); // everything is done: nothing can still be in flight
   });
@@ -132,6 +131,7 @@ async function finishAccount(wallet: string, isCancelled: () => boolean): Promis
 export const onboarding = new OnboardingQueue({
   inspect: inspectAccount,
   finish: finishAccount,
+  registerFinished: registerFinishedAccount,
   limiter: new OnboardingLimiter(),
 });
 

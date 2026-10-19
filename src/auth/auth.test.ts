@@ -145,17 +145,17 @@ const test = (name: string, fn: () => void | Promise<void>) => tests.push([name,
   });
 
   // ── Per-wallet policy ──
-  test("policy store: each wallet reads its own policy; legacy global is a read-only fallback", async () => {
+  test("policy store: each wallet reads only its own policy; the shared legacy record is ignored", async () => {
     await storage.clear();
     store._resetPolicyStoreCache();
     await storage.write("user:profile", { policy: { dailyLimitUsd: 50 } });
-    assert.equal((await store.getPolicyProfile(owner.address)).dailyLimitUsd, 50); // legacy fallback
+    assert.equal((await store.getPolicyProfile(owner.address)).dailyLimitUsd, undefined); // not the shared record: defaults apply
     assert.deepEqual(await store.getPolicyProfile(undefined), {});
 
     await store.writeUserProfile(attacker.address, { policy: { dailyLimitUsd: 100000 } });
     assert.equal((await store.getPolicyProfile(attacker.address)).dailyLimitUsd, 100000);
-    assert.equal((await store.getPolicyProfile(owner.address)).dailyLimitUsd, 50); // untouched
-    assert.equal(((await storage.read("user:profile")) as any).policy.dailyLimitUsd, 50);
+    assert.equal((await store.getPolicyProfile(owner.address)).dailyLimitUsd, undefined); // untouched
+    assert.equal(((await storage.read("user:profile")) as any).policy.dailyLimitUsd, 50); // left in place, never read
   });
 
   console.log("auth");

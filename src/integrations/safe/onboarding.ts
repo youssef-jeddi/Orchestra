@@ -102,6 +102,7 @@ interface Job { safeAddress: string; resumed: boolean; failed?: string; failedCo
 export class OnboardingQueue {
   private jobs = new Map<string, Job>();
   private deciding = new Map<string, Promise<OnboardingStatus>>();
+  private registering = new Set<string>();
   private tail: Promise<unknown> = Promise.resolve();
   private completions: OnboardingLimiter;
 
@@ -116,6 +117,11 @@ export class OnboardingQueue {
      * behind it instead of replacing it.
      */
     finish: (wallet: string, isCancelled: () => boolean) => Promise<void>;
+    /**
+     * Registers a finished account on the registry the server now uses (`registrationPending`).
+     * Run in the background at sign-in: the account stays ready, since the registry doesn't gate spending.
+     */
+    registerFinished?: (wallet: string) => Promise<void>;
     /** Caps new deployments (per IP, global). */
     limiter: OnboardingLimiter;
     /** Caps runs that only finish a deployed account (per account, global). */
@@ -161,6 +167,7 @@ export class OnboardingQueue {
     const found = await this.deps.inspect(wallet);
     if (isSetupComplete(found.steps)) {
       this.jobs.delete(key);
+      if (found.registrationPending) this.registerInBackground(key, wallet);
       return { status: "ready", safeAddress: found.safeAddress, ...describeSteps(found.steps) };
     }
     // A new deployment uses the deployment budget; finishing an account that already exists uses
@@ -182,6 +189,28 @@ export class OnboardingQueue {
       },
     );
     return { status: "deploying", safeAddress, started: true, ...(resumed ? { resumed: true } : {}), remaining: remainingSteps(found.steps) };
+  }
+
+  /**
+   * Registers a finished account on the current registry without touching its status. It shares the
+   * completion budget (so a failing registration can't make the agent pay without limit) and the
+   * queue's order (the agent's nonce), is bounded by the same timeout, and a failure is only logged:
+   * the next sign-in tries again.
+   */
+  private registerInBackground(key: string, wallet: string): void {
+    const register = this.deps.registerFinished;
+    if (!register || this.registering.has(key)) return;
+    try { this.completions.acquire(key); } catch { return; }
+    this.registering.add(key);
+    let timer: NodeJS.Timeout | undefined;
+    const limit = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("registration timed out")), this.deps.timeoutMs ?? DEPLOY_TIMEOUT_MS);
+      timer.unref();
+    });
+    const run = this.tail.then(() => Promise.race([register(wallet), limit])).finally(() => clearTimeout(timer));
+    this.tail = run.catch(() => {});
+    run.catch((err) => console.error(`[onboard] Registration for ${shortAddr(wallet)} will be retried at the next sign-in: ${safeErr(err)}`))
+      .finally(() => this.registering.delete(key));
   }
 
   /** Runs one setup, failing it if it takes longer than the timeout (a transaction that never confirms). */
