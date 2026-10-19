@@ -192,7 +192,7 @@ export async function verifyRegistration(
 ): Promise<boolean> {
   const rp = opts.rp ?? browserRp();
   const held = opts.challenge ? { challenge: opts.challenge, ownerChecked: !!opts.ownerChecked } : takeChallenge(`reg:${wallet}:${rp.rpID}`);
-  if (!held) throw new Error("No or expired registration challenge");
+  if (!held) throw new PasskeyError(400, "No or expired registration challenge");
   const expectedChallenge = held.challenge;
 
   const verification = await verifyRegistrationResponse({
@@ -202,7 +202,7 @@ export async function verifyRegistration(
     expectedRPID: rp.rpID,
   });
   if (!verification.verified || !verification.registrationInfo) {
-    throw new Error("Passkey registration could not be verified");
+    throw new PasskeyError(400, "Passkey registration could not be verified");
   }
 
   const cred = verification.registrationInfo.credential;
@@ -287,7 +287,7 @@ export async function addExternalCredentials(wallet: string, list: ExternalCrede
 // and hold it themselves; without one, a random challenge is kept per wallet.
 export async function authenticationOptions(wallet: string, challenge?: Uint8Array, rp: RelyingParty = browserRp()) {
   const creds = (await getCreds(wallet)).filter((c) => c.rpID === rp.rpID);
-  if (creds.length === 0) throw new Error("No passkey registered for this wallet on this device");
+  if (creds.length === 0) throw new PasskeyError(400, "No passkey registered for this wallet on this device");
 
   const opts = await generateAuthenticationOptions({
     rpID: rp.rpID,
@@ -386,11 +386,11 @@ export async function verifyOwner(wallet: string, assertion: any, rp: RelyingPar
 /** Verify an assertion. Returns true only if the passkey signature checks out. */
 export async function verifyAuthentication(wallet: string, response: any, challenge?: string, rp: RelyingParty = browserRp()): Promise<boolean> {
   const expectedChallenge = challenge ?? takeChallenge(`auth:${wallet}:${rp.rpID}`)?.challenge;
-  if (!expectedChallenge) throw new Error("No or expired authentication challenge");
+  if (!expectedChallenge) throw new PasskeyError(400, "No or expired authentication challenge");
 
   const creds = await getCreds(wallet);
   const cred = creds.find((c) => c.id === response?.id && c.rpID === rp.rpID);
-  if (!cred) throw new Error("This passkey isn't registered for this wallet");
+  if (!cred) throw new PasskeyError(400, "This passkey isn't registered for this wallet");
 
   const verification = await verifyAuthenticationResponse({
     response,

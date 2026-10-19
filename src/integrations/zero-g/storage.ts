@@ -62,6 +62,11 @@ class ZeroGStorage {
     }
   }
 
+  /**
+   * The stored value, or null only when the key was never written. A failed download or unreadable
+   * data throws: "missing" and "couldn't read" must not look alike, or a caller would fall back to
+   * defaults (a lowered limit becomes $100) and save over real data.
+   */
   async read(key: string): Promise<unknown | null> {
     console.log(`[0G Storage] READ ${shortKey(key)}`);
     const rootHash = this.index.get(key);
@@ -76,13 +81,10 @@ class ZeroGStorage {
       const err = await this.indexer.download(rootHash, tmpFile, false);
       if (err) {
         console.warn(`[0G Storage] READ ${shortKey(key)} download failed:`, err);
-        return null;
+        throw new Error(`0G download failed for ${shortKey(key)}`);
       }
       const raw = fs.readFileSync(tmpFile, 'utf-8');
       return JSON.parse(raw);
-    } catch (error) {
-      console.warn(`[0G Storage] READ ${shortKey(key)} error:`, error);
-      return null;
     } finally {
       if (fs.existsSync(tmpFile)) {
         fs.unlinkSync(tmpFile);
@@ -97,7 +99,7 @@ class ZeroGStorage {
 
     const results: unknown[] = [];
     for (const key of matchingKeys) {
-      const item = await this.read(key);
+      const item = await this.read(key); // a row that can't be read throws: dropping it would understate what's there
       if (item === null) continue;
 
       if (filter) {

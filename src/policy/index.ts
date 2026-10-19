@@ -41,6 +41,15 @@ export function detectIntentType(steps: any[]): IntentType {
 /** The highest daily limit a user can set (enforced when saving). */
 export const MAX_DAILY_LIMIT = 1000;
 
+/**
+ * A daily limit from an untrusted request as a whole number of dollars from 0 to MAX_DAILY_LIMIT,
+ * or null. Only a real number passes: no strings ("1e6"), NaN, decimals, negatives or missing
+ * values. Used wherever a limit also becomes an on-chain amount, which has to be whole dollars.
+ */
+export function parseWholeDollarLimit(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= MAX_DAILY_LIMIT ? value : null;
+}
+
 // A configured limit of 0 is honoured ("always ask me"); only a missing or invalid value
 // (not a number, negative, NaN) falls back to the default.
 export function resolveDailyLimit(configured: unknown): number {

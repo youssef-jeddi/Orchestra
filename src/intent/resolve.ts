@@ -22,6 +22,8 @@ export interface ResolveContext {
   /** The Safe's Uniswap liquidity positions ([] without a Safe, null if they couldn't be read). */
   getPositions?(): Promise<Position[] | null>;
   resolveEns(name: string): Promise<string | null>;
+  /** Asked before a message that moves value is resolved: false when the limits can't be read, which ends it there. */
+  valueGate?(): Promise<boolean>;
 }
 
 /** Legacy plan-step shape consumed by the policy engine and the executor adapters. */

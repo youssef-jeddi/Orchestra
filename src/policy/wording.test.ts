@@ -62,7 +62,7 @@ test("bridge messages shown to users say 'account'", () => {
 
 test("a reverted account transaction is explained in plain words, with no codes", () => {
   const src = fs.readFileSync(path.join(ROOT, "src/integrations/safe/transaction.ts"), "utf8");
-  const thrown = src.match(/throw new Error\(`(This didn't go through[^`]*)`\)/)?.[1];
+  const thrown = src.match(/throw new (?:Error|UserFacingError)\(`(This didn't go through[^`]*)`\)/)?.[1];
   assert.ok(thrown, "the revert error is thrown with the plain sentence");
   assert.ok(!/GS0|nonce|inner call|revert|\bSafe\b/i.test(thrown!), thrown);
 });

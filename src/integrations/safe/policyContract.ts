@@ -5,6 +5,7 @@
 // is a record, the Safe's allowance and the policy engine are what limit money.
 
 import { ethers } from "ethers";
+import { getAgentWallet } from "./agentWallet";
 
 export const POLICY_ABI = [
   "function registerSafe(address safeAddress, address owner, uint256 spendingLimitUSD) external",
@@ -33,4 +34,19 @@ export async function isPerAccountRegistry(provider: ethers.ContractRunner, addr
   } catch {
     return false;
   }
+}
+
+/**
+ * Write a new limit (whole dollars) to the registry. The agent signs and pays; it is a record, not
+ * what limits money. Does nothing when this server has no registry. Throws when it can't write:
+ * no agent key, a contract that isn't the per-account registry, or a failed transaction.
+ */
+export async function updateRegistryLimit(provider: ethers.Provider, safeAddress: string, limitUsd: number): Promise<void> {
+  const address = policyAddress();
+  if (!address) return;
+  const agent = getAgentWallet(provider);
+  // Never write to a contract that isn't the per-account registry (the old one is keyed by sender).
+  if (!(await isPerAccountRegistry(provider, address, agent.address))) throw new Error(NOT_PER_ACCOUNT_REGISTRY);
+  const tx = await new ethers.Contract(address, POLICY_ABI, agent).updateSpendingLimit(safeAddress, limitUsd * 100);
+  await tx.wait();
 }

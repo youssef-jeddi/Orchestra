@@ -11,6 +11,7 @@
 
 import { ethers } from "ethers";
 import crypto from "crypto";
+import { UserFacingError } from "../utils/userFacing";
 import { WETH_SEPOLIA, USDC_SEPOLIA } from "../integrations/uniswap/types";
 import { checkApproval } from "../integrations/uniswap/api";
 import { fetchQuoteWithRouting } from "../integrations/uniswap/routing";
@@ -295,10 +296,10 @@ const addLiquidityAdapter: IntentAdapter = {
     const b = lpSide(d.tokenB, d.symbolB, BigInt(d.amountB));
     const fee = Number(d.feeTier) || 3000;
     const state = await readPool(ctx.provider, a.address, b.address, fee);
-    if (!state) throw new Error("The trading pool no longer exists.");
+    if (!state) throw new UserFacingError("The trading pool no longer exists.");
     const [t0, t1] = orderSides(a, b);
     const problem = lpPriceProblem(state.sqrtPriceX96, t0, t1);
-    if (problem) throw new Error(problem);
+    if (problem) throw new UserFacingError(problem);
 
     const plan = planMint(a, b, fee, state.sqrtPriceX96);
     const batch = buildMintBatch(plan, ctx.safeAddress, Math.floor(Date.now() / 1000) + 20 * 60);
@@ -340,12 +341,12 @@ const removeLiquidityAdapter: IntentAdapter = {
 
     const owner = await positionOwner(ctx.provider, d.tokenId).catch(() => null);
     if (!owner || owner.toLowerCase() !== ctx.safeAddress.toLowerCase()) {
-      throw new Error(`Position #${d.tokenId} is no longer in your account.`);
+      throw new UserFacingError(`Position #${d.tokenId} is no longer in your account.`);
     }
     const position = (await readPositions(ctx.provider, ctx.safeAddress, tokenByAddress)).find((x) => x.tokenId === d.tokenId);
-    if (!position || position.liquidity === 0n) throw new Error(`Position #${d.tokenId} has no liquidity left to remove.`);
+    if (!position || position.liquidity === 0n) throw new UserFacingError(`Position #${d.tokenId} has no liquidity left to remove.`);
     if (position.token0.address.toLowerCase() !== String(d.token0).toLowerCase() || position.token1.address.toLowerCase() !== String(d.token1).toLowerCase()) {
-      throw new Error(`Position #${d.tokenId} no longer matches what you approved.`);
+      throw new UserFacingError(`Position #${d.tokenId} no longer matches what you approved.`);
     }
 
     const plan = planRemove(position, d.percent);
@@ -441,7 +442,7 @@ const swapAdapter: IntentAdapter = {
       amountIn: String(quoteData.amount), tokenOut: quoteData.tokenOut,
       symbolOut: quoteData.symbolOut || symbolFor(quoteData.tokenOut),
     });
-    if (refusal) throw new Error(refusal);
+    if (refusal) throw new UserFacingError(refusal); // the re-quote at execution time moved too far
     const swapTx = await submitSwap(freshQuote.quote, null, undefined);
     console.log("[adapter:swap] AUTO_EXECUTE: swap tx built");
 
@@ -490,7 +491,7 @@ function withPasskeyGate(adapter: IntentAdapter): IntentAdapter {
   return {
     ...adapter,
     async execute(ctx, built) {
-      if (!ctx.walletAddress) throw new Error("No wallet to execute for.");
+      if (!ctx.walletAddress) throw new UserFacingError("No wallet to execute for.");
       await requirePasskeyToMoveFunds(ctx.walletAddress);
       return run(ctx, built);
     },

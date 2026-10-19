@@ -137,7 +137,8 @@ export const onboarding = new OnboardingQueue({
 
 /** The spending limit stored for a wallet's account (the default if none). */
 export async function storedSpendingLimit(wallet: string): Promise<number> {
-  return Number(((await read(`safe:${wallet.toLowerCase()}`)) as any)?.spendingLimitUSD) || DEFAULT_SPENDING_LIMIT_USD;
+  const stored = ((await read(`safe:${wallet.toLowerCase()}`)) as any)?.spendingLimitUSD;
+  return typeof stored === "number" && Number.isFinite(stored) && stored >= 0 ? stored : DEFAULT_SPENDING_LIMIT_USD; // 0 is a real limit ("always ask")
 }
 
 // A "yes" is remembered briefly so a chat of several messages doesn't re-read the chain each time;

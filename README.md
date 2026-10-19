@@ -204,6 +204,16 @@ Newcomers sign up with a passkey (or email) and get a wallet without installing 
 
 Passkeys are bound to a domain: if the address changes (quick tunnels change on every start), set up the phone passkey again. Approvals fall back to the Telegram button until you do.
 
+### Testing failures (development only)
+
+To see how the app behaves when the stored limits or the day's activity can't be read, start the bridge with `ORCHESTRA_FAULT_INJECT` set to one or more of `profile-read`, `activity-read` (the read fails), `profile-timeout`, `activity-timeout` (it never answers, so the 2-second timeout fires), comma-separated:
+
+```bash
+ORCHESTRA_FAULT_INJECT=profile-read PORT=3011 STORAGE_BACKEND=memory TELEGRAM_BOT_TOKEN= npx tsx src/integrations/ledger/serve.ts
+```
+
+A send, swap or liquidity request then answers "I can't check your limits right now, so nothing was done" and runs nothing; chat and balance questions still work and the Limits sheet shows an error instead of empty settings. It is ignored when `NODE_ENV=production` or the storage is 0G, and the bridge refuses to start (exit code 1) if it is set with `NODE_ENV=production`.
+
 ### Smart contracts (optional)
 
 ```bash

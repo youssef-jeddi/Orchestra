@@ -2,6 +2,7 @@
 // Express + WS bridge. Serves the test UI and exposes POST /mock-trade (local dev only).
 
 import "dotenv/config";
+import "../../utils/faultGuard"; // exits if dev-only fault injection is set in production
 
 import express from "express";
 import http from "http";
@@ -18,12 +19,13 @@ import { executeSwap } from "../uniswap/execution";
 import { WETH_SEPOLIA, USDC_SEPOLIA, CHAIN_ID } from "../uniswap/types";
 import { write, read, append } from "../zero-g/storage";
 import { detectExistingSafe } from "../safe/detect";
-import { POLICY_ABI, NOT_PER_ACCOUNT_REGISTRY, isPerAccountRegistry } from "../safe/policyContract";
+import { updateRegistryLimit } from "../safe/policyContract";
 import { onboarding, storedSpendingLimit, isAccountReady } from "../safe/onboard";
 import { OnboardingError, ACCOUNT_NOT_READY_REASON } from "../safe/onboarding";
 import { setInitialSpendingLimits, updateSpendingLimit, buildLimitUpdateTx } from "../safe/spendingLimit";
 import { getAgentAddress } from "../safe/agentWallet";
-import { limitTxProblem } from "../safe/verifyLimitTx";
+import { errorResponse, isUserFacing } from "./errors";
+import { UserFacingError } from "../../utils/userFacing";
 import { readPositions, type Position } from "../uniswap/liquidity";
 import { tokenByAddress } from "../../intent/tokens";
 import { executePlan } from "../../executor";
@@ -32,16 +34,16 @@ import {
   refreshPrices,
   getPrices,
   type PolicyProfile,
-  type ActivityRecord,
 } from "../../policy";
-import { getPolicyProfile, getRecentActivity, recordActivity, readUserProfile, writeUserProfile } from "../../policy/store";
-import { readLimits, requestConfirmation, applyChange, LimitsError } from "../../policy/limits";
+import { getRecentActivity, recordActivity, readPolicyInputs } from "../../policy/store";
+import { readLimits, requestConfirmation, applyChange } from "../../policy/limits";
+import { prepareLimitUpdate, finalizeLimitUpdate, type LimitUpdateDeps } from "../../policy/limitUpdate";
 import { loginRequest, login, issueToken, requireSession, sessionWallet, verifyToken, AuthError } from "../../auth";
 import { verifyPrivyUser, importPrivyPasskeys, noteEmailSignIn, verifyEmailForPasskey } from "../../auth/privy";
 import { getAdapter, type Balances } from "../../executor/adapters";
 import { interpretIntent, assessAction } from "../../intent/pipeline";
 import { sanitizeHistory } from "../../intent/planner";
-import { INTENT_FALLBACK_ERROR } from "../../intent/messages";
+import { INTENT_FALLBACK_ERROR, LIMITS_UNREADABLE_REASON } from "../../intent/messages";
 import { shortAddr, safeErr, requestId, logUserMessage, intentSummaryLine, intentOutcome, type IntentLogFields } from "../../utils/redact";
 import { fetchBalances, resolveEnsName } from "../../intent/context";
 import { describeAddresses, describeBalances } from "../../intent/replies";
@@ -388,10 +390,9 @@ app.post("/intent", async (req, res) => {
     const balancesP: Promise<Balances | null> = wallet
       ? safeP.then((safe) => fetchBalances(provider, safe || wallet))
       : Promise.resolve(null);
-    const profileP = withTimeout(getPolicyProfile(wallet), 2_000, {} as PolicyProfile);
-    const activityP: Promise<ActivityRecord[] | undefined> = wallet
-      ? withTimeout(getRecentActivity(wallet), 2_000, [] as ActivityRecord[])
-      : Promise.resolve(undefined);
+    // Never rejects; only awaited for a value-bearing action. An unreadable profile or history (or a
+    // timeout) is `ok: false`, not an empty one: the daily limit and total can't be checked then.
+    const inputsP = readPolicyInputs(wallet);
 
     // The wallet's own balance only matters for deposits into the Safe — fetch it on demand.
     let walletBalancesP: Promise<Balances | null> | null = null;
@@ -405,6 +406,7 @@ app.post("/intent", async (req, res) => {
         ? withTimeout(readPositions(provider, safe, tokenByAddress).catch(() => null), 10_000, null)
         : ([] as Position[]))),
       resolveEns: resolveEnsName,
+      valueGate: async () => (await inputsP).ok,
     });
     const timing = () => ({ totalMs: Date.now() - started, plannerMs: planner.latencyMs, model: planner.model });
     Object.assign(li, { kind: outcome.kind, plannerMs: planner.latencyMs, model: planner.model });
@@ -460,6 +462,16 @@ app.post("/intent", async (req, res) => {
     const intentType = action.intentType;
     li.intentType = intentType;
 
+    // Nothing that spends runs unless the daily limit AND the day's total could be read: an
+    // unreadable profile must not mean the $100 default, an unreadable history must not mean $0 spent.
+    // (Asked before anything is built, auto-run or held for approval.)
+    const inputs = await inputsP;
+    if (!inputs.ok) {
+      console.log(`[intent ${rid}] ${intentType} held back: limits or activity unreadable`);
+      res.json({ status: "unsupported", intentType, reason: LIMITS_UNREADABLE_REASON, reasoning: LIMITS_UNREADABLE_REASON, timing: timing() });
+      return;
+    }
+
     // A wallet that signed in with an email can't move funds, even small auto-executed amounts,
     // until it holds a passkey: say so now, in the chat, before anything is built or held.
     // (The registry's execute enforces the same rule for every path that gets past this.)
@@ -475,7 +487,7 @@ app.post("/intent", async (req, res) => {
     }
     const emailWallet = !!wallet && (await isEmailWallet(wallet));
 
-    const [storedProfile, activity] = await Promise.all([profileP, activityP]);
+    const { profile: storedProfile, activity } = inputs;
     // The user's own wallet and own account are never "new recipients"; every other address
     // is known only once a send to it has gone through (the server's own record).
     const profile: PolicyProfile = {
@@ -666,7 +678,7 @@ async function executeApproval(a: PendingApproval): Promise<{ txHash: string; ex
   try {
     const result = await executeApprovalFlow(a, async (a) => {
       const adapter = getAdapter(a.intentType);
-      if (!adapter?.execute) throw new Error(`This ${a.intentType.replace(/_/g, " ")} can't be run from your account`);
+      if (!adapter?.execute) throw new UserFacingError(`This ${a.intentType.replace(/_/g, " ")} can't be run from your account`);
       const ctx = {
         walletAddress: a.wallet, safeAddress: a.safeAddress, balanceAddress: a.safeAddress, provider,
         params: {}, planSummary: a.summary, planSteps: [], totalEstimatedValueUsd: a.valueUsd, balances: null,
@@ -717,10 +729,15 @@ function desktopRp(req: express.Request): RelyingParty {
   throw new ApprovalError(400, `Passkeys only work on ${browserRp().origin}${phone ? ` or ${phone.origin}` : ""}. Open Orchestra there.`);
 }
 
-function sendError(res: express.Response, err: any, fallbackStatus = 500): void {
-  if (err instanceof PasskeyError) { res.status(err.status).json({ error: err.message, code: err.code }); return; }
-  if (err instanceof OnboardingError) { res.status(err.status).json({ error: err.message, code: err.code }); return; }
-  res.status(err instanceof ApprovalError ? err.status : fallbackStatus).json({ error: err.message });
+/**
+ * Answer with an error. Errors raised on purpose keep their own status and sentence; anything else
+ * is logged here and the user gets one plain sentence (see errors.ts), never `err.message`.
+ * `_fallbackStatus` is kept so older call sites still read the same; an unexpected error is always a 500.
+ */
+function sendError(res: express.Response, err: any, _fallbackStatus = 500): void {
+  if (!isUserFacing(err)) console.error(`[serve] unexpected error: ${safeErr(err)}`);
+  const { status, body } = errorResponse(err);
+  res.status(status).json(body);
 }
 
 /**
@@ -1098,10 +1115,8 @@ app.get("/auth/session", requireSession, async (_req, res) => {
 // wallet signature when there is no passkey) — see src/policy/limits.ts.
 app.get("/policy", requireSession, async (_req, res) => {
   try {
-    res.json(await readLimits(res.locals.wallet));
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
+    res.json(await readLimits(res.locals.wallet)); // a storage error is an error, never an empty sheet
+  } catch (e: any) { sendError(res, e); }
 });
 
 // The habit profile the engine has learned from recorded activity.
@@ -1111,9 +1126,7 @@ app.get("/habit", requireSession, async (req, res) => {
     const wallet = res.locals.wallet as string;
     const history = await getRecentActivity(wallet);
     res.json({ wallet, ...computeHabitProfile(history) });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e: any) { sendError(res, e); }
 });
 
 // Step 1 of raising a limit: the challenge to answer (passkey options or typed data), or { required: false }.
@@ -1132,10 +1145,7 @@ app.post("/policy", requireSession, async (req, res) => {
   } catch (e: any) { sendLimitsError(res, e); }
 });
 
-function sendLimitsError(res: express.Response, e: any): void {
-  if (e instanceof LimitsError) { res.status(e.status).json({ error: e.message, ...(e.code ? { code: e.code } : {}), ...e.extra }); return; }
-  sendError(res, e);
-}
+const sendLimitsError = sendError; // LimitsError is one of the errors errors.ts passes through
 
 // ─── Safe onboarding ───
 // Called automatically at sign-in. Starts (or joins) the wallet's one deployment and returns at
@@ -1203,9 +1213,7 @@ app.get("/safe-balances", requireSession, async (req, res) => {
       usdc: ethers.formatUnits(usdcRaw, 6),
       weth: ethers.formatEther(wethRaw),
     });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
+  } catch (err: any) { sendError(res, err); }
 });
 
 // Step 1: Build unsigned tx for Ledger to sign (MultiSend of 3 setAllowance calls through Safe)
@@ -1213,28 +1221,11 @@ app.post("/prepare-limit-update", requireSession, async (req, res) => {
   try {
     const ledgerAddress = ethers.getAddress(res.locals.wallet);
     if (!sameWalletOrAbsent(req.body?.ledgerAddress, res)) return;
-    const { newLimitUSD } = req.body;
-    if (!newLimitUSD) {
-      res.status(400).json({ error: "newLimitUSD required" });
-      return;
-    }
-
-    const stored = await read(`safe:${ledgerAddress.toLowerCase()}`);
-    if (!stored) {
-      res.status(400).json({ error: "Your account isn't set up yet. Sign in again to set it up." });
-      return;
-    }
-    const safeAddress = (stored as any).safeAddress;
-    const agentAddr = getAgentAddress();
-
-    const unsignedTx = buildLimitUpdateTx(safeAddress, ledgerAddress, agentAddr, newLimitUSD);
-
-    console.log(`[prepare-limit-update] Built tx for $${newLimitUSD} limit (${shortAddr(safeAddress)})`);
-    res.json({ unsignedTx });
-  } catch (err: any) {
-    console.error("[prepare-limit-update] Error:", safeErr(err));
-    res.status(500).json({ error: err.message });
-  }
+    // { unsignedTx, confirmation: "none" | "passkey" } — rules in src/policy/limitUpdate.ts
+    const prepared = await prepareLimitUpdate(ledgerAddress, req.body, limitUpdateDeps(req));
+    console.log(`[prepare-limit-update] Built tx for ${shortAddr(ledgerAddress)}`);
+    res.json(prepared);
+  } catch (err: any) { sendError(res, err); }
 });
 
 // Step 2: After Ledger signs and tx is broadcast, update storage + OrchestraPolicy.
@@ -1244,67 +1235,40 @@ app.post("/finalize-limit-update", requireSession, async (req, res) => {
   try {
     const ledgerAddress = ethers.getAddress(res.locals.wallet);
     if (!sameWalletOrAbsent(req.body?.ledgerAddress, res)) return;
-    const { newLimitUSD, txHash } = req.body;
-    if (!newLimitUSD || typeof txHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(txHash)) {
-      res.status(400).json({ error: "newLimitUSD and txHash required" });
-      return;
-    }
-
-    const stored = await read(`safe:${ledgerAddress.toLowerCase()}`);
-    if (!stored) {
-      res.status(400).json({ error: "Your account isn't set up yet." });
-      return;
-    }
-
-    const safeAddress = (stored as any).safeAddress as string;
-    const expected = buildLimitUpdateTx(safeAddress, ledgerAddress, getAgentAddress(), newLimitUSD);
-    const [tx, receipt] = await Promise.all([
-      withTimeout(provider.getTransaction(txHash), 10_000, null),
-      withTimeout(provider.getTransactionReceipt(txHash), 10_000, null),
-    ]);
-    const problem = limitTxProblem({ tx, receipt, wallet: ledgerAddress, safeAddress, expectedData: expected.data });
-    if (problem) {
-      res.status(400).json({ error: `Limit not updated: ${problem}` });
-      return;
-    }
-
-    // Update 0G Storage
-    await write(`safe:${ledgerAddress.toLowerCase()}`, {
-      ...(stored as any),
-      spendingLimitUSD: newLimitUSD,
-    });
-    const profile = await readUserProfile(ledgerAddress);
-    await writeUserProfile(ledgerAddress, {
-      ...profile,
-      autoApproveLimit: newLimitUSD,
-      updatedAt: new Date().toISOString(),
-    });
-
-    // Update OrchestraPolicy on-chain (agent wallet signs — it's just a registry write)
-    const policyAddress = process.env.ORCHESTRA_POLICY_ADDRESS;
-    if (policyAddress) {
-      try {
-        const agentKey = process.env.AGENT_PRIVATE_KEY!;
-        const wallet = new ethers.Wallet(agentKey, provider);
-        // Never write to a contract that isn't the per-account registry (the old one is keyed by sender).
-        if (!(await isPerAccountRegistry(provider, policyAddress, wallet.address))) throw new Error(NOT_PER_ACCOUNT_REGISTRY);
-        const policy = new ethers.Contract(policyAddress, POLICY_ABI, wallet);
-        // Entries are keyed by account, so this can only change this wallet's own entry.
-        const policyTx = await policy.updateSpendingLimit(safeAddress, newLimitUSD * 100);
-        await policyTx.wait();
-        console.log(`[finalize-limit-update] OrchestraPolicy updated: ${policyTx.hash}`);
-      } catch (policyErr: any) {
-        console.warn(`[finalize-limit-update] OrchestraPolicy update failed (non-critical): ${safeErr(policyErr)}`);
-      }
-    }
-
-    console.log(`[finalize-limit-update] Limit updated to $${newLimitUSD}, on-chain tx: ${txHash}`);
-    res.json({ success: true });
-  } catch (err: any) {
-    console.error("[finalize-limit-update] Error:", safeErr(err));
-    res.status(500).json({ error: err.message });
-  }
+    // { success, limitUsd, raised, notice? }, or 403 confirmation_required with a passkey challenge
+    // for a raise; repeat the call with `confirmation: { nonce, response }` — rules in src/policy/limitUpdate.ts
+    const result = await finalizeLimitUpdate(ledgerAddress, req.body, limitUpdateDeps(req));
+    console.log(`[finalize-limit-update] Limit ${result.raised ? "raised" : "lowered"} for ${shortAddr(ledgerAddress)}`);
+    res.json(result);
+  } catch (err: any) { sendError(res, err); }
 });
+
+/** The real reads, storage and chain calls behind the two limit-update endpoints. */
+function limitUpdateDeps(req: express.Request): LimitUpdateDeps {
+  const accountKey = (w: string) => `safe:${w.toLowerCase()}`;
+  const txKey = (h: string) => `limittx:${h.toLowerCase()}`;
+  return {
+    isReady: isAccountReady,
+    account: async (w) => (await read(accountKey(w))) as any,
+    saveAccount: (w, rec) => write(accountKey(w), rec),
+    buildTx: (safe, w, usd) => buildLimitUpdateTx(safe, w, getAgentAddress(), usd),
+    fetchTx: async (hash) => {
+      const [tx, receipt] = await Promise.all([
+        withTimeout(provider.getTransaction(hash), 10_000, null),
+        withTimeout(provider.getTransactionReceipt(hash), 10_000, null),
+      ]);
+      const block = receipt ? await withTimeout(provider.getBlock(receipt.blockNumber), 10_000, null) : null;
+      return { tx, receipt, minedAtMs: block ? block.timestamp * 1000 : null };
+    },
+    txUsed: async (h) => !!(await read(txKey(h))),
+    markTxUsed: (h, w) => write(txKey(h), { wallet: w, at: new Date().toISOString() }),
+    updateRegistry: (safe, usd) => updateRegistryLimit(provider, safe, usd),
+    notify: notifyPasskeyChange,
+    // Not desktopRp: lowering must work from any allowed page (the Ledger UI); a raise from a page
+    // the passkey doesn't belong to fails at the passkey prompt.
+    rp: rpForOrigin(req.headers.origin) ?? browserRp(),
+  };
+}
 
 // ─── Health check ───
 app.get("/health", (_req, res) => {
