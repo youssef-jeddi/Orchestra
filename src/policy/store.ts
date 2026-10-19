@@ -19,21 +19,18 @@ const ACTIVITY_RETENTION_MS = 2 * DAY_MS; // keep a little more than the 24h win
 const profileCache = new Map<string, { value: PolicyProfile; expires: number }>();
 const activityCache = new Map<string, ActivityRecord[]>();
 
-/** Before policies were per wallet, one global record held everyone's. */
-const LEGACY_PROFILE_KEY = "user:profile";
 const profileKey = (wallet: string) => `user:profile:${wallet.toLowerCase()}`;
 
 /**
- * A wallet's stored profile (`user:profile:<wallet>`), falling back to the
- * legacy global record until the wallet saves its own. Read-only fallback:
- * writes always go to the wallet's own key.
+ * A wallet's stored profile (`user:profile:<wallet>`); `{}` until it has one, which means the
+ * safe defaults. Before policies were per wallet, one shared `user:profile` record held everyone's;
+ * it is never read here: a new wallet must not start with someone else's daily limit or recipients,
+ * and nothing is copied from it into a wallet's own record.
  */
 export async function readUserProfile(wallet: string): Promise<Record<string, any>> {
   try {
     const own = (await read(profileKey(wallet))) as any;
-    if (own && typeof own === "object") return own;
-    const legacy = (await read(LEGACY_PROFILE_KEY)) as any;
-    return legacy && typeof legacy === "object" ? legacy : {};
+    return own && typeof own === "object" ? own : {};
   } catch {
     return {};
   }
