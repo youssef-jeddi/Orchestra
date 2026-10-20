@@ -10,7 +10,31 @@ export const PASSKEY_ADD_MESSAGES = {
   alreadyAdded: "This device already has a passkey for your account, so there's nothing to add.",
   wrongSite: "The passkey wasn't added: passkeys can't be created on this web address. Open Orchestra from its usual address and try again.",
   failed: "We couldn't add the passkey. Please try again.",
+  signedOut: "You've been signed out, so the passkey wasn't added. Sign in again, then add it.",
 };
+
+// Hard limits, so an "Add passkey" button can never stay stuck: each passkey prompt (the browser
+// may never open it, or never answer) and each call to our server.
+export const PASSKEY_CEREMONY_TIMEOUT_MS = 60_000;
+export const PASSKEY_FETCH_TIMEOUT_MS = 15_000;
+
+/**
+ * Resolves or rejects like `promise`, but rejects with a TimeoutError after `ms` if it hasn't
+ * settled, calling `onTimeout` first (e.g. to abort the browser's prompt).
+ */
+export function withDeadline(promise, ms, onTimeout) {
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      try { onTimeout?.(); } catch { /* aborting is best effort */ }
+      const err = new Error('The passkey prompt timed out');
+      err.name = 'TimeoutError';
+      err.passkeyTimedOut = true;
+      reject(err);
+    }, ms);
+  });
+  return Promise.race([Promise.resolve(promise), deadline]).finally(() => clearTimeout(timer));
+}
 
 /** Button text while the passkey prompt is open, the same on every "Add passkey" button. */
 export const PASSKEY_ADDING_LABEL = 'Follow the prompt on your device…';
@@ -52,15 +76,20 @@ export function noWebAuthnError() {
 }
 
 /**
- * Which kind of failure this was: 'cancelled' | 'unsupported' | 'alreadyAdded' | 'wrongSite' | 'failed'.
+ * Which kind of failure this was: 'cancelled' | 'unsupported' | 'alreadyAdded' | 'wrongSite' | 'signedOut' | 'failed'.
  * `deviceAvailable` is devicePasskeyAvailable()'s answer: Chrome reports both "the user closed the
  * prompt" and "there's nothing here to make a passkey with" as NotAllowedError, so a device that
  * has no built-in passkey support is read as "can't create one".
  */
 export function passkeyAddFailure(err, { deviceAvailable = null } = {}) {
   if (!err) return 'failed';
-  // An answer from our server (it has an HTTP status), or the network: say it plainly, never the raw text.
-  if (err.status) return 'failed';
+  // The session is gone (e.g. the server restarted): the page shows "Sign in" again.
+  if (err.code === 'session_required') return 'signedOut';
+  // An answer from our server (it has an HTTP status), no answer in time, or the network: say it
+  // plainly, never the raw text.
+  if (err.status || err.network) return 'failed';
+  // Our own limit on the prompt fired (it never opened, or never answered).
+  if (err.passkeyTimedOut) return 'cancelled';
   if (err.passkeyUnsupported || NO_WEBAUTHN.test(err.message || '')) return 'unsupported';
   const code = err.code || '';
   if (code === 'ERROR_AUTHENTICATOR_PREVIOUSLY_REGISTERED' || err.name === 'InvalidStateError') return 'alreadyAdded';
@@ -79,7 +108,7 @@ export function passkeyAddError(err, opts) {
 
 /** Works out the sentence, checking the device only when the browser's answer is ambiguous. */
 export async function explainPasskeyAddError(err, g = globalThis) {
-  const ambiguous = !err?.status && ['NotAllowedError', 'AbortError', 'TimeoutError'].includes(err?.name);
+  const ambiguous = !err?.status && !err?.network && !err?.passkeyTimedOut && ['NotAllowedError', 'AbortError', 'TimeoutError'].includes(err?.name);
   const deviceAvailable = ambiguous ? await devicePasskeyAvailable(g) : null;
   return passkeyAddError(err, { deviceAvailable });
 }

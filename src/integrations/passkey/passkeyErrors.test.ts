@@ -4,6 +4,7 @@
 // stubbed browser and bridge: each failure ends in one plain sentence.
 
 import assert from "node:assert/strict";
+import { mock } from "node:test";
 // @ts-expect-error plain JS helper shared with the frontend, no type declarations
 import * as pe from "../../../frontend/src/lib/passkeyErrors.js";
 // @ts-expect-error plain JS helper shared with the frontend, no type declarations
@@ -110,7 +111,7 @@ const okBridge = {
   });
 
   test("mapping: our server or the network → the generic sentence, never the raw text", () => {
-    for (const err of [http(500), http(400), http(403, "passkey_required"), http(401, "session_required"), http(429),
+    for (const err of [http(500), http(400), http(403, "passkey_required"), http(401), http(429),
       new TypeError("Failed to fetch"), new SyntaxError("Unexpected token < in JSON")]) {
       assert.equal(pe.passkeyAddFailure(err), "failed", String(err));
       assert.equal(pe.passkeyAddError(err), M.failed);
@@ -203,6 +204,159 @@ const okBridge = {
     g.fetch = async () => { throw new TypeError("Failed to fetch"); };
     err = await registerPasskey!("0xabc").catch((e: any) => e);
     assert.equal(await pe.explainPasskeyAddError(err), M.failed, "bridge unreachable");
+  });
+
+  // ── Hard limits: the button can never stay stuck (fake timers) ──
+  const settle = async (until: () => boolean, max = 200) => { for (let i = 0; i < max && !until(); i++) await new Promise((r) => setImmediate(r)); };
+
+  test("deadline: a promise that never settles is rejected as timed out after the limit, aborting first", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      let aborted = false;
+      let outcome: any = "pending";
+      pe.withDeadline(new Promise(() => {}), pe.PASSKEY_CEREMONY_TIMEOUT_MS, () => { aborted = true; })
+        .then(() => { outcome = "resolved"; }, (e: any) => { outcome = e; });
+      mock.timers.tick(pe.PASSKEY_CEREMONY_TIMEOUT_MS - 1);
+      await settle(() => false, 5);
+      assert.equal(outcome, "pending", "not before the limit");
+      mock.timers.tick(1);
+      await settle(() => outcome !== "pending");
+      assert.equal(aborted, true);
+      assert.equal(outcome.name, "TimeoutError");
+      assert.equal(pe.passkeyAddFailure(outcome), "cancelled");
+      assert.equal(await pe.explainPasskeyAddError(outcome, { PublicKeyCredential: Object.assign(function () {}, { isUserVerifyingPlatformAuthenticatorAvailable: async () => false }) }), M.cancelled,
+        "our own timeout is 'timed out', even on a device without built-in passkeys");
+      // Settling in time: passes through, and the timer is cleared.
+      assert.equal(await pe.withDeadline(Promise.resolve(7), 1000), 7);
+      await assert.rejects(pe.withDeadline(Promise.reject(dom("NotAllowedError")), 1000), { name: "NotAllowedError" });
+    } finally { mock.timers.reset(); }
+  });
+
+  test("messages: 'signed out' is plain and says what to do", () => {
+    assert.match(M.signedOut, /signed out/);
+    assert.match(M.signedOut, /wasn't added/);
+    assert.match(M.signedOut, /Sign in again/);
+    assert.equal(pe.passkeyAddFailure(http(401, "session_required")), "signedOut");
+    assert.equal(pe.passkeyAddFailure(http(401)), "failed", "another 401 stays generic");
+    assert.equal(pe.passkeyAddFailure(Object.assign(new Error("slow"), { name: "BridgeTimeoutError", network: true })), "failed");
+  });
+
+  flowTest("registerPasskey: create() never settles (no prompt ever opens) → timed out after 60 s, prompt aborted", async () => {
+    let signal: AbortSignal | undefined;
+    let createOptions: any;
+    stubBrowser({ platform: false, create: (async (opts: any) => { createOptions = opts; signal = opts.signal; return new Promise(() => {}); }) as any });
+    stubBridge(okBridge);
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      let outcome: any = "pending";
+      registerPasskey!("0xabc").then(() => { outcome = "resolved"; }, (e: any) => { outcome = e; });
+      await settle(() => !!createOptions);
+      assert.ok(createOptions, "the prompt was asked for");
+      assert.equal(createOptions.publicKey.timeout, pe.PASSKEY_CEREMONY_TIMEOUT_MS, "the browser is told the limit too");
+      mock.timers.tick(pe.PASSKEY_CEREMONY_TIMEOUT_MS - 1);
+      await settle(() => false, 5);
+      assert.equal(outcome, "pending");
+      mock.timers.tick(1);
+      await settle(() => outcome !== "pending");
+      assert.equal(outcome?.name, "TimeoutError");
+      assert.equal(signal?.aborted, true, "the browser's prompt is aborted");
+      assert.deepEqual(calls, ["/passkey/confirm-options", "/passkey/register-options"], "nothing sent to register");
+      assert.equal(await pe.explainPasskeyAddError(outcome), M.cancelled);
+    } finally { mock.timers.reset(); }
+  });
+
+  flowTest("registerPasskey: the existing-passkey check never settles either → same limit", async () => {
+    let asked = false;
+    Object.defineProperty(g, "navigator", { configurable: true, value: { credentials: { get: async () => { asked = true; return new Promise(() => {}); } } } });
+    g.PublicKeyCredential = Object.assign(function () {}, { isUserVerifyingPlatformAuthenticatorAvailable: async () => true });
+    stubBridge({ ...okBridge, "/passkey/confirm-options": { status: 200, body: { required: true, options: { challenge: "AAAA", rpId: "localhost", allowCredentials: [], timeout: 60000 } } } });
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      let outcome: any = "pending";
+      registerPasskey!("0xabc").then(() => { outcome = "resolved"; }, (e: any) => { outcome = e; });
+      await settle(() => asked);
+      mock.timers.tick(pe.PASSKEY_CEREMONY_TIMEOUT_MS);
+      await settle(() => outcome !== "pending");
+      assert.equal(outcome?.name, "TimeoutError");
+      assert.equal(await pe.explainPasskeyAddError(outcome), M.cancelled);
+    } finally { mock.timers.reset(); }
+  });
+
+  flowTest("registerPasskey: a bridge call that never answers → generic error after 15 s, no prompt", async () => {
+    let created = false;
+    stubBrowser({ create: async () => { created = true; return new Promise(() => {}); } });
+    for (const hang of ["/passkey/confirm-options", "/passkey/register-options"]) {
+      calls.length = 0;
+      let sawAbort = false;
+      g.fetch = (url: string, init: any) => {
+        const path = new URL(url).pathname;
+        calls.push(path);
+        if (path === hang) {
+          // Like a real fetch: only the abort ends it. A second variant below ignores it.
+          return new Promise((_, reject) => init?.signal?.addEventListener("abort", () => { sawAbort = true; reject(dom("AbortError", "aborted")); }));
+        }
+        const a = (okBridge as any)[path];
+        return Promise.resolve({ ok: true, status: 200, json: async () => a.body });
+      };
+      mock.timers.enable({ apis: ["setTimeout"] });
+      try {
+        let outcome: any = "pending";
+        registerPasskey!("0xabc").then(() => { outcome = "resolved"; }, (e: any) => { outcome = e; });
+        await settle(() => calls.includes(hang));
+        mock.timers.tick(pe.PASSKEY_FETCH_TIMEOUT_MS - 1);
+        await settle(() => false, 5);
+        assert.equal(outcome, "pending", hang);
+        mock.timers.tick(1);
+        await settle(() => outcome !== "pending");
+        assert.equal(sawAbort, true, "the request is aborted");
+        assert.equal(outcome?.network, true, hang);
+        assert.notEqual(outcome?.name, "AbortError", "never read as the user cancelling");
+        assert.equal(created, false, "no prompt after a failed call");
+        assert.equal(await pe.explainPasskeyAddError(outcome), M.failed, hang);
+      } finally { mock.timers.reset(); }
+    }
+    // A request that ignores the abort entirely still ends at the limit.
+    g.fetch = () => new Promise(() => {});
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      let outcome: any = "pending";
+      registerPasskey!("0xabc").then(() => { outcome = "resolved"; }, (e: any) => { outcome = e; });
+      await settle(() => false, 5);
+      mock.timers.tick(pe.PASSKEY_FETCH_TIMEOUT_MS);
+      await settle(() => outcome !== "pending");
+      assert.equal(await pe.explainPasskeyAddError(outcome), M.failed);
+    } finally { mock.timers.reset(); }
+  });
+
+  flowTest("registerPasskey: the bridge saving the new passkey never answers → generic error", async () => {
+    stubBrowser({ create: async () => ({ id: "cred", rawId: new Uint8Array([1]).buffer, type: "public-key", response: { clientDataJSON: new Uint8Array([1]).buffer, attestationObject: new Uint8Array([1]).buffer, getTransports: () => [] }, getClientExtensionResults: () => ({}), authenticatorAttachment: "platform" }) });
+    calls.length = 0;
+    g.fetch = (url: string, init: any) => {
+      const path = new URL(url).pathname;
+      calls.push(path);
+      if (path === "/passkey/register") return new Promise((_, reject) => init?.signal?.addEventListener("abort", () => reject(dom("AbortError"))));
+      return Promise.resolve({ ok: true, status: 200, json: async () => (okBridge as any)[path].body });
+    };
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      let outcome: any = "pending";
+      registerPasskey!("0xabc").then(() => { outcome = "resolved"; }, (e: any) => { outcome = e; });
+      await settle(() => calls.includes("/passkey/register"));
+      mock.timers.tick(pe.PASSKEY_FETCH_TIMEOUT_MS);
+      await settle(() => outcome !== "pending");
+      assert.equal(await pe.explainPasskeyAddError(outcome), M.failed);
+    } finally { mock.timers.reset(); }
+  });
+
+  flowTest("registerPasskey: a stale session (401 session_required) → 'sign in again', no prompt", async () => {
+    let created = false;
+    stubBrowser({ create: async () => { created = true; return new Promise(() => {}); } });
+    stubBridge({ "/passkey/confirm-options": { status: 401, body: { error: "Sign in with your wallet first.", code: "session_required" } } });
+    const err = await registerPasskey!("0xabc").catch((e: any) => e);
+    assert.equal(err?.status, 401);
+    assert.equal(created, false);
+    assert.deepEqual(calls, ["/passkey/confirm-options"]);
+    assert.equal(await pe.explainPasskeyAddError(err), M.signedOut);
   });
 
   for (const [name, fn] of tests) {

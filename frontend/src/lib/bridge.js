@@ -1,6 +1,8 @@
 // ─── Bridge HTTP + WebSocket helpers ───
 // All communication with the backend bridge server
 
+import { PASSKEY_FETCH_TIMEOUT_MS } from './passkeyErrors';
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 export const BRIDGE_HTTP = API_URL;
 export const BRIDGE_WS = API_URL.replace(/^http/, 'ws') + '/ws';
@@ -26,16 +28,44 @@ export function onSessionInvalid(fn) {
   return () => sessionInvalidListeners.delete(fn);
 }
 
+/** Thrown when the bridge doesn't answer within `timeoutMs`: a network problem, not the user's doing. */
+function bridgeTimeoutError() {
+  const err = new Error('The server took too long to answer');
+  err.name = 'BridgeTimeoutError';
+  err.network = true;
+  return err;
+}
+
 export async function bridgeFetch(path, options = {}) {
-  const res = await fetch(`${BRIDGE_HTTP}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
-      ...options.headers,
-    },
+  const { timeoutMs, ...init } = options;
+  // Optional hard limit: abort the request (and reading its answer) after `timeoutMs`.
+  // The race also covers a request that ignores the abort.
+  const controller = timeoutMs ? new AbortController() : null;
+  let timer = null;
+  const timedOut = controller && new Promise((_, reject) => {
+    timer = setTimeout(() => { controller.abort(); reject(bridgeTimeoutError()); }, timeoutMs);
   });
-  const data = await res.json();
+  const request = (async () => {
+    const r = await fetch(`${BRIDGE_HTTP}${path}`, {
+      ...init,
+      ...(controller ? { signal: controller.signal } : {}),
+      headers: {
+        'Content-Type': 'application/json',
+        ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+        ...init.headers,
+      },
+    });
+    return [r, await r.json()];
+  })();
+  let res, data;
+  try {
+    [res, data] = await (timedOut ? Promise.race([request, timedOut]) : request);
+  } catch (err) {
+    if (controller?.signal.aborted) throw bridgeTimeoutError();
+    throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   if (!res.ok) {
     if (res.status === 401 && data.code === 'session_required') {
       sessionToken = null;
@@ -186,20 +216,22 @@ export async function getPasskeyStatus(walletAddress) {
   return bridgeFetch(`/passkey/status?wallet=${walletAddress}`);
 }
 
+// Adding a passkey never waits on the server for long (the button would look stuck): PASSKEY_FETCH_TIMEOUT_MS.
+
 /** A check with the wallet's existing passkey ({ required, options }), needed to add another. */
 export async function passkeyConfirmOptions() {
-  return bridgeFetch('/passkey/confirm-options', { method: 'POST', body: '{}' });
+  return bridgeFetch('/passkey/confirm-options', { method: 'POST', body: '{}', timeoutMs: PASSKEY_FETCH_TIMEOUT_MS });
 }
 
 export async function passkeyRegisterOptions(walletAddress, assertion) {
   return bridgeFetch('/passkey/register-options', {
-    method: 'POST', body: JSON.stringify({ walletAddress, assertion }),
+    method: 'POST', body: JSON.stringify({ walletAddress, assertion }), timeoutMs: PASSKEY_FETCH_TIMEOUT_MS,
   });
 }
 
 export async function passkeyRegister(walletAddress, response) {
   return bridgeFetch('/passkey/register', {
-    method: 'POST', body: JSON.stringify({ walletAddress, response }),
+    method: 'POST', body: JSON.stringify({ walletAddress, response }), timeoutMs: PASSKEY_FETCH_TIMEOUT_MS,
   });
 }
 
