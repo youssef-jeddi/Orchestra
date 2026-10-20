@@ -4,6 +4,7 @@
 // chat shows. Pure, so it's tested without a browser (src/integrations/passkey/emailGate.test.ts).
 
 import { PASSKEY_MEANS } from './plainLanguage';
+import { passkeyAddError, explainPasskeyAddError } from './passkeyErrors';
 
 /** Shown in the chat (and by the server as the reason): plain words, "your account", no jargon. */
 export const PASSKEY_PROMPT =
@@ -114,6 +115,12 @@ export function pendingRequest() {
 export function emailStepError(err, step) {
   if (err?.code === 'email_verification_failed' && err.message) return err.message;
   if (err?.code === 'email_verification_required') return "We couldn't confirm the code in time. Ask for a new one.";
-  if (step === 'passkey') return "We couldn't add your passkey. Try again.";
+  if (step === 'passkey') return passkeyAddError(err);
   return "That code didn't work. Check it and try again, or ask for a new one.";
+}
+
+/** The same for the passkey step, telling "cancelled" from "this device can't" (asks the browser). */
+export async function passkeyStepError(err, g) {
+  if (err?.code === 'email_verification_failed' || err?.code === 'email_verification_required') return emailStepError(err, 'passkey');
+  return explainPasskeyAddError(err, g);
 }

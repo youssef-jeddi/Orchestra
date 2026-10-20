@@ -11,7 +11,8 @@ import { useState, useEffect, useRef } from 'react';
 import { usePrivy, useLoginWithOAuth, getIdentityToken } from '@privy-io/react-auth';
 import { emailVerify } from '@/lib/bridge';
 import { registerPasskey } from '@/lib/passkey';
-import { PASSKEY_PROMPT, emailStepError, passkeyDraft, socialConfirmLabel, socialConfirmHelp } from '@/lib/emailPasskey';
+import { addPasskeyButton } from '@/lib/passkeyErrors';
+import { PASSKEY_PROMPT, emailStepError, passkeyStepError, passkeyDraft, socialConfirmLabel, socialConfirmHelp } from '@/lib/emailPasskey';
 
 const draftStore = () => passkeyDraft(window.sessionStorage);
 
@@ -60,8 +61,8 @@ export default function SocialPasskeySetup({ wallet, provider, getHeld, returnin
       await registerPasskey(wallet);
       onDone();
     } catch (err) {
-      setError(emailStepError(err, 'passkey'));
       setStep(err?.code === 'email_verification_required' ? 'confirm' : 'passkey');
+      setError(await passkeyStepError(err));
     }
   };
 
@@ -88,8 +89,8 @@ export default function SocialPasskeySetup({ wallet, provider, getHeld, returnin
       {(step === 'passkey' || step === 'adding') && (
         <>
           <span style={{ fontSize: 12, color: '#30D158' }}>✓ Confirmed with {provider.name}. Now add your passkey.</span>
-          <button onClick={addPasskey} disabled={step === 'adding'} style={{ ...button, alignSelf: 'flex-start' }}>
-            {step === 'adding' ? 'Follow the prompt on your device…' : '🔑 Add passkey'}
+          <button onClick={addPasskey} disabled={addPasskeyButton(step === 'adding').disabled} style={{ ...button, alignSelf: 'flex-start' }}>
+            {addPasskeyButton(step === 'adding').label}
           </button>
         </>
       )}

@@ -11,7 +11,8 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { usePrivy, useLoginWithEmail, getIdentityToken } from '@privy-io/react-auth';
 import { emailVerify } from '@/lib/bridge';
 import { registerPasskey } from '@/lib/passkey';
-import { PASSKEY_PROMPT, emailStepError } from '@/lib/emailPasskey';
+import { addPasskeyButton } from '@/lib/passkeyErrors';
+import { PASSKEY_PROMPT, emailStepError, passkeyStepError } from '@/lib/emailPasskey';
 
 export default function EmailPasskeySetup({ wallet, onDone, onClose, style }) {
   const { user } = usePrivy();
@@ -61,8 +62,8 @@ export default function EmailPasskeySetup({ wallet, onDone, onClose, style }) {
       await registerPasskey(wallet);
       onDone();
     } catch (err) {
-      setError(emailStepError(err, 'passkey'));
       setStep(err?.code === 'email_verification_required' ? 'code' : 'passkey');
+      setError(await passkeyStepError(err));
     }
   };
 
@@ -101,8 +102,8 @@ export default function EmailPasskeySetup({ wallet, onDone, onClose, style }) {
       {(step === 'passkey' || step === 'adding') && (
         <>
           <span style={{ fontSize: 12, color: '#30D158' }}>✓ Email confirmed. Now add your passkey.</span>
-          <button onClick={addPasskey} disabled={step === 'adding'} style={{ ...button, alignSelf: 'flex-start' }}>
-            {step === 'adding' ? 'Follow the prompt on your device…' : '🔑 Add passkey'}
+          <button onClick={addPasskey} disabled={addPasskeyButton(step === 'adding').disabled} style={{ ...button, alignSelf: 'flex-start' }}>
+            {addPasskeyButton(step === 'adding').label}
           </button>
         </>
       )}

@@ -7,6 +7,7 @@ import {
   passkeyConfirmOptions, passkeyRegisterOptions, passkeyRegister,
   passkeyAuthOptions, passkeyApprove, requestPhoneSetup, passkeyRemove,
 } from './bridge';
+import { browserCanUsePasskeys, noWebAuthnError } from './passkeyErrors';
 
 /**
  * Adding a passkey to a wallet that already has one takes that passkey first:
@@ -20,6 +21,8 @@ async function confirmExistingPasskey() {
 
 /** Register a device passkey for this wallet. Prompts the OS biometric UI (twice if it already has one). */
 export async function registerPasskey(walletAddress) {
+  // No WebAuthn in this browser: say so before asking the server for anything.
+  if (!browserCanUsePasskeys()) throw noWebAuthnError();
   const assertion = await confirmExistingPasskey();
   const optionsJSON = await passkeyRegisterOptions(walletAddress, assertion);
   const response = await startRegistration({ optionsJSON });
