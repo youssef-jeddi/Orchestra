@@ -178,4 +178,7 @@ section {
     animation: none;
   }
   html { scroll-behavior: auto; }
+
+  /* Fond vidéo en boucle : on garde l'overlay et le grainient, pas le mouvement. */
+  .video-bg video { display: none; }
 }

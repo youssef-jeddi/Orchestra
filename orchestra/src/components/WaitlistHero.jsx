@@ -63,7 +63,7 @@ export default function WaitlistHero() {
   return (
     <section
       id="hero"
-      className="grainient-bg relative flex min-h-[100svh] flex-col items-center justify-center overflow-hidden px-6 pt-32 pb-24 sm:px-8"
+      className="relative flex min-h-[100svh] flex-col items-center justify-center overflow-hidden px-6 pt-32 pb-24 sm:px-8"
     >
       <div className="relative z-10 flex w-full max-w-4xl flex-col items-center text-center">
         {/* Badge */}

@@ -30,7 +30,7 @@ export default function WaitlistFooter() {
           </a>
 
           <span className="eyebrow" style={{ color: 'var(--text-3)' }}>
-            © 2025 Orchestra
+            © 2026 Orchestra
           </span>
         </div>
       </div>
