@@ -15,6 +15,7 @@ import { activityRow, ownerSignIdFromSearch, ACTIVITY_EMPTY, EXPIRED_OWNER_SIGN 
 import { signOwnerRequest } from '@/lib/signing';
 import { errorMessage } from '@/lib/ownerSign';
 import { registerPasskey, approveWithPasskey, setUpPhonePasskey, removePasskey } from '@/lib/passkey';
+import { addPasskeyButton, explainPasskeyAddError } from '@/lib/passkeyErrors';
 import { PRIVY_APP_ID } from '@/lib/privy';
 import { shortAddress, setupProgressText } from '@/lib/onboarding';
 import { SIGN_REFUSED, PASSKEY_PROMPT, isPasskeyRequired, shouldOfferPasskey, userMaySign, pendingRequest, verifyStepFor, passkeyDraft, SOCIAL_NONE, SOCIAL_WRONG_ACCOUNT } from '@/lib/emailPasskey';
@@ -245,17 +246,26 @@ function SimpleChat() {
       .catch(() => setMessages((m) => [...m, { role: 'agent', error: EXPIRED_OWNER_SIGN }]));
   }, [session.ready, ledger.walletAddress]);
 
+  // Adding a passkey from the header, the passkeys list or a request card: the buttons wait while the
+  // prompt is open, and a failure is said in plain words under the header (ORC-110).
+  const [addingPasskey, setAddingPasskey] = useState(false);
+  const [passkeyNotice, setPasskeyNotice] = useState(null);
   const registerPk = useCallback(async () => {
-    if (!ledger.walletAddress) return;
+    if (!ledger.walletAddress || addingPasskey) return;
+    setPasskeyNotice(null);
     if (needsFirstPasskey) { setSetupOpen(true); return; } // email first: a code, then the passkey
+    setAddingPasskey(true);
     try {
       await registerPasskey(ledger.walletAddress);
       setPasskeyReg(true);
       session.refreshAccount();
     } catch (err) {
-      setMessages((m) => [...m, { role: 'agent', error: `Couldn't add the passkey: ${err.message}` }]);
+      setPasskeyNotice(await explainPasskeyAddError(err));
+    } finally {
+      setAddingPasskey(false);
     }
-  }, [ledger.walletAddress, needsFirstPasskey, session]);
+  }, [ledger.walletAddress, needsFirstPasskey, session, addingPasskey]);
+  const addBtn = addPasskeyButton(addingPasskey);
 
   // The email user's first passkey is saved: carry on with what they asked for, if anything.
   const passkeyAdded = useCallback(() => {
@@ -322,7 +332,7 @@ function SimpleChat() {
       <header style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         padding: '18px 0', position: 'sticky', top: 0, background: '#0F0F12', zIndex: 10,
-        borderBottom: '1px solid #1c1c22',
+        borderBottom: '1px solid #1c1c22', flexWrap: 'wrap', rowGap: 10,
       }}>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
           <span style={{ fontFamily: 'var(--font-playfair)', fontSize: 20, color: '#E8E4DE' }}>Orchestra</span>
@@ -347,7 +357,7 @@ function SimpleChat() {
             {session.ready && <button onClick={() => setShowLimits((v) => !v)} style={pill(showLimits)} title={LIMITS_BUTTON_HINT}>Limits</button>}
             {session.ready && (passkeyReg
               ? <button onClick={() => setShowPasskeys((v) => !v)} style={pill(showPasskeys)} title="See, add or remove your passkeys">🔑 Passkeys</button>
-              : <button onClick={registerPk} style={pill(false)} title={emailWallet ? 'Add a passkey on this device' : ADD_PASSKEY_HINT}>🔑 Add passkey</button>)}
+              : <button onClick={registerPk} disabled={addBtn.disabled} style={pill(false)} title={emailWallet ? 'Add a passkey on this device' : ADD_PASSKEY_HINT}>{addBtn.label}</button>)}
             <button onClick={ledger.disconnect} style={pill(false)} title="Disconnect">
               <span style={{ width: 6, height: 6, borderRadius: 3, background: '#30D158', display: 'inline-block' }} />
               {ledger.connectionType === 'metamask' ? '🦊 ' : ledger.connectionType === 'privy' ? '🔑 ' : ''}
@@ -360,6 +370,13 @@ function SimpleChat() {
             {PRIVY_APP_ID
               ? <button onClick={ledger.privyLogin} style={pill(true)} title="Passkey, email, or the wallet you already have">Sign in</button>
               : <button onClick={ledger.connectMetaMask} style={pill(true)}>🦊 MetaMask</button>}
+          </div>
+        )}
+        {connected && passkeyNotice && (
+          <div role="alert" style={{ flexBasis: '100%', display: 'flex', alignItems: 'flex-start', gap: 8, color: '#FF453A', fontSize: 13, lineHeight: 1.5,
+            border: '1px solid #FF453A44', borderRadius: 10, padding: '8px 12px', background: '#FF453A11' }}>
+            <span>{passkeyNotice}</span>
+            <button onClick={() => setPasskeyNotice(null)} title="Close" style={{ marginLeft: 'auto', background: 'none', border: 'none', color: '#FF453A', cursor: 'pointer', fontSize: 16, lineHeight: 1 }}>×</button>
           </div>
         )}
       </header>
@@ -376,7 +393,7 @@ function SimpleChat() {
             : <p style={{ fontSize: 13, color: '#B9B5AE' }}>{SOCIAL_NONE}</p>
       )}
       {connected && session.ready && showPasskeys && (
-        <PasskeyPanel onAdd={registerPk} onChange={refreshPasskeyStatus} onClose={() => setShowPasskeys(false)} onError={showError} />
+        <PasskeyPanel onAdd={registerPk} adding={addingPasskey} onChange={refreshPasskeyStatus} onClose={() => setShowPasskeys(false)} onError={showError} />
       )}
       {connected && session.ready && showLimits && (
         <LimitsSheet ledger={ledger} onClose={() => setShowLimits(false)} buttonStyle={approveBtn} />
@@ -409,7 +426,7 @@ function SimpleChat() {
 
         {messages.map((m, i) => (
           <MessageRow key={i} m={m} idx={i} onExecute={execute} onPasskey={approvePasskey} onOwnerSign={signAsOwner}
-            onAddPasskeyHere={registerPk} onMoved={movedFunds}
+            onAddPasskeyHere={registerPk} addingPasskey={addingPasskey} onMoved={movedFunds}
             passkeyReg={passkeyReg} signing={signingIdx === i}
             onAddPasskey={() => setSetupOpen(true)} canAddPasskey={needsFirstPasskey} />
         ))}
@@ -455,7 +472,7 @@ function SimpleChat() {
   );
 }
 
-function MessageRow({ m, idx, onExecute, onPasskey, onOwnerSign, onAddPasskeyHere, onMoved, passkeyReg, signing, onAddPasskey, canAddPasskey }) {
+function MessageRow({ m, idx, onExecute, onPasskey, onOwnerSign, onAddPasskeyHere, addingPasskey, onMoved, passkeyReg, signing, onAddPasskey, canAddPasskey }) {
   if (m.passkeyPrompt || isPasskeyRequired(m.data)) {
     return <PasskeyPrompt text={m.passkeyPrompt ? PASSKEY_PROMPT : agentText(m.data)} onAdd={onAddPasskey} canAdd={canAddPasskey} />;
   }
@@ -503,6 +520,7 @@ function MessageRow({ m, idx, onExecute, onPasskey, onOwnerSign, onAddPasskeyHer
       onExecute={() => onExecute(m.data, idx)}
       onPasskey={() => onPasskey(m.data, idx)}
       onAddPasskey={onAddPasskeyHere}
+      addingPasskey={addingPasskey}
       onMoved={onMoved}
       outcome={m.outcome}
       passkeyReg={passkeyReg}
@@ -549,7 +567,7 @@ function PasskeyPrompt({ text, onAdd, canAdd }) {
   );
 }
 
-function AgentCard({ data, onExecute, onPasskey, onAddPasskey, onMoved, passkeyReg, signing, outcome }) {
+function AgentCard({ data, onExecute, onPasskey, onAddPasskey, addingPasskey, onMoved, passkeyReg, signing, outcome }) {
   const verdict = data.assessment?.verdict || 'UNKNOWN';
   const color = VERDICT_COLOR[verdict] || '#666';
   const triggered = data.assessment?.triggered || [];
@@ -662,7 +680,9 @@ function AgentCard({ data, onExecute, onPasskey, onAddPasskey, onMoved, passkeyR
             <span style={{ fontSize: 13, color: HINT_COLOR, lineHeight: 1.5 }}>{controls.text}</span>
           )}
           {controls.mode === 'need-passkey' && (
-            <button onClick={onAddPasskey} style={{ ...approveBtn(false), alignSelf: 'flex-start' }}>🔑 Add passkey</button>
+            <button onClick={onAddPasskey} disabled={addPasskeyButton(addingPasskey).disabled} style={{ ...approveBtn(addingPasskey), alignSelf: 'flex-start' }}>
+              {addPasskeyButton(addingPasskey).label}
+            </button>
           )}
           {controls.canDecline && view.showDecline && (
             <button onClick={decline} disabled={view.declineDisabled} style={{ ...pill(false), alignSelf: 'flex-start', padding: '6px 12px', fontSize: 12 }}
@@ -787,7 +807,7 @@ function TelegramLink({ ledger, session, onError }) {
 
 // The account's passkeys. Adding or removing one asks for an existing passkey
 // first (the server checks it); the last one can't be removed.
-function PasskeyPanel({ onAdd, onChange, onClose, onError }) {
+function PasskeyPanel({ onAdd, adding, onChange, onClose, onError }) {
   const [passkeys, setPasskeys] = useState(null);
   const [busy, setBusy] = useState(null); // passkey id being removed, or 'add'
 
@@ -840,9 +860,9 @@ function PasskeyPanel({ onAdd, onChange, onClose, onError }) {
           </button>
         </div>
       ))}
-      <button onClick={add} disabled={!!busy} style={{ ...pill(false), marginTop: 8, fontSize: 12, padding: '5px 12px' }}
+      <button onClick={add} disabled={!!busy || adding} style={{ ...pill(false), marginTop: 8, fontSize: 12, padding: '5px 12px' }}
         title="Add a passkey on this device (confirm with an existing one first)">
-        {busy === 'add' ? 'Follow the passkey prompts…' : '+ Add another passkey'}
+        {busy === 'add' || adding ? 'Follow the passkey prompts…' : '+ Add another passkey'}
       </button>
     </div>
   );
