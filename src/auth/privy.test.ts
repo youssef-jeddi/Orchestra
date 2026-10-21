@@ -10,6 +10,9 @@ import { softPasskey, TEST_RP as RP } from "../integrations/passkey/softPasskey"
 process.env.STORAGE_BACKEND = "memory";
 const APP_ID = "test-privy-app";
 process.env.PRIVY_APP_ID = APP_ID;
+// A real secret (exported from .env) next to the fake app id would make emailGate call the real
+// Privy API. The tests that need a secret install a fake fetcher instead.
+delete process.env.PRIVY_APP_SECRET;
 
 const embedded = ethers.Wallet.createRandom().address;
 const external = ethers.Wallet.createRandom().address;
@@ -20,6 +23,9 @@ const tests: [string, () => void | Promise<void>][] = [];
 const test = (name: string, fn: () => void | Promise<void>) => tests.push([name, fn]);
 
 (async () => {
+  // emailGate first: on Node 20, tsx evaluates a module a second time when it is import()ed after
+  // something already require()d it, and this test must see the same grants map privy.ts writes to.
+  const gate = await import("../integrations/passkey/emailGate");
   const auth = await import("./index");
   const { privyLogin, verifyPrivyUser, importPrivyPasskeys, noteEmailSignIn, verifyEmailForPasskey, _setVerificationKey, _setUserFetcher } = await import("./privy");
   const passkey = await import("../integrations/passkey");
@@ -184,7 +190,6 @@ const test = (name: string, fn: () => void | Promise<void>) => tests.push([name,
     { type: "wallet", address: emailWallet, chain_type: "ethereum", wallet_client_type: "privy", id: "w9", lv: 1 },
     ...extra,
   ] });
-  const gate = await import("../integrations/passkey/emailGate");
   const kind = async (fn: () => Promise<unknown>) => { try { await fn(); } catch (e: any) { return e.status; } return 0; };
 
   test("an email sign-in is flagged, a passkey or wallet sign-in is not, and the flag sticks", async () => {

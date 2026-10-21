@@ -105,6 +105,23 @@ test("memory mode (no file) writes nothing to disk", async () => {
   assert.equal(fs.readdirSync(path.dirname(file)).length, before);
 });
 
+test("a second copy of the storage module shares the first one's store", async () => {
+  // tsx on Node 20 evaluates a module again when it is import()ed after a require() loaded it. Two
+  // stores would mean one code path writes a passkey the other never sees (or, with a file, two
+  // copies overwriting each other's changes). Force a fresh evaluation and check both see one store.
+  const first = require("./storage") as typeof import("./storage");
+  const id = require.resolve("./storage");
+  delete require.cache[id];
+  const second = require("./storage") as typeof import("./storage");
+  assert.notEqual(first.loadIndexFile, second.loadIndexFile, "the module really was evaluated twice");
+  await first.write("double-load:k", { v: 1 });
+  assert.deepEqual(await second.read("double-load:k"), { v: 1 });
+  const viaImport = await import("./storage");
+  assert.deepEqual(await viaImport.read("double-load:k"), { v: 1 });
+  await second.deleteKey("double-load:k");
+  assert.equal(await first.read("double-load:k"), null);
+});
+
 (async () => {
   console.log("storage");
   for (const [name, fn] of tests) {

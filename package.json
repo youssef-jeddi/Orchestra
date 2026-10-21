@@ -70,6 +70,9 @@
     "ai-agents"
   ],
   "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
   "dependencies": {
     "@0gfoundation/0g-ts-sdk": "latest",
     "@0glabs/0g-serving-broker": "latest",
