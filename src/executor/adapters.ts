@@ -212,7 +212,9 @@ const sendAdapter: IntentAdapter = {
     const { executeForAccount } = await import("../integrations/safe/accountExec");
     const tx = sendData.unsignedTx;
     console.log("[adapter:send] AUTO_EXECUTE via your account");
-    const txHash = await executeForAccount({ ...accountRun(ctx, agentKey), batch: [{ to: tx.to, value: tx.value || "0", data: tx.data || "0x" }], fallbackGasLimit: "150000" });
+    // What this send pays, as built: an owner-sign offer carries it so the browser can check the transaction against it.
+    const claim = { to: sendData.to, amount: String(sendData.amount), symbol: sendData.symbol };
+    const txHash = await executeForAccount({ ...accountRun(ctx, agentKey), ...claim, batch: [{ to: tx.to, value: tx.value || "0", data: tx.data || "0x" }], fallbackGasLimit: "150000" });
 
     const tradeId = crypto.randomUUID();
     const { logTradeResult } = await import("./logResult");

@@ -296,6 +296,9 @@ test("the offer carries the amount, recipient and token from the account run (no
   const { deps } = fake({ remaining: 0n, offer: async (_w, _s, _sum, _b, meta) => { seen.push(meta); return { kind: "safe-owner", id: "x" }; } });
   await assert.rejects(executeForAccount(input(1500, { to: call.to, token: "USDC" }), deps), OverCapError);
   assert.deepEqual(seen, [{ valueUsd: 1500, to: call.to, token: "USDC" }]);
+  // A send also passes what it pays, which the browser checks against the transaction (ORC-113).
+  await assert.rejects(executeForAccount(input(1500, { to: call.to, token: "USDC", amount: "1500", symbol: "USDC" }), deps), OverCapError);
+  assert.deepEqual(seen[1], { valueUsd: 1500, to: call.to, token: "USDC", amount: "1500", symbol: "USDC" });
 });
 
 test("getOwnerSign: only the owner sees a pending request; missing, someone else's, used and expired all look the same", async () => {

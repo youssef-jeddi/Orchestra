@@ -31,6 +31,9 @@ export interface AccountExecInput {
   /** Recipient / token, kept with the owner-sign offer so the activity list can show them afterwards. */
   to?: string;
   token?: string;
+  /** What the plan says it sends; the browser checks the owner-sign transaction against it (ORC-113). */
+  amount?: string;
+  symbol?: string;
 }
 
 export interface AccountExecDeps {
@@ -43,7 +46,7 @@ export interface AccountExecDeps {
   offer: (wallet: string, safeAddress: string, summary: string, batch: Batch, meta: OfferMeta) => Promise<Record<string, unknown> | null>;
 }
 
-export interface OfferMeta { valueUsd: number; to?: string; token?: string }
+export interface OfferMeta { valueUsd: number; to?: string; token?: string; amount?: string; symbol?: string }
 
 const realDeps: AccountExecDeps = {
   enabled: isSpendingModuleEnabled,
@@ -66,7 +69,10 @@ const realDeps: AccountExecDeps = {
 };
 
 async function overCap(input: AccountExecInput, deps: AccountExecDeps): Promise<OverCapError> {
-  const ownerSign = input.wallet ? await deps.offer(input.wallet, input.safeAddress, input.summary ?? "", input.batch, { valueUsd: input.valueUsd, to: input.to, token: input.token }) : null;
+  const ownerSign = input.wallet ? await deps.offer(input.wallet, input.safeAddress, input.summary ?? "", input.batch, {
+    valueUsd: input.valueUsd, to: input.to, token: input.token,
+    ...(input.amount !== undefined ? { amount: input.amount } : {}), ...(input.symbol !== undefined ? { symbol: input.symbol } : {}),
+  }) : null;
   return new OverCapError(ownerSign ? OVER_CAP_TEXT : OVER_CAP_NO_OWNER_TEXT, ownerSign ?? undefined);
 }
 
