@@ -51,7 +51,7 @@ test("setPrices fills the cache and makes it usable", async () => {
 
 test("age: usable up to MAX_PRICE_AGE_MS, not after", async () => {
   _resetPriceFeedForTests();
-  setPrices({ ETH: 4000, WETH: 4000 });
+  setPrices({ ETH: 4000, WETH: 4000, USDC: 1 });
   assert.equal(MAX_PRICE_AGE_MS, 5 * 60_000);
   assert.equal(pricesUsable(Date.now()), true);
   assert.equal(pricesUsable(Date.now() + MAX_PRICE_AGE_MS + 1_000), false);
@@ -84,7 +84,7 @@ test("ordering: with no usable price a send gets the price answer even though th
   _resetPriceFeedForTests();
   const blocked = await run(sendJson, gate);
   assert.deepEqual(blocked.outcome, { kind: "unsupported", reason: PRICE_UNAVAILABLE_REASON });
-  setPrices({ ETH: 4000, WETH: 4000 });
+  setPrices({ ETH: 4000, WETH: 4000, USDC: 1 });
   const fresh = await run(sendJson, gate);
   assert.equal(fresh.outcome.kind, "unsupported");
   assert.match((fresh.outcome as any).reason, /Not enough ETH/, "with a fresh price the balance answer comes as before");

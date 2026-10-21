@@ -11,6 +11,7 @@ import { computePlanValueUsd, getPriceUsd, formatTokenAmount, type IntentType } 
 import { lookupToken, SUPPORTED_SYMBOLS, type TokenDef } from "./tokens";
 import { planRemove, type Position } from "../integrations/uniswap/liquidity";
 import type { StepT } from "./schema";
+import { PRICE_UNAVAILABLE_REASON } from "./messages";
 
 export interface ResolveContext {
   /** A wallet is connected (relative amounts and balances need one). */
@@ -210,6 +211,9 @@ async function resolveStep(step: StepT, order: number, ctx: ResolveContext): Pro
       const plan = planRemove(p, percent);
       const back0 = Number(plan.expected0) / 10 ** p.token0.decimals;
       const back1 = Number(plan.expected1) / 10 ** p.token1.decimals;
+      // A side with no price would count as $0 and the whole withdrawal could look free (ORC-40).
+      const priced = (back: number, symbol: string) => back <= 0 || getPriceUsd(symbol) > 0;
+      if (!priced(back0, p.token0.symbol) || !priced(back1, p.token1.symbol)) throw unsupported(PRICE_UNAVAILABLE_REASON);
       const valueUsd = back0 * getPriceUsd(p.token0.symbol) + back1 * getPriceUsd(p.token1.symbol);
       const params = {
         tokenId: p.tokenId, percent,

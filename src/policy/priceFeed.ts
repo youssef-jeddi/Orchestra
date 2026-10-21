@@ -7,6 +7,8 @@
 // 0.035 ETH ($140) send count as $87.50 under a $100 limit and run on its own. Whether the cache can
 // be trusted is `pricesUsable()` — false if no fetch ever succeeded or the last one is older than
 // MAX_PRICE_AGE_MS. Anything that needs a USD value for the daily limit refuses when it is false.
+// Fresh means both ETH and USDC came back (ORC-40): the swap and liquidity checks compare the two,
+// and with one of them missing they could not check anything.
 //
 // Sepolia tokens are valued at their mainnet reference (WETH≈ETH, USDC≈$1);
 // what matters for the guardrails is the dollar magnitude, not the testnet asset.
@@ -34,10 +36,14 @@ export function getPrices(): Record<string, number> {
   return { ...prices };
 }
 
-/** Can the cached prices value a spend? False when never fetched, too old, or a price fault is injected. */
+/** The prices every spend check needs: without both, nothing that spends is valued or checked. */
+export const REQUIRED_PRICES = ["ETH", "USDC"] as const;
+
+/** Can the cached prices value a spend? False when never fetched, too old, missing ETH or USDC, or a price fault is injected. */
 export function pricesUsable(now: number = Date.now()): boolean {
   if (faultOn("price-read") || faultOn("price-stale")) return false;
   if (lastSuccessAt === 0) return false;
+  if (!REQUIRED_PRICES.every((s) => (prices[s] ?? 0) > 0)) return false;
   return now - lastSuccessAt <= MAX_PRICE_AGE_MS;
 }
 
@@ -72,8 +78,9 @@ export async function refreshPrices(): Promise<void> {
     const usdc = data["usd-coin"]?.usd;
     const usdt = data.tether?.usd;
 
-    // Without an ETH quote the cache is not fresh, whatever else came back.
+    // Without an ETH and a USDC quote the cache is not fresh, whatever else came back.
     if (!(typeof eth === "number" && eth > 0)) throw new Error("price fetch returned no ETH price");
+    if (!(typeof usdc === "number" && usdc > 0)) throw new Error("price fetch returned no USDC price");
     prices.ETH = eth; prices.WETH = eth;
     if (typeof usdc === "number" && usdc > 0) prices.USDC = usdc;
     if (typeof usdt === "number" && usdt > 0) prices.USDT = usdt;

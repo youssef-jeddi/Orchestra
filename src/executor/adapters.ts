@@ -58,9 +58,10 @@ interface QuoteLeg {
 
 /**
  * Read a quote's output and check it against the reference prices. A quote
- * whose output can't be read can't be verified either, so it is refused.
+ * whose output can't be read can't be verified either, so it is refused, and so is
+ * one for a token with no reference price (ORC-40): the 5% check couldn't run.
  */
-function assessQuote(quote: any, leg: QuoteLeg): { amountOut: number | null; check: QuoteCheck | null; refusal?: string } {
+export function assessQuote(quote: any, leg: QuoteLeg): { amountOut: number | null; check: QuoteCheck | null; refusal?: string } {
   const raw = quote?.output?.amount ?? quote?.orderInfo?.outputs?.[0]?.startAmount;
   if (raw == null || !/^\d+$/.test(String(raw))) {
     return { amountOut: null, check: null, refusal: "Not swapping: I couldn't read how much you'd receive, so I can't check the price is fair." };
@@ -68,7 +69,10 @@ function assessQuote(quote: any, leg: QuoteLeg): { amountOut: number | null; che
   const amountOut = Number(ethers.formatUnits(String(raw), decimalsFor(leg.tokenOut)));
   const amountIn = Number(ethers.formatUnits(leg.amountIn, decimalsFor(leg.tokenIn)));
   const check = checkSwapQuote({ symbolIn: leg.symbolIn, amountIn, symbolOut: leg.symbolOut, amountOut });
-  return { amountOut, check, refusal: check && !check.ok ? check.reason : undefined };
+  if (!check) {
+    return { amountOut, check: null, refusal: "Not swapping: I can't check the market price for this swap right now, so I can't tell whether the offer is fair. Nothing was done. Please try again in a moment." };
+  }
+  return { amountOut, check, refusal: check.ok ? undefined : check.reason };
 }
 
 /** "Swap 10 USDC for ~0.00398 ETH", with the USD value and any notable gap to market. */
