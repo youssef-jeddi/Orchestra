@@ -5,11 +5,14 @@
 // (loosening) needs proof it's the owner: their passkey if they have one, a wallet signature only
 // if they have none. A session alone (stolen token, someone at the keyboard) must not be able to
 // widen what the agent may do by itself. Proofs are bound to the exact new values and single-use.
+// Pausing automatic actions (ORC-39, `pauseAuto: true`) is a tightening; resuming them is a
+// loosening and takes the same proof as raising a limit.
 
 import crypto from "crypto";
 import { ethers } from "ethers";
 import { resolveDailyLimit, computeHabitProfile, DEFAULT_DAILY_LIMIT, MAX_DAILY_LIMIT } from "./index";
-import { readUserProfile, updateUserProfile, recipientsOf, getRecentActivity } from "./store";
+import { readUserProfile, updateUserProfile, recipientsOf, getRecentActivity, walletPauseOf } from "./store";
+import { isMemoryPaused, clearMemoryPause, walletPauseRecord, auditWalletPause } from "./killSwitch";
 import { hasAnyPasskey, authenticationOptions, verifyAuthentication, type RelyingParty } from "../integrations/passkey";
 import { isEmailWallet } from "../integrations/passkey/emailGate";
 import { canonicalJson } from "../approvals";
@@ -32,6 +35,8 @@ export interface LimitChange {
   set: Partial<Record<LimitField, number | null>>;
   /** A saved address to forget. */
   removeAddress?: string;
+  /** true pauses the wallet's automatic actions, false turns them back on (ORC-39). */
+  pauseAuto?: boolean;
 }
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
@@ -61,8 +66,13 @@ export function parseChange(body: unknown): LimitChange {
     if (typeof b.removeAddress !== "string" || !ADDRESS.test(b.removeAddress)) throw bad("That isn't a valid address.");
     removeAddress = b.removeAddress.toLowerCase();
   }
-  if (Object.keys(set).length === 0 && !removeAddress) throw bad("There is nothing to change.");
-  return { set, ...(removeAddress ? { removeAddress } : {}) };
+  let pauseAuto: boolean | undefined;
+  if (b.pauseAuto !== undefined) {
+    if (typeof b.pauseAuto !== "boolean") throw bad("Say whether automatic actions should be paused (true) or back on (false).");
+    pauseAuto = b.pauseAuto;
+  }
+  if (Object.keys(set).length === 0 && !removeAddress && pauseAuto === undefined) throw bad("There is nothing to change.");
+  return { set, ...(removeAddress ? { removeAddress } : {}), ...(pauseAuto !== undefined ? { pauseAuto } : {}) };
 }
 
 /** A stored value the way the engine reads it (older versions saved unchecked values, even strings). */
@@ -98,7 +108,9 @@ function requestedLooseness(field: LimitField, v: number | null | undefined, lea
  * activity (computeHabitProfile), which is what the engine uses while no usual amount is saved:
  * setting a higher one would switch that off, so it needs proof like any other raise.
  */
-export function classifyChange(storedPolicy: Record<string, unknown>, change: LimitChange, learnedTypicalUsd: number | null = null): "tightening" | "loosening" {
+export function classifyChange(storedPolicy: Record<string, unknown>, change: LimitChange, learnedTypicalUsd: number | null = null, storedPaused = false): "tightening" | "loosening" {
+  // Turning automatic actions back on gives the agent its power back: proof, like a raise.
+  if (change.pauseAuto === false && storedPaused) return "loosening";
   for (const field of LIMIT_FIELDS) {
     if (!(field in change.set)) continue;
     const v = change.set[field];
@@ -118,7 +130,12 @@ async function learnedTypical(wallet: string, change: LimitChange): Promise<numb
   return computeHabitProfile(await getRecentActivity(wallet)).typicalMaxUsd;
 }
 
-const changeKey = (c: LimitChange) => canonicalJson({ set: c.set, removeAddress: c.removeAddress ?? null });
+const changeKey = (c: LimitChange) => canonicalJson({ set: c.set, removeAddress: c.removeAddress ?? null, pauseAuto: c.pauseAuto ?? null });
+
+/** Is this wallet paused now (stored, damaged-and-so-paused, or only in memory)? Resuming it is a loosening. */
+function pausedNow(wallet: string, profile: Record<string, any>): boolean {
+  return walletPauseOf(profile) !== null || isMemoryPaused(wallet);
+}
 
 // ── Proofs ──
 interface Pending {
@@ -153,6 +170,7 @@ function limitTypedData(wallet: string, nonce: string, expiresAt: string, c: Lim
         { name: "automaticPaymentsPerDay", type: "string" },
         { name: "usualAmount", type: "string" },
         { name: "forgetAddress", type: "string" },
+        { name: "automaticActions", type: "string" },
         { name: "statement", type: "string" },
       ],
     },
@@ -165,6 +183,7 @@ function limitTypedData(wallet: string, nonce: string, expiresAt: string, c: Lim
       automaticPaymentsPerDay: show("maxAutoTxPerDay", c.set.maxAutoTxPerDay),
       usualAmount: show("typicalMaxUsd", c.set.typicalMaxUsd),
       forgetAddress: c.removeAddress ?? "none",
+      automaticActions: c.pauseAuto === undefined ? "unchanged" : c.pauseAuto ? "paused" : "back on",
       statement: "Change your Orchestra limits as shown. This doesn't move funds or cost gas.",
     },
   };
@@ -187,8 +206,9 @@ export type Confirmation =
 /** Whether this change needs proof, and if so the challenge to answer (passkey options or typed data to sign). */
 export async function requestConfirmation(wallet: string, body: unknown, rp: RelyingParty, now = Date.now(), opts: ChangeOptions = {}): Promise<Confirmation> {
   const change = parseChange(body);
-  const stored = (await readUserProfile(wallet)).policy ?? {};
-  if (classifyChange(stored, change, await learnedTypical(wallet, change)) === "tightening") return { required: false };
+  const profile = await readUserProfile(wallet);
+  const stored = profile.policy ?? {};
+  if (classifyChange(stored, change, await learnedTypical(wallet, change), pausedNow(wallet, profile)) === "tightening") return { required: false };
   sweep(now);
   const w = wallet.toLowerCase();
   const nonce = crypto.randomBytes(16).toString("base64url");
@@ -217,8 +237,9 @@ export async function requestConfirmation(wallet: string, body: unknown, rp: Rel
  */
 export async function proofToRaise(wallet: string, body: unknown): Promise<"none" | "passkey"> {
   const change = parseChange(body);
-  const stored = (await readUserProfile(wallet)).policy ?? {};
-  if (classifyChange(stored, change, await learnedTypical(wallet, change)) === "tightening") return "none";
+  const profile = await readUserProfile(wallet);
+  const stored = profile.policy ?? {};
+  if (classifyChange(stored, change, await learnedTypical(wallet, change), pausedNow(wallet, profile)) === "tightening") return "none";
   const w = wallet.toLowerCase();
   if (await hasAnyPasskey(w)) return "passkey";
   if (await isEmailWallet(w)) throw new LimitsError(403, "Add a passkey first to raise your limits.", "passkey_required");
@@ -227,8 +248,8 @@ export async function proofToRaise(wallet: string, body: unknown): Promise<"none
 
 function needProof(method: "passkey" | "wallet"): LimitsError {
   return new LimitsError(403, method === "passkey"
-    ? "Raising a limit needs your passkey. Confirm with it to continue."
-    : "Raising a limit needs your wallet's signature. Sign to continue.", "confirmation_required", { method });
+    ? "Raising a limit or turning automatic actions back on needs your passkey. Confirm with it to continue."
+    : "Raising a limit or turning automatic actions back on needs your wallet's signature. Sign to continue.", "confirmation_required", { method });
 }
 
 /** Check the proof for a loosening change. The nonce is spent either way. */
@@ -255,8 +276,9 @@ async function verifyConfirmation(wallet: string, change: LimitChange, proof: an
 }
 
 /** The plain-words list of what was raised, for the Telegram notice. */
-export function describeLoosening(before: Record<string, unknown>, change: LimitChange, learnedTypicalUsd: number | null = null): string[] {
+export function describeLoosening(before: Record<string, unknown>, change: LimitChange, learnedTypicalUsd: number | null = null, wasPaused = false): string[] {
   const lines: string[] = [];
+  if (change.pauseAuto === false && wasPaused) lines.push("Automatic actions: paused → back on");
   const word = (n: number, field: LimitField) =>
     !Number.isFinite(n) ? "no limit" : field === "maxAutoTxPerDay" ? String(n) : formatUsd(n);
   const label: Record<LimitField, string> = { dailyLimitUsd: "Daily limit without asking", maxAutoTxPerDay: "Automatic payments per day", typicalMaxUsd: "Usual amount" };
@@ -272,6 +294,8 @@ export function describeLoosening(before: Record<string, unknown>, change: Limit
 export interface LimitsView {
   policy: Partial<Record<LimitField, number>>;
   knownRecipients: string[];
+  /** The wallet's own pause of automatic actions (ORC-39). */
+  paused: boolean;
 }
 
 /** What the sheet shows: the three limits and the saved addresses (never other stored keys). */
@@ -279,7 +303,7 @@ export async function readLimits(wallet: string): Promise<LimitsView> {
   const p = await readUserProfile(wallet);
   const policy: LimitsView["policy"] = {};
   for (const f of LIMIT_FIELDS) if (typeof p.policy?.[f] === "number") policy[f] = p.policy[f];
-  return { policy, knownRecipients: recipientsOf(p) };
+  return { policy, knownRecipients: recipientsOf(p), paused: pausedNow(wallet, p) };
 }
 
 /** The wallet's daily limit in dollars (the default if none is saved), or null when its profile can't be read. */
@@ -305,9 +329,11 @@ export async function applyChange(
   opts: ChangeOptions & { beforeSave?: () => Promise<void> } = {},
 ): Promise<LimitsView & { loosened: boolean }> {
   const change = parseChange(body);
-  const before = (await readUserProfile(wallet)).policy ?? {};
+  const beforeProfile = await readUserProfile(wallet);
+  const before = beforeProfile.policy ?? {};
+  const wasPaused = pausedNow(wallet, beforeProfile);
   const learned = await learnedTypical(wallet, change);
-  const loosening = classifyChange(before, change, learned) === "loosening";
+  const loosening = classifyChange(before, change, learned, wasPaused) === "loosening";
   if (loosening) {
     const w = wallet.toLowerCase();
     const ownerTxIsProof = opts.ownerTx && !(await hasAnyPasskey(w)) && !(await isEmailWallet(w));
@@ -324,15 +350,40 @@ export async function applyChange(
     }
     const next: Record<string, any> = { ...p, policy, updatedAt: new Date(now).toISOString() };
     if (change.removeAddress) next.knownRecipients = recipientsOf(p).filter((a) => a !== change.removeAddress);
+    if (change.pauseAuto !== undefined) next.autoPause = walletPauseRecord(change.pauseAuto, "web", now);
     return next;
   });
 
+  // The pause flag changed (or was confirmed): keep it in the audit list and say so on Telegram.
+  const pauseChanged = change.pauseAuto !== undefined && change.pauseAuto !== wasPaused;
+  if (change.pauseAuto === false) clearMemoryPause(wallet);
+  if (pauseChanged) {
+    auditWalletPause(wallet, walletPauseRecord(change.pauseAuto!, "web", now));
+    console.log(`[kill-switch] a wallet ${change.pauseAuto ? "paused" : "resumed"} its automatic actions (web)`);
+  }
+  if (pauseChanged && change.pauseAuto && notify) {
+    notify(wallet, PAUSED_NOTICE("the website")).catch(() => {});
+  }
+
   if (loosening && notify) {
-    const lines = describeLoosening(before, change, learned);
-    notify(wallet, `⚠️ Your Orchestra limits were raised:\n${lines.join("\n")}\nIf this wasn't you, lower it in Orchestra (Limits).`).catch(() => {});
+    const lines = describeLoosening(before, change, learned, wasPaused);
+    const onlyResume = Object.keys(change.set).length === 0 && lines.length === 1 && change.pauseAuto === false;
+    notify(wallet, onlyResume
+      ? RESUMED_NOTICE
+      : `⚠️ Your Orchestra limits were raised:\n${lines.join("\n")}\nIf this wasn't you, lower it in Orchestra (Limits).`).catch(() => {});
   }
   return { ...(await readLimits(wallet)), loosened: loosening };
 }
+
+/** The Telegram notice after a wallet's automatic actions were paused (`where`: "the website", "Telegram"). */
+export const PAUSED_NOTICE = (where: string) =>
+  `⏸ Automatic actions were paused from ${where}. I'll ask for your OK before every payment, swap or liquidity change.\n` +
+  "To turn them back on, press Resume in Orchestra (it asks for your passkey).";
+
+/** The Telegram notice after they were turned back on. */
+export const RESUMED_NOTICE =
+  "▶️ Automatic actions were turned back on from the website. Small payments within your limits run on their own again.\n" +
+  "If this wasn't you, send /pause now and check your passkeys in Orchestra.";
 
 /** Test hook. */
 export function _resetLimits(): void {

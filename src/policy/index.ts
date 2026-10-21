@@ -23,6 +23,23 @@ export const DEFAULT_DAILY_LIMIT = 100;
 /** Above this USD value, approval must use hardware (Ledger); below it a passkey suffices. */
 export const DEFAULT_HARDWARE_THRESHOLD = 1000;
 
+/** Why automatic actions are off for a request (ORC-39, see ./killSwitch.ts). */
+export type PauseCause = "admin" | "user" | "unreadable" | "unsaved-spend";
+
+/** Automatic actions are paused for everyone ("global") or for this wallet only. */
+export interface PauseInfo {
+  scope: "global" | "wallet";
+  cause: PauseCause;
+}
+
+/** The sentence shown on the approval when a pause is why it asks. */
+export function pauseReason(p: PauseInfo): string {
+  if (p.cause === "unreadable") return "I can't check whether automatic actions are paused right now, so this needs your OK.";
+  if (p.cause === "unsaved-spend") return "I couldn't save the record of your last automatic payment, so I'm asking before the next one until it's saved.";
+  if (p.scope === "global") return "Automatic actions are paused for everyone right now, so this needs your OK.";
+  return "You paused automatic actions, so this needs your OK.";
+}
+
 /** The factor required to satisfy an approval. 'wallet': the user signs the tx in their own wallet. */
 export type ApprovalMethod = "none" | "passkey" | "ledger" | "wallet";
 
@@ -133,6 +150,8 @@ export interface DecisionInput {
   signals?: MessageSignals;
   /** The plan moves all or most of the funds (computed by code in the intent pipeline). */
   movesAllFunds?: boolean;
+  /** Automatic actions are paused (kill switch, ORC-39): the plan can't run on its own. */
+  paused?: PauseInfo | null;
 }
 
 /** Shown when pressure wording comes with moving everything or a new address: nothing is held or built. */
@@ -165,6 +184,12 @@ export interface PolicyProfile {
   maxAutoTxPerDay?: number;
   /** Habit baseline: the user's typical max single-tx USD. */
   typicalMaxUsd?: number;
+  /**
+   * The wallet's own pause (ORC-39), read by the server from its own `autoPause` field, never from
+   * the stored `policy`. `decide` reads `DecisionInput.paused`; the caller combines this with the
+   * global switch (killSwitch.pauseFor).
+   */
+  paused?: PauseInfo | null;
 }
 
 /** How a spend was authorised: by policy alone, by the user's approval, or by the owner's own signature. */
@@ -258,6 +283,8 @@ function sendRecipient(steps: any[]): string | null {
  *        · habit anomaly           (profile.typicalMaxUsd)
  *        · pressure wording        (signals.pressure: the message pushes to skip checks or hurry)
  *        · unplanned address       (signals.mentions: an address in the message the plan doesn't use)
+ *        · auto-paused             (input.paused: the kill switch, global or for this wallet)
+ *        · unpriced                (a value that isn't a finite, non-negative number)
  *      then, pressure wording together with moving all or most of the funds, an unknown
  *      recipient or an unplanned address → BLOCKED (refused outright, no approval is held)
  *   6. otherwise               → AUTO_EXECUTE
@@ -294,6 +321,18 @@ export function decide(input: DecisionInput): PolicyDecision {
 
   // 5. Value-bearing intents (swap / send / add_liquidity): accumulate escalations.
   const escalations: Escalation[] = [];
+
+  // 5-pause. The kill switch (ORC-39) turns every automatic action into a question. It only
+  // escalates: what would be refused outright (pressure + drain) is still refused below.
+  if (input.paused) {
+    escalations.push({ rule: "auto-paused", reason: pauseReason(input.paused), risk: 50 });
+  }
+
+  // 5-value. A value that isn't a real dollar amount (NaN, Infinity, negative) can't be compared
+  // with the limit: NaN > limit is false, which would otherwise read as "within the limit".
+  if (!Number.isFinite(valueUsd) || valueUsd < 0) {
+    escalations.push({ rule: "unpriced", reason: "I couldn't work out what this is worth, so it needs your OK.", risk: 70 });
+  }
 
   // Rolling-24h spend so far (drives the daily limit + the count rule).
   const cutoff = (now ?? Date.now()) - DAY_MS;

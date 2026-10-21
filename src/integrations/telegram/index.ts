@@ -11,7 +11,7 @@
 import crypto from "crypto";
 import https from "https";
 import { ethers } from "ethers";
-import { read, write, deleteKey } from "../zero-g/storage";
+import { read, write, deleteKey, append, readMany } from "../zero-g/storage";
 import { safeErr } from "../../utils/redact";
 import { UserFacingError } from "../../utils/userFacing";
 
@@ -212,7 +212,34 @@ async function completeLink(code: string, chatId: number, username?: string): Pr
   if (previous) await deleteKey(`telegram-chat:${previous.chatId}`).catch(() => {});
   await write(`telegram:${entry.wallet}`, { chatId, username, linkedAt: new Date().toISOString() } satisfies TelegramLink);
   await write(`telegram-chat:${chatId}`, { wallet: entry.wallet });
+  // The list of linked chats, for notices that go to everyone (the global kill switch).
+  append(CHAT_INDEX_KEY, { chatId }).catch(() => {});
   return entry.wallet;
+}
+
+const CHAT_INDEX_KEY = "telegram-chat-index";
+
+/**
+ * The chats linked to a wallet right now (linked since the index existed; an unlinked chat is
+ * left out). Empty when storage can't be read.
+ */
+export async function linkedChatIds(): Promise<number[]> {
+  let rows: any[] = [];
+  try { rows = ((await readMany(CHAT_INDEX_KEY)) as any[]) || []; } catch { return []; }
+  const ids = [...new Set(rows.map((r) => r?.chatId).filter((id): id is number => typeof id === "number"))];
+  const linked: number[] = [];
+  for (const id of ids) if (await walletForChat(id)) linked.push(id);
+  return linked;
+}
+
+/** Send the same text to every linked chat. Best effort: a chat that fails is skipped. */
+export async function broadcastText(text: string): Promise<number> {
+  if (!telegramEnabled()) return 0;
+  let sent = 0;
+  for (const chatId of await linkedChatIds()) {
+    try { await sendText(chatId, text); sent++; } catch (err) { console.warn(`[telegram] broadcast to a chat failed: ${safeErr(err)}`); }
+  }
+  return sent;
 }
 
 // ── Messages ──
@@ -262,6 +289,11 @@ export async function settleApprovalMessage(chatId: number, messageId: number, o
   }).catch((err) => console.warn(`[telegram] edit failed: ${safeErr(err)}`));
 }
 
+/** Test hook: run one update through the handler, as the polling loop would. */
+export function _handleUpdate(update: any, onDecision: DecisionHandler, onCommand?: CommandHandler): Promise<void> {
+  return handleUpdate(update, onDecision, onCommand);
+}
+
 // ── Update loop ──
 
 export interface DecisionHandler {
@@ -269,7 +301,12 @@ export interface DecisionHandler {
   (input: { wallet: string; approvalId: string; approve: boolean; chatId: number; messageId: number }): Promise<string>;
 }
 
-async function handleUpdate(update: any, onDecision: DecisionHandler): Promise<void> {
+/** A text command other than /start and /unlink (the pause commands); null when it isn't one. */
+export interface CommandHandler {
+  (input: { text: string; chatId: number; wallet: string | null }): Promise<{ text: string; button?: { text: string; url: string } } | null>;
+}
+
+async function handleUpdate(update: any, onDecision: DecisionHandler, onCommand?: CommandHandler): Promise<void> {
   if (update.message?.text) {
     const chatId: number = update.message.chat.id;
     const text: string = update.message.text.trim();
@@ -288,6 +325,11 @@ async function handleUpdate(update: any, onDecision: DecisionHandler): Promise<v
       const wallet = await unlinkChat(chatId);
       await call("sendMessage", { chat_id: chatId, text: wallet ? `Unlinked from ${wallet}.` : "This chat isn't linked to a wallet." });
       return;
+    }
+    if (onCommand && text.startsWith("/")) {
+      const reply = await onCommand({ text, chatId, wallet: await walletForChat(chatId) });
+      if (reply?.button) await sendLinkMessage(chatId, reply.text, reply.button.text, reply.button.url);
+      else if (reply) await call("sendMessage", { chat_id: chatId, text: reply.text });
     }
     return;
   }
@@ -310,7 +352,7 @@ async function handleUpdate(update: any, onDecision: DecisionHandler): Promise<v
 let polling = false;
 
 /** Start long polling (idempotent). Logs and retries on errors; never throws. */
-export async function startTelegramBot(onDecision: DecisionHandler): Promise<void> {
+export async function startTelegramBot(onDecision: DecisionHandler, onCommand?: CommandHandler): Promise<void> {
   if (!telegramEnabled() || polling) return;
   polling = true;
   try {
@@ -329,7 +371,7 @@ export async function startTelegramBot(onDecision: DecisionHandler): Promise<voi
         }, 35_000);
         for (const u of updates) {
           offset = u.update_id + 1;
-          await handleUpdate(u, onDecision).catch((err) => console.error(`[telegram] update error: ${safeErr(err)}`));
+          await handleUpdate(u, onDecision, onCommand).catch((err) => console.error(`[telegram] update error: ${safeErr(err)}`));
         }
       } catch (err: any) {
         if (err?.name !== "AbortError") console.warn(`[telegram] polling error: ${safeErr(err)}`);
