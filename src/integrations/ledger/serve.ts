@@ -105,6 +105,8 @@ import {
 } from "../passkey";
 import { createSetupToken, getSetup, consumeSetup } from "../passkey/phoneSetup";
 import { isEmailWallet, hasEmailVerification, verificationAccountTypes } from "../passkey/emailGate";
+import { moduleConfigProblem } from "../safe/spendingModule";
+import { agentKeyConfigProblem } from "../safe/agentKeys";
 
 // A production bridge with no explicit allowlist must not start (nothing is listening yet).
 try {
@@ -112,6 +114,13 @@ try {
 } catch (err: any) {
   console.error(`[origins] ${err.message}`);
   process.exit(1);
+}
+
+// The on-chain cap and per-account agent keys (ORC-38): problems are logged loudly but don't stop the
+// bridge, so a deploy that lands before the env is updated stays up; the affected actions refuse on
+// their own (no new accounts without a module in production, no v2 signing without the encryption key).
+for (const problem of [moduleConfigProblem(), agentKeyConfigProblem()]) {
+  if (problem) console.error(`[config] ${problem}`);
 }
 
 const provider = makeSepoliaProvider();

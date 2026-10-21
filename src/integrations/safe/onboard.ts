@@ -6,8 +6,9 @@ import { ethers } from "ethers";
 import { makeSepoliaProvider } from "../../utils/rpc";
 import { read, write, deleteKey } from "../zero-g/storage";
 import { readUserProfile } from "../../policy/store";
-import { deploySafe, predictSafeAddress } from "./deploy";
+import { deploySafe, predictSafeAddress, resolveAccountSetup, type AccountSetup } from "./deploy";
 import { getAgentAddress } from "./agentWallet";
+import { agentAddressFor } from "./agentKeys";
 import { OnboardingError, OnboardingLimiter, OnboardingQueue, accountReady } from "./onboarding";
 import { type InflightRecord, type InflightStore, type TxTracker, chainProbes, makeTracker } from "./inflight";
 import { type SetupInspection, type SetupStep } from "./setupSteps";
@@ -29,14 +30,39 @@ async function agentAddress(): Promise<string> {
 const setupKey = (user: string) => `onboard:${user.toLowerCase()}`;
 const inflightKey = (user: string) => `inflight:${user.toLowerCase()}`;
 
+/** How this wallet's account is (or will be) set up, and where it lives. */
+interface AccountPlan {
+  setup: AccountSetup;
+  /** The agent written into the Safe's setup: the shared one (owner/v1) or the account's own key (v2). */
+  configAgent: string;
+  safeAddress: string;
+}
+
+const sameAddr = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
+
+async function accountPlan(user: string, sharedAgent: string, provider: ethers.Provider): Promise<AccountPlan> {
+  const setup = await resolveAccountSetup(provider);
+  const configAgent = setup.kind === "v2" ? await agentAddressFor(user) : sharedAgent;
+  // A finished account recorded for this same module keeps its recorded address, whatever the
+  // derivation would give now. A record from another module (a v1 account once the bridge runs v2,
+  // or one from before records named their module) is an old wallet: the account is derived anew.
+  const stored = (await read(`safe:${user.toLowerCase()}`)) as { safeAddress?: string; spendingModule?: string } | null;
+  if (setup.kind !== "owner" && stored?.safeAddress && sameAddr(stored.spendingModule, setup.module)) {
+    return { setup, configAgent, safeAddress: ethers.getAddress(stored.safeAddress) };
+  }
+  return { setup, configAgent, safeAddress: await predictSafeAddress(user, configAgent, setup) };
+}
+
 /** The real reads for one wallet's account: our storage and Sepolia. Rules live in inspect.ts. */
-async function accountReads(wallet: string): Promise<AccountReads> {
+async function accountReads(wallet: string): Promise<AccountReads & { plan: AccountPlan }> {
   const user = ethers.getAddress(wallet);
   const agent = await agentAddress();
-  const safeAddress = await predictSafeAddress(user, agent);
   const provider = makeSepoliaProvider();
+  const plan = await accountPlan(user, agent, provider);
+  const { safeAddress } = plan;
   const policyAddress = configuredPolicy();
   return {
+    plan,
     safeAddress,
     policyAddress,
     setupRecord: async () => (await read(setupKey(user))) as SetupRecord | null,
@@ -106,11 +132,14 @@ async function finishAccount(wallet: string, isCancelled: () => boolean): Promis
   const track = trackerFor(user, agent, isCancelled);
 
   const ran = await finishWith(reads, {
-    deploy: async () => { await deploySafe(user, agent, provider, track("deploy")); },
+    deploy: async () => { await deploySafe(user, reads.plan.configAgent, provider, track("deploy"), reads.plan.setup); },
     // The chain is asked first (a registration from an earlier run may have confirmed since this run read it).
     register: () => registerOnPolicy(user, reads, track),
     // The only writer of `safe:<wallet>`, and the last step: an unfinished account is never recorded as the user's own.
-    record: () => writeAccountRecord({ user, safeAddress, agent }),
+    record: () => writeAccountRecord({
+      user, safeAddress, agent: reads.plan.configAgent,
+      spendingModule: reads.plan.setup.kind === "owner" ? undefined : reads.plan.setup.module,
+    }),
   }, isCancelled, async () => {
     await deleteKey(inflightKey(user)); // everything is done: nothing can still be in flight
   });

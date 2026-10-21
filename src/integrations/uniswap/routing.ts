@@ -3,6 +3,7 @@
 
 import type { RiskLevel } from "../ledger/types";
 import { getQuote } from "./api";
+import { isSpendingModuleEnabled } from "../safe/spendingModule";
 import type {
   ProtocolVersion,
   QuoteRequest,
@@ -20,8 +21,11 @@ export interface EnrichedQuote extends QuoteResponse {
  * Select which Uniswap protocols to route through based on risk classification.
  * AMM-only (no UniswapX) for every tier: Safe execution needs an on-chain swap tx.
  * V4 adds native-ETH pools (no wrap/unwrap); the API picks the better of V3/V4.
+ * With the on-chain cap (module mode) only V3: SpendingLimitModuleV2 decodes router commands and
+ * refuses V4, so a V4 route would only fail later (ORC-38).
  */
-export function selectProtocols(riskLevel: RiskLevel): ProtocolVersion[] {
+export function selectProtocols(riskLevel: RiskLevel, moduleMode: boolean = isSpendingModuleEnabled()): ProtocolVersion[] {
+  if (moduleMode) return ["V3"];
   switch (riskLevel) {
     case "autonomous":
     case "requires_approval":

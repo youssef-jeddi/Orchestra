@@ -4,5 +4,9 @@ out = "out"
 libs = ["lib"]
 optimizer = true
 optimizer_runs = 200
+# via-IR makes the V2 module ~20% smaller. Since the 2026 Sepolia gas repricing, deploying code
+# costs about 1,550 gas per byte, and without it the module's deploy transaction sits within 5% of
+# the 16.77M per-transaction gas cap (EIP-7825). Tests run with the same setting as the deploy.
+via_ir = true
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

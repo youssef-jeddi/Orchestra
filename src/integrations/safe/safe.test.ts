@@ -3,7 +3,8 @@
 
 import assert from "node:assert/strict";
 import { ethers } from "ethers";
-import { predictedSafeConfig, SAFE_MODULE_SETUP } from "./deploy";
+import { predictedSafeConfig, SAFE_MODULE_SETUP, AccountSetupUnavailable } from "./deploy";
+import { ModuleConfigError } from "./spendingModule";
 // @ts-expect-error plain JS helper shared with the frontend, no type declarations
 import { safeStatusFor, shouldPoll, pollAction, onboardingErrorMessage, shortAddress } from "../../../frontend/src/lib/onboarding.js";
 import { OnboardingLimiter, OnboardingQueue, OnboardingError, type OnboardingLimits } from "./onboarding";
@@ -81,10 +82,35 @@ test("with SPENDING_MODULE_ADDRESS set the config is pinned too: owner only, thr
   assert.ok(!config.safeAccountConfig.owners.includes(AGENT));
 });
 
-test("a malformed SPENDING_MODULE_ADDRESS counts as unset: the owner config, never a half-configured one", () => {
-  for (const bad of ["", "   ", "0x123", "not-an-address"]) {
-    assert.deepEqual(withModuleEnv(bad, () => predictedSafeConfig(USER, AGENT)), { safeAccountConfig: { owners: [AGENT, USER], threshold: 1 } });
+test("empty SPENDING_MODULE_ADDRESS counts as unset (local dev: owner config); a malformed one refuses, never a half-configured or owner config", () => {
+  for (const blank of ["", "   "]) {
+    assert.deepEqual(withModuleEnv(blank, () => predictedSafeConfig(USER, AGENT)), { safeAccountConfig: { owners: [AGENT, USER], threshold: 1 } });
   }
+  for (const bad of ["0x123", "not-an-address"]) {
+    assert.throws(() => withModuleEnv(bad, () => predictedSafeConfig(USER, AGENT)), (e: any) => e instanceof ModuleConfigError && e.status === 503);
+  }
+});
+
+test("production without SPENDING_MODULE_ADDRESS refuses new accounts: no agent-as-owner fallback", () => {
+  const env = process.env.NODE_ENV;
+  process.env.NODE_ENV = "production";
+  try {
+    assert.throws(() => withModuleEnv(undefined, () => predictedSafeConfig(USER, AGENT)), (e: any) => e instanceof AccountSetupUnavailable && /isn't available/.test(e.message));
+    // With a module the production config is the owner-only one.
+    const MODULE = "0x00000000000000000000000000000000000000C3";
+    assert.deepEqual(withModuleEnv(MODULE, () => predictedSafeConfig(USER, AGENT)).safeAccountConfig.owners, [USER]);
+  } finally {
+    if (env === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = env;
+  }
+});
+
+test("v2 config is pinned: owner only, threshold 1, the module's helper sets up the module and this account's own agent", () => {
+  const MODULE = "0x00000000000000000000000000000000000000C3";
+  const HELPER = "0x00000000000000000000000000000000000000C4";
+  const config = predictedSafeConfig(USER, AGENT, { kind: "v2", module: MODULE, setupHelper: HELPER });
+  const data = new ethers.Interface(["function setupModule(address module, address agent)"]).encodeFunctionData("setupModule", [MODULE, AGENT]);
+  assert.deepEqual(config, { safeAccountConfig: { owners: [USER], threshold: 1, to: HELPER, data } });
+  assert.equal(data.slice(0, 10), ethers.id("setupModule(address,address)").slice(0, 10));
 });
 
 test("concurrent starts for one wallet share a single deployment", async () => {

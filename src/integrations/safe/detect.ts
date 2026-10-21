@@ -9,7 +9,8 @@
 import Safe from '@safe-global/protocol-kit';
 import { read } from '../zero-g/storage';
 import { getAgentAddress } from './agentWallet';
-import { predictedSafeConfig } from './deploy';
+import { predictedSafeConfig, resolveAccountSetup } from './deploy';
+import { getAgentSigner } from './agentKeys';
 import { makeSepoliaProvider, sepoliaRpcUrl } from '../../utils/rpc';
 import { shortAddr, safeErr } from "../../utils/redact";
 
@@ -17,8 +18,8 @@ import { shortAddr, safeErr } from "../../utils/redact";
 export interface DetectReads {
   /** The account recorded for the wallet (`safe:<wallet>`), if any. */
   storedAccount(wallet: string): Promise<string | null>;
-  /** The wallet's deterministic account address. */
-  predict(wallet: string): Promise<string>;
+  /** The wallet's deterministic account address (null when it can't exist yet, e.g. no v2 agent key). */
+  predict(wallet: string): Promise<string | null>;
   hasCode(address: string): Promise<boolean>;
 }
 
@@ -37,7 +38,7 @@ export async function detectWith(reads: DetectReads, wallet: string, now = Date.
   const hit = found.get(key);
   if (hit && hit.expires > now) return hit.address;
   const predicted = await reads.predict(wallet);
-  if (!(await reads.hasCode(predicted))) return null;
+  if (!predicted || !(await reads.hasCode(predicted))) return null;
   found.set(key, { address: predicted, expires: now + CACHE_TTL_MS });
   return predicted;
 }
@@ -49,10 +50,13 @@ export function _resetDetectCache(): void {
 
 const realReads: DetectReads = {
   storedAccount: async (wallet) => ((await read(`safe:${wallet}`)) as { safeAddress?: string } | null)?.safeAddress ?? null,
-  predict: async (wallet) => (await Safe.init({
-    provider: sepoliaRpcUrl(),
-    predictedSafe: predictedSafeConfig(wallet, getAgentAddress()),
-  })).getAddress(),
+  predict: async (wallet) => {
+    const setup = await resolveAccountSetup(makeSepoliaProvider());
+    // v2 accounts carry their own agent key in the setup; none stored means no such account (never create one here).
+    const agent = setup.kind === 'v2' ? (await getAgentSigner(wallet))?.address : getAgentAddress();
+    if (!agent) return null;
+    return (await Safe.init({ provider: sepoliaRpcUrl(), predictedSafe: predictedSafeConfig(wallet, agent, setup) })).getAddress();
+  },
   hasCode: async (address) => (await makeSepoliaProvider().getCode(address)) !== '0x',
 };
 

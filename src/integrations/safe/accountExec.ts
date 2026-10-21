@@ -4,11 +4,14 @@
 // before that the day's remaining ceiling is read: a request over it never reaches the module and
 // comes back as an OverCapError carrying the offer to sign it as the owner (see ownerSign.ts).
 // The contract enforces the same ceiling, so a wrong estimate here still can't move extra funds.
+// v1 or v2 is read from the module itself: v1 signs with the shared key, v2 has the account's own
+// key sign and the shared key only relay (ORC-38). v2 needs the signed-in wallet to find that key.
 
 import { UserFacingError } from "../../utils/userFacing";
 import {
-  isSpendingModuleEnabled, remainingToday, exceedsRemaining, execViaModule, isDailyCapRevert,
+  isSpendingModuleEnabled, remainingToday, exceedsRemaining, execViaModule, execViaModuleV2, isDailyCapRevert,
   DailyCapRevert, OverCapError, OVER_CAP_TEXT, OVER_CAP_NO_OWNER_TEXT, logCapReadFailure,
+  moduleVersion, spendingModuleAddress, AGENT_MISSING_TEXT,
 } from "./spendingModule";
 import { executeBatchViaSafe } from "./transaction";
 import { offerOwnerSign } from "./ownerSign";
@@ -33,7 +36,8 @@ export interface AccountExecInput {
 export interface AccountExecDeps {
   enabled: () => boolean;
   remainingCents: (safeAddress: string) => Promise<bigint>;
-  viaModule: (safeAddress: string, key: string, batch: Batch, fallback?: string) => Promise<string>;
+  /** `key` is the shared key (v1: the agent; v2: only the relayer); `wallet` finds the account's own key on v2. */
+  viaModule: (safeAddress: string, key: string, batch: Batch, fallback?: string, wallet?: string) => Promise<string>;
   viaOwner: (safeAddress: string, key: string, batch: Batch, fallback?: string) => Promise<string>;
   /** Hold the exact Safe transaction for the owner to sign; null when that isn't possible. */
   offer: (wallet: string, safeAddress: string, summary: string, batch: Batch, meta: OfferMeta) => Promise<Record<string, unknown> | null>;
@@ -44,7 +48,12 @@ export interface OfferMeta { valueUsd: number; to?: string; token?: string }
 const realDeps: AccountExecDeps = {
   enabled: isSpendingModuleEnabled,
   remainingCents: (safe) => remainingToday(safe),
-  viaModule: execViaModule,
+  viaModule: async (safe, key, batch, fallback, wallet) => {
+    if ((await moduleVersion(spendingModuleAddress()!)) < 2) return execViaModule(safe, key, batch, fallback);
+    // Without the account's wallet there is no key to sign with: refuse rather than guess.
+    if (!wallet) throw new UserFacingError(AGENT_MISSING_TEXT, 409);
+    return execViaModuleV2(safe, wallet, key, batch, fallback);
+  },
   viaOwner: executeBatchViaSafe,
   offer: async (wallet, safe, summary, batch, meta) => {
     try {
@@ -76,7 +85,7 @@ export async function executeForAccount(input: AccountExecInput, deps: AccountEx
   if (exceedsRemaining(input.valueUsd, remaining)) throw await overCap(input, deps);
 
   try {
-    return await deps.viaModule(input.safeAddress, input.agentKey, input.batch, input.fallbackGasLimit);
+    return await deps.viaModule(input.safeAddress, input.agentKey, input.batch, input.fallbackGasLimit, input.wallet);
   } catch (err) {
     // The real spend (measured by the contract) went past what the estimate said.
     if (err instanceof DailyCapRevert || isDailyCapRevert(err)) throw await overCap(input, deps);

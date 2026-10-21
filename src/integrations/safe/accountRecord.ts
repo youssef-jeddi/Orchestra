@@ -10,7 +10,7 @@ import { readUserProfile, writeUserProfile } from "../../policy/store";
 export const DEFAULT_SPENDING_LIMIT_USD = 100;
 
 /** Writes the account record and merges the wallet's profile (keeping its own guardrail policy). */
-export async function writeAccountRecord(o: { user: string; safeAddress: string; agent: string; now?: () => string }): Promise<void> {
+export async function writeAccountRecord(o: { user: string; safeAddress: string; agent: string; spendingModule?: string; now?: () => string }): Promise<void> {
   const now = o.now ?? (() => new Date().toISOString());
   const key = `safe:${o.user.toLowerCase()}`;
   // Keep what an account from before step tracking already has (its deploy date), but
@@ -20,6 +20,8 @@ export async function writeAccountRecord(o: { user: string; safeAddress: string;
   await write(key, {
     safeAddress: o.safeAddress,
     agentWallet: o.agent,
+    // Which module the account was created for: a record for another module is an old wallet (onboard.ts).
+    ...(o.spendingModule ? { spendingModule: o.spendingModule } : {}),
     deployedAt: stored.deployedAt ?? now(),
   });
   const profile = await readUserProfile(o.user);
