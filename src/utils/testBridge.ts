@@ -1,6 +1,7 @@
 // ─── Utils — a real bridge for log and error tests (test helper) ───
 // Starts serve.ts on a free port with the language model replayed from a cache (no network access
-// to the model, no API key), captures its output and posts to /intent. Used by the test:* scripts.
+// to the model, no API key, no .env: see testEnv.ts), captures its output and posts to /intent.
+// Used by the test:* scripts.
 
 import http from "node:http";
 import net from "node:net";
@@ -11,6 +12,7 @@ import { spawn } from "node:child_process";
 import { cacheKeyFor } from "../integrations/llm";
 import { PLANNER_SYSTEM_PROMPT } from "../intent/prompt";
 import { _setSecret } from "../auth";
+import { isolatedEnv } from "./testEnv";
 
 export const SECRET = "log-privacy-test-secret-0123456789abcdef";
 _setSecret(SECRET);
@@ -32,11 +34,11 @@ export async function startBridge(env: Record<string, string>) {
   const port = await freePort();
   const out: string[] = [];
   const child = spawn(process.execPath, ["--import", "tsx", "src/integrations/ledger/serve.ts"], {
-    env: {
-      ...process.env, STORAGE_BACKEND: "memory", TELEGRAM_BOT_TOKEN: "", PORT: String(port), SESSION_SECRET: SECRET,
+    env: isolatedEnv({
+      STORAGE_BACKEND: "memory", TELEGRAM_BOT_TOKEN: "", PORT: String(port), SESSION_SECRET: SECRET,
       ALLOWED_ORIGINS: "", PUBLIC_APP_URL: "", ENABLE_MOCK_TRADE: "", NODE_ENV: "", LOG_USER_MESSAGES: "",
       LLM_CACHE_DIR: CACHE, LLM_CACHE_MODE: "replay", GROQ_MODEL: MODEL, LLM_PROVIDER: "groq", ...env,
-    },
+    }),
     stdio: ["ignore", "pipe", "pipe"],
   });
   child.stdout!.on("data", (d) => out.push(String(d)));

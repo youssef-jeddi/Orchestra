@@ -10,6 +10,9 @@ import { softPasskey, TEST_RP as RP } from "./softPasskey";
 process.env.STORAGE_BACKEND = "memory";
 delete process.env.PASSKEY_RP_ID;
 delete process.env.PASSKEY_ORIGIN;
+// No real Privy app: with real credentials in the environment the wallet lookup would call Privy.
+delete process.env.PRIVY_APP_ID;
+delete process.env.PRIVY_APP_SECRET;
 
 const addr = () => ethers.Wallet.createRandom().address;
 const NOW = 1_800_000_000_000; // a fixed "now" (ms) for the pure checks
