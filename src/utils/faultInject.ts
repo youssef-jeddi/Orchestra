@@ -9,12 +9,14 @@
 // over-cap / owner-sign path without needing ~$1000 of Sepolia ETH (see remainingToday).
 // `killswitch-read` makes the global kill-switch flag unreadable (the bridge then starts paused);
 // `activity-write` makes saving a spend record fail (that wallet's automatic actions then pause).
+// `owner-sign-tamper` makes an over-cap offer hold an addOwnerWithThreshold on the account instead
+// of the payment (what a hacked bridge could do), to see /simple refuse to sign it (ORC-113).
 // Never usable in production: ignored unless NODE_ENV isn't "production" and the storage is local
 // or in memory, and the bridge refuses to start with it set in production (faultInjectProblem).
 
-export type Fault = "profile-read" | "activity-read" | "profile-timeout" | "activity-timeout" | "execute" | "price-read" | "price-stale" | "remaining-zero" | "killswitch-read" | "activity-write";
+export type Fault = "profile-read" | "activity-read" | "profile-timeout" | "activity-timeout" | "execute" | "price-read" | "price-stale" | "remaining-zero" | "killswitch-read" | "activity-write" | "owner-sign-tamper";
 
-const FAULTS: readonly string[] = ["profile-read", "activity-read", "profile-timeout", "activity-timeout", "execute", "price-read", "price-stale", "remaining-zero", "killswitch-read", "activity-write"];
+const FAULTS: readonly string[] = ["profile-read", "activity-read", "profile-timeout", "activity-timeout", "execute", "price-read", "price-stale", "remaining-zero", "killswitch-read", "activity-write", "owner-sign-tamper"];
 
 function requested(env: NodeJS.ProcessEnv): string[] {
   return (env.ORCHESTRA_FAULT_INJECT ?? "").split(",").map((s) => s.trim()).filter(Boolean);

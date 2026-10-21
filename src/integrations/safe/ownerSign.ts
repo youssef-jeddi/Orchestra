@@ -14,6 +14,7 @@ import { safeGasLimit } from "./transaction";
 import { safeCallFor, type SafeCall } from "./spendingModule";
 import { recordActivity, spendActivity } from "../../policy/store";
 import { safeErr } from "../../utils/redact";
+import { faultOn } from "../../utils/faultInject";
 
 export const OWNER_SIGN_TTL_MS = 10 * 60_000;
 
@@ -51,6 +52,9 @@ export interface OwnerSignRecord {
   valueUsd: number;
   to?: string;
   token?: string;
+  /** The amount and symbol the plan says it sends; the browser checks them against the decoded transaction (ORC-113). */
+  amount?: string;
+  symbol?: string;
   expiresAt: number;
   status: "pending" | "executing" | "executed" | "expired";
 }
@@ -62,8 +66,13 @@ export function safeTxHashOf(domain: OwnerSignRecord["domain"], message: OwnerSi
   return ethers.TypedDataEncoder.hash(domain, SAFE_TX_TYPES, message);
 }
 
-/** What the frontend gets: enough to ask the wallet for a signature, nothing it could swap. */
+/**
+ * What the frontend gets: enough to ask the wallet for a signature, nothing it could swap. The
+ * browser decodes `typedData` itself and refuses anything but a plain payment (ORC-113); `claim` is
+ * what the plan says it sends, which the decoded transaction must match.
+ */
 export function ownerSignView(r: OwnerSignRecord) {
+  const claim = { to: r.to, amount: r.amount, symbol: r.symbol };
   return {
     kind: "safe-owner" as const,
     id: r.id,
@@ -71,11 +80,12 @@ export function ownerSignView(r: OwnerSignRecord) {
     safeTxHash: r.safeTxHash,
     expiresAt: r.expiresAt,
     typedData: { domain: r.domain, types: SAFE_TX_TYPES, primaryType: "SafeTx", message: r.message },
+    ...(claim.to || claim.amount || claim.symbol ? { claim } : {}),
   };
 }
 
 /** Store the Safe transaction for `call` (a fresh nonce read) and return the offer to sign it. */
-export function holdOwnerSign(input: { wallet: string; safeAddress: string; summary: string; call: SafeCall & { nonce: number }; valueUsd?: number; to?: string; token?: string }, now = Date.now()): OwnerSignRecord {
+export function holdOwnerSign(input: { wallet: string; safeAddress: string; summary: string; call: SafeCall & { nonce: number }; valueUsd?: number; to?: string; token?: string; amount?: string; symbol?: string }, now = Date.now()): OwnerSignRecord {
   const { call } = input;
   const domain = { chainId: SEPOLIA_CHAIN_ID, verifyingContract: ethers.getAddress(input.safeAddress) };
   const message = {
@@ -86,16 +96,28 @@ export function holdOwnerSign(input: { wallet: string; safeAddress: string; summ
   const record: OwnerSignRecord = {
     id: crypto.randomUUID(), wallet: input.wallet.toLowerCase(), safeAddress: domain.verifyingContract,
     summary: input.summary, domain, message, safeTxHash: safeTxHashOf(domain, message),
-    valueUsd: input.valueUsd ?? 0, to: input.to, token: input.token,
+    valueUsd: input.valueUsd ?? 0, to: input.to, token: input.token, amount: input.amount, symbol: input.symbol,
     expiresAt: now + OWNER_SIGN_TTL_MS, status: "pending",
   };
   records.set(record.id, record);
   return record;
 }
 
+/**
+ * Dev-only (`ORCHESTRA_FAULT_INJECT=owner-sign-tamper`): what a hacked bridge could hold instead of
+ * the payment, an addOwnerWithThreshold on the account itself, under the same summary and claim.
+ * Lets the browser check be seen refusing it; faultOn is always off in production.
+ */
+export function tamperedCall(safeAddress: string, call: SafeCall & { nonce: number }): SafeCall & { nonce: number } {
+  const iface = new ethers.Interface(["function addOwnerWithThreshold(address owner, uint256 _threshold)"]);
+  const data = iface.encodeFunctionData("addOwnerWithThreshold", ["0x000000000000000000000000000000000000dEaD", 1]);
+  return { to: ethers.getAddress(safeAddress), value: "0", data, operation: 0, nonce: call.nonce };
+}
+
 /** Build and hold the offer for a batch the module refused. */
-export async function offerOwnerSign(wallet: string, safeAddress: string, summary: string, batch: Array<{ to: string; value: string; data: string }>, meta: { valueUsd?: number; to?: string; token?: string } = {}) {
-  const call = await safeCallFor(safeAddress, batch);
+export async function offerOwnerSign(wallet: string, safeAddress: string, summary: string, batch: Array<{ to: string; value: string; data: string }>, meta: { valueUsd?: number; to?: string; token?: string; amount?: string; symbol?: string } = {}) {
+  let call = await safeCallFor(safeAddress, batch);
+  if (faultOn("owner-sign-tamper")) call = tamperedCall(safeAddress, call);
   return ownerSignView(holdOwnerSign({ wallet, safeAddress, summary, call, ...meta }));
 }
 
