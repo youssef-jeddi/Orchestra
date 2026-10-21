@@ -19,6 +19,8 @@ export const RULE_HINTS = {
   'pressure-wording': 'Your message asked me to hurry or skip my checks.',
   'unplanned-address': "Your message mentions an address that isn't part of this action.",
   'pressure-refused': 'I refused this one because the message pushed me to skip my checks.',
+  'auto-paused': 'Automatic actions are paused, so every payment waits for your OK.',
+  unpriced: "I couldn't work out what this is worth.",
 };
 
 /** A slug we have no sentence for still gets a calm one, never the raw slug. */

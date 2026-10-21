@@ -9,8 +9,9 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { OrchestraProvider, useOrchestra } from '@/context/OrchestraContext';
 import {
   sendIntent, getPrices, getPasskeyStatus, getApproval,
-  getTelegramStatus, telegramLinkRequest, telegramLink, listPasskeys, rejectApproval, getOwnerSign, getActivity,
+  getTelegramStatus, telegramLinkRequest, telegramLink, listPasskeys, rejectApproval, getOwnerSign, getActivity, getPauseStatus,
 } from '@/lib/bridge';
+import PauseBanner from '@/components/PauseBanner';
 import { activityRow, ownerSignIdFromSearch, ACTIVITY_EMPTY, EXPIRED_OWNER_SIGN } from '@/lib/activity';
 import { signOwnerRequest } from '@/lib/signing';
 import { errorMessage } from '@/lib/ownerSign';
@@ -96,6 +97,19 @@ function SimpleChat() {
   const [passkeyReg, setPasskeyReg] = useState(false);
   const [showPasskeys, setShowPasskeys] = useState(false);
   const [showLimits, setShowLimits] = useState(false);
+
+  // Whether automatic actions are paused (ORC-39): read once signed in, every minute, after each
+  // answer from the agent and after the Limits switch or Resume. A failed read keeps the last one.
+  const [pause, setPause] = useState(null);
+  const loadPause = useCallback(() => {
+    if (!ledger.walletAddress || !session.ready) { setPause(null); return; }
+    getPauseStatus().then(setPause).catch(() => {});
+  }, [ledger.walletAddress, session.ready]);
+  useEffect(() => {
+    loadPause();
+    const id = setInterval(loadPause, 60000);
+    return () => clearInterval(id);
+  }, [loadPause]);
   const showError = useCallback((msg) => setMessages((m) => [...m, { role: 'agent', error: msg }]), []);
   const [setupOpen, setSetupOpen] = useState(false); // an email user's first-passkey steps
   const held = useRef(pendingRequest()); // the request held back until a passkey exists
@@ -132,12 +146,13 @@ function SimpleChat() {
       if (isPasskeyRequired(data)) held.current.hold(text, history);
       setMessages((m) => [...m, { role: 'agent', data }]);
       if (shouldRefreshBalances(data)) movedFunds();
+      if ((data?.assessment?.triggered || []).includes('auto-paused')) loadPause();
     } catch (err) {
       setMessages((m) => [...m, errorMessage(err)]);
     } finally {
       setBusy(false);
     }
-  }, [ledger.walletAddress, movedFunds]);
+  }, [ledger.walletAddress, movedFunds, loadPause]);
 
   const send = useCallback(async (raw) => {
     const text = (raw ?? input).trim();
@@ -227,6 +242,16 @@ function SimpleChat() {
       setSigningIdx(null);
     }
   }, [ledger, emailWallet, session.hasPasskey, movedFunds]);
+
+  // Opened from Telegram's /resume link (?resume=1): open the Limits sheet, where Resume is.
+  useEffect(() => {
+    if (!session.ready || !ledger.walletAddress || typeof window === 'undefined') return;
+    const url = new URL(window.location.href);
+    if (url.searchParams.get('resume') !== '1') return;
+    url.searchParams.delete('resume');
+    window.history.replaceState(null, '', url.pathname + url.search + url.hash);
+    setShowLimits(true);
+  }, [session.ready, ledger.walletAddress]);
 
   // Opened from the Telegram link (?ownerSign=<id>): show the held request again with its Sign button.
   // The id is removed from the address first, so a refresh doesn't ask again.
@@ -381,6 +406,8 @@ function SimpleChat() {
         )}
       </header>
 
+      {connected && session.ready && <PauseBanner ledger={ledger} status={pause} onChange={loadPause} buttonStyle={approveBtn} />}
+
       {connected && session.ready && needsFirstPasskey && setupOpen && (
         verifyStep.kind === 'email'
           ? <EmailPasskeySetup wallet={ledger.walletAddress} onDone={passkeyAdded} onClose={() => setSetupOpen(false)}
@@ -396,7 +423,7 @@ function SimpleChat() {
         <PasskeyPanel onAdd={registerPk} adding={addingPasskey} onChange={refreshPasskeyStatus} onClose={() => setShowPasskeys(false)} onError={showError} />
       )}
       {connected && session.ready && showLimits && (
-        <LimitsSheet ledger={ledger} onClose={() => setShowLimits(false)} buttonStyle={approveBtn} />
+        <LimitsSheet ledger={ledger} onClose={() => setShowLimits(false)} buttonStyle={approveBtn} onPauseChange={loadPause} />
       )}
       {connected && session.ready && <SafeSetup safe={safe} canFund={userMaySign({ emailWallet, hasPasskey: session.hasPasskey }, 'deposit')} ledger={ledger} onMoved={movedFunds} onError={(msg) => setMessages((m) => [...m, { role: 'agent', error: msg }])} />}
 
