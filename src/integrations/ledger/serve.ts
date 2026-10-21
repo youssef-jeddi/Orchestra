@@ -76,8 +76,14 @@ import {
   sendLinkMessage,
   sendText,
   startTelegramBot,
+  broadcastText,
   type DecisionHandler,
+  type CommandHandler,
 } from "../telegram";
+import { runCommand, resumeLink } from "../telegram/commands";
+import { requireAdmin, adminConfigWarning, isAdminChat } from "../../auth/admin";
+import { loadGlobalSwitch, globalPause, globalSwitchView, setGlobalSwitch, cleanReason, pauseFor, pauseStatus, pauseWallet } from "../../policy/killSwitch";
+import { decideWithReservation } from "../../policy/reservations";
 import {
   registrationOptions,
   verifyRegistration,
@@ -350,6 +356,8 @@ app.get("/nonce/:address", requireSession, async (req, res) => {
 // questions (price, help, clarifications) never wait on the network.
 app.post("/intent", async (req, res) => {
   const started = Date.now();
+  // The automatic spend this request reserved (ORC-40 fix B), dropped once it's recorded or failed.
+  let releaseReservation = () => {};
   // One summary line per request (kind, outcome, risk, timings, model) and a short id on the others.
   // Never the message, plan summaries, recipients or full addresses (see utils/redact.ts).
   const rid = requestId();
@@ -512,7 +520,16 @@ app.post("/intent", async (req, res) => {
       ...storedProfile,
       knownAddresses: [...(storedProfile.knownAddresses ?? []), ...[wallet, safeAddress].filter((a): a is string => !!a)],
     };
-    const decision = assessAction(action, { profile, history: activity });
+    // The kill switch (ORC-39): global, this wallet's own, or a spend record that couldn't be saved.
+    const paused = pauseFor(wallet, storedProfile.paused);
+    // One verdict at a time per wallet, counting automatic spends still in progress (ORC-40 fix B).
+    const reserved = await decideWithReservation(
+      wallet, action.valueUsd,
+      async () => (wallet ? getRecentActivity(wallet) : activity),
+      (history) => assessAction(action, { profile, history, paused }),
+    );
+    releaseReservation = reserved.release;
+    const decision = reserved.decision;
     const { verdict, riskScore } = decision;
     li.riskScore = riskScore;
     console.log(`[intent ${rid}] ${intentType} → ${verdict} (risk ${riskScore}) rules: ${decision.triggered.length ? decision.triggered.join(",") : "none"}`);
@@ -699,6 +716,10 @@ app.post("/intent", async (req, res) => {
     // The detail stays in the log, without the user's message or full addresses; the user gets a plain sentence.
     console.error(`[intent ${rid}] Pipeline error: ${err?.name ?? "Error"}: ${safeErr(err)}`);
     res.status(500).json({ error: INTENT_FALLBACK_ERROR });
+  } finally {
+    // An executed spend is in the activity list by now (recordActivity adds it at once), so the
+    // reservation can go; a failed or held one never counted.
+    releaseReservation();
   }
 });
 
@@ -975,6 +996,59 @@ app.post("/approvals/:id/reject", requireSession, async (req, res) => {
     console.log(`[approval] ${a.id} declined by ${shortAddr(a.wallet)} in the app`);
     res.json(approvalView(a));
   } catch (e: any) { sendError(res, e); }
+});
+
+// ─── Kill switch (ORC-39) ───
+// What /simple shows: whether this wallet's automatic actions are paused (by its owner, which the
+// owner can undo with Resume in the Limits sheet), or for everyone (only the team can undo that).
+app.get("/pause", requireSession, async (_req, res) => {
+  try {
+    res.json(await pauseStatus(res.locals.wallet as string));
+  } catch (e: any) { sendError(res, e); }
+});
+
+const GLOBAL_PAUSED_NOTICE = "⏸ Orchestra has paused automatic actions for everyone for now. Every payment, swap or liquidity change needs your OK until they're back on. Your money is where it was.";
+const GLOBAL_RESUMED_NOTICE = "▶️ Orchestra turned automatic actions back on. Small payments within your limits run on their own again (unless you paused them yourself).";
+
+/** Turn the global switch on or off and tell every linked Telegram chat. */
+async function switchGlobal(on: boolean, by: "admin-endpoint" | "admin-telegram", reason?: string) {
+  const rec = await setGlobalSwitch(on, by, reason);
+  broadcastText(on ? GLOBAL_PAUSED_NOTICE : GLOBAL_RESUMED_NOTICE)
+    .then((n) => { if (n) console.log(`[kill-switch] notice sent to ${n} Telegram chat(s)`); })
+    .catch(() => {});
+  return rec;
+}
+
+// The team's switch for everyone. Off (404) unless ADMIN_TOKEN is set; see auth/admin.ts.
+app.get("/admin/kill-switch", requireAdmin, (_req, res) => {
+  res.json(globalSwitchView());
+});
+
+app.post("/admin/kill-switch", requireAdmin, async (req, res) => {
+  const on = req.body?.on;
+  if (typeof on !== "boolean") { res.status(400).json({ error: "Send {\"on\": true} to pause automatic actions for everyone, or {\"on\": false} to turn them back on." }); return; }
+  try {
+    await switchGlobal(on, "admin-endpoint", cleanReason(req.body?.reason));
+    res.json(globalSwitchView());
+  } catch (e: any) {
+    console.error(`[admin] couldn't save the kill switch: ${safeErr(e)}`);
+    res.status(503).json({
+      error: on
+        ? "Automatic actions are paused on this server, but the switch couldn't be saved, so a restart would undo it. Try again."
+        : "The switch couldn't be saved, so automatic actions stay paused. Try again.",
+      ...globalSwitchView(),
+    });
+  }
+});
+
+// /pause, /resume, /status, and /pauseall, /resumeall from ADMIN_CHAT_IDS (see telegram/commands.ts).
+const onTelegramCommand: CommandHandler = ({ text, chatId, wallet }) => runCommand(text, chatId, wallet, {
+  isAdminChat: (id) => isAdminChat(id),
+  pauseWallet: (w) => pauseWallet(w, "telegram"),
+  status: (w) => pauseStatus(w),
+  globalPaused: () => !!globalPause(),
+  setGlobal: async (on) => { await switchGlobal(on, "admin-telegram"); },
+  resumeLink: () => resumeLink(),
 });
 
 // ─── Telegram linking ───
@@ -1306,8 +1380,16 @@ app.get("/health", (_req, res) => {
 
 // ─── Start ───
 // Saved approvals are loaded first; if storage can't be read the bridge refuses to start
-// rather than pretend nothing is pending.
-loadApprovals().then(() => server.listen(PORT, "0.0.0.0", () => {
+// rather than pretend nothing is pending. The global kill switch is read next: if it can't be,
+// the bridge starts with automatic actions paused (it retries the read in the background).
+{
+  const warning = adminConfigWarning();
+  if (warning) console.warn(`[admin] ${warning}`);
+}
+loadApprovals().then(() => loadGlobalSwitch()).then((switchRead) => {
+  if (!switchRead) console.warn("[kill-switch] starting with automatic actions PAUSED for everyone: the switch couldn't be read");
+  else if (globalPause()) console.warn("[kill-switch] automatic actions are PAUSED for everyone (the global switch is on)");
+}).then(() => server.listen(PORT, "0.0.0.0", () => {
   const addr = server.address();
   console.log(`\n  ⚡ SafeSwarm Ledger Bridge`);
   console.log(`  ─────────────────────────`);
@@ -1318,7 +1400,7 @@ loadApprovals().then(() => server.listen(PORT, "0.0.0.0", () => {
   console.log();
   // Warm the price cache at startup.
   refreshPrices().catch(() => {});
-  startTelegramBot(onTelegramDecision);
+  startTelegramBot(onTelegramDecision, onTelegramCommand);
 })).catch((err) => {
   console.error(`[approval] couldn't read the saved approvals, so the bridge won't start: ${safeErr(err)}`);
   process.exit(1);

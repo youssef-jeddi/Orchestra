@@ -10,7 +10,7 @@
 // would need a shared store (see the "Lightweight DB" option).
 
 import { read, write, readMany, append } from "../integrations/zero-g/storage";
-import type { PolicyProfile, ActivityRecord, ActivitySource } from "./index";
+import type { PolicyProfile, ActivityRecord, ActivitySource, PauseInfo } from "./index";
 import { injectFault } from "../utils/faultInject";
 import { withTimeout } from "../utils/rpc";
 import { safeErr } from "../utils/redact";
@@ -23,6 +23,12 @@ const profileCache = new Map<string, { value: PolicyProfile; expires: number }>(
 const activityCache = new Map<string, ActivityRecord[]>();
 /** Spend recorded while the history couldn't be loaded; merged in on the next successful load. */
 const unsynced = new Map<string, ActivityRecord[]>();
+/**
+ * Spends whose storage write failed (ORC-40 fix C). Memory still counts them, but a restart would
+ * forget them and the day's total would read too low, so the wallet's automatic actions stay
+ * paused (see hasUnsavedSpend) until a retry saves them.
+ */
+const unsaved = new Map<string, ActivityRecord[]>();
 
 const profileKey = (wallet: string) => `user:profile:${wallet.toLowerCase()}`;
 
@@ -61,6 +67,18 @@ export async function updateUserProfile(wallet: string, change: (profile: Record
   });
   profileLocks.set(key, run);
   return run;
+}
+
+/**
+ * The wallet's own pause from its stored profile (ORC-39). Missing means not paused; `{ on: false }`
+ * means resumed; `{ on: true }` is a pause; anything else (an old or damaged value) can't be trusted
+ * to mean "on", so it counts as paused too.
+ */
+export function walletPauseOf(profile: Record<string, any>): PauseInfo | null {
+  const v = profile?.autoPause;
+  if (v === undefined || v === null) return null;
+  if (typeof v === "object" && v.on === false) return null;
+  return { scope: "wallet", cause: typeof v === "object" && v.on === true ? "user" : "unreadable" };
 }
 
 // ── Known recipients: addresses the account has actually sent to ──
@@ -113,7 +131,8 @@ export async function getPolicyProfile(wallet?: string): Promise<PolicyProfile> 
   const stored = p.policy && typeof p.policy === "object" ? (p.policy as PolicyProfile) : {};
   // `policy.knownAddresses` may have been written through the API (older versions accepted any
   // field): ignore it and use only what the server recorded itself.
-  const value: PolicyProfile = { ...stored, knownAddresses: recipientsOf(p) };
+  // `paused` is set last, from the server's own field, so a stale `policy.paused` can't override it.
+  const value: PolicyProfile = { ...stored, knownAddresses: recipientsOf(p), paused: walletPauseOf(p) };
   profileCache.set(key, { value, expires: now + PROFILE_TTL_MS });
   return value;
 }
@@ -172,7 +191,7 @@ export async function recordActivity(wallet: string, rec: ActivityRecord): Promi
   if (!list) {
     // The history can't be read right now: keep this spend aside so it still counts once it can.
     unsynced.set(key, [...(unsynced.get(key) ?? []), rec]);
-    append(`activity:${key}`, rec).catch(() => {});
+    saveSpend(key, rec);
     return;
   }
 
@@ -186,7 +205,54 @@ export async function recordActivity(wallet: string, rec: ActivityRecord): Promi
   });
   activityCache.set(key, trimmed);
 
-  append(`activity:${key}`, rec).catch(() => {});
+  saveSpend(key, rec);
+}
+
+/** Write one spend to storage; a failure keeps it in `unsaved`, which pauses the wallet's automatic actions. */
+function saveSpend(key: string, rec: ActivityRecord): void {
+  (async () => {
+    await injectFault("activity-write");
+    await append(`activity:${key}`, rec);
+  })().catch((err) => {
+    console.error(`[policy] couldn't save a spend record (${safeErr(err)}); automatic actions are paused for this wallet until it is saved`);
+    unsaved.set(key, [...(unsaved.get(key) ?? []), rec]);
+  });
+}
+
+/** A spend of this wallet couldn't be saved yet: its automatic actions are paused (ORC-40 fix C). */
+export function hasUnsavedSpend(wallet: string): boolean {
+  return (unsaved.get(wallet.toLowerCase())?.length ?? 0) > 0;
+}
+
+const retrying = new Map<string, Promise<void>>();
+
+/**
+ * Try again to save the wallet's unsaved spends, in order; the ones that still fail stay (and the
+ * wallet stays paused). One retry per wallet at a time, so two requests don't write a row twice.
+ * Never rejects.
+ */
+export function retryUnsavedSpends(wallet: string): Promise<void> {
+  const key = wallet.toLowerCase();
+  if (!unsaved.get(key)?.length) return Promise.resolve();
+  const running = retrying.get(key);
+  if (running) return running;
+  const run = (async () => {
+    for (const rec of [...(unsaved.get(key) ?? [])]) {
+      try {
+        await injectFault("activity-write");
+        await append(`activity:${key}`, rec);
+        unsaved.set(key, (unsaved.get(key) ?? []).filter((r) => r !== rec));
+      } catch {
+        return; // still failing: keep the rest for the next try
+      }
+    }
+    if (!unsaved.get(key)?.length) {
+      unsaved.delete(key);
+      console.log("[policy] unsaved spend records are now saved; automatic actions resume for this wallet");
+    }
+  })().finally(() => retrying.delete(key));
+  retrying.set(key, run);
+  return run;
 }
 
 /** What the limit rules need for one request; `ok: false` when either part couldn't be read in time. */
@@ -199,7 +265,9 @@ export type PolicyInputs = { ok: true; profile: PolicyProfile; activity: Activit
  */
 export async function readPolicyInputs(wallet: string | undefined, timeoutMs = 2_000): Promise<PolicyInputs> {
   if (!wallet) return { ok: true, profile: {}, activity: undefined };
-  const inputs = Promise.all([getPolicyProfile(wallet), getRecentActivity(wallet)]).then(
+  // A spend that couldn't be saved earlier gets another try first; while it stays unsaved the
+  // wallet is paused (hasUnsavedSpend), so a failure here doesn't stop the read.
+  const inputs = retryUnsavedSpends(wallet).then(() => Promise.all([getPolicyProfile(wallet), getRecentActivity(wallet)])).then(
     ([profile, activity]): PolicyInputs => ({ ok: true, profile, activity }),
     (err): PolicyInputs => { console.error(`[policy] couldn't read limits or activity: ${safeErr(err)}`); return { ok: false }; },
   );
@@ -211,4 +279,5 @@ export function _resetPolicyStoreCache(): void {
   profileCache.clear();
   activityCache.clear();
   unsynced.clear();
+  unsaved.clear();
 }

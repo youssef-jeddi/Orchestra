@@ -45,7 +45,7 @@ test("a fresh wallet gets the safe defaults even when the shared record holds a 
   assert.equal(profile.maxAutoTxPerDay, undefined);
   assert.equal(profile.typicalMaxUsd, undefined);
   assert.deepEqual(await readUserProfile(w), {});
-  assert.deepEqual(await readLimits(w), { policy: {}, knownRecipients: [] });
+  assert.deepEqual(await readLimits(w), { policy: {}, knownRecipients: [], paused: false });
   await sharedUntouched();
 });
 

@@ -28,6 +28,8 @@ export const RULE_LABELS = {
   'pressure-wording': 'Pushy wording',
   'unplanned-address': 'Extra address in message',
   'pressure-refused': 'Refused for safety',
+  'auto-paused': 'Automatic actions paused',
+  unpriced: "Couldn't work out the value",
 };
 
 /** A slug we have no wording for still gets a readable chip, never the raw slug. */

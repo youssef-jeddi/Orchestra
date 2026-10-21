@@ -13,6 +13,7 @@ import {
   type PolicyProfile,
   type ActivityRecord,
   type IntentType,
+  type PauseInfo,
 } from "../policy";
 import { messageSignals, type MessageSignals } from "../policy/messageSignals";
 import { planIntent, type PlanOptions, type PlanResult } from "./planner";
@@ -154,6 +155,8 @@ export interface AssessInput {
   profile?: PolicyProfile;
   history?: ActivityRecord[];
   now?: number;
+  /** The kill switch (ORC-39): while set, nothing runs on its own. Deposits are signed by the user and unaffected. */
+  paused?: PauseInfo | null;
 }
 
 /** Deterministic verdict for an action. The LLM has no input here beyond the resolved plan. */
@@ -197,6 +200,7 @@ export function assessAction(action: ActionPlan, input: AssessInput = {}): Polic
     now: input.now,
     signals: action.signals,
     movesAllFunds: action.movesAllFunds,
+    paused: input.paused,
   });
   return { ...decision, typicalMaxUsd };
 }

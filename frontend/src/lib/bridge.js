@@ -202,6 +202,11 @@ export async function saveLimitChange(change) {
   return bridgeFetch('/policy', { method: 'POST', body: JSON.stringify(change) });
 }
 
+/** Whether automatic actions are paused: { wallet, global, unreadable, other } (ORC-39). */
+export async function getPauseStatus() {
+  return bridgeFetch('/pause');
+}
+
 export async function getHabit(walletAddress) {
   return bridgeFetch(`/habit?wallet=${walletAddress}`);
 }

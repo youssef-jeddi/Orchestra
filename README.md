@@ -63,9 +63,28 @@ The verdict is deterministic, explainable and fail-closed (`src/policy/index.ts`
 | First send to an address the account hasn't sent to before *(always on, sends only)* | `NEEDS_APPROVAL` |
 | Too many auto-approvals today *(if configured)* | `NEEDS_APPROVAL` |
 | More than 10× your typical transaction (median of recent activity, once there are 5+) | `NEEDS_APPROVAL` |
+| Automatic actions **paused** (kill switch: for everyone, or for your wallet), or the switch can't be read | `NEEDS_APPROVAL` |
+| A value that can't be worked out (no price) | `NEEDS_APPROVAL` |
 | Otherwise | `AUTO_EXECUTE` |
 
 Rules can only escalate, never weaken. A recipient counts as known only after a send to it has gone through (the server records it in its own field of the profile, not in the policy you can edit); your own wallet and your own account are always known, and a daily limit of $0 means every payment asks. Each wallet has its own policy (`user:profile:<wallet>`), editable from the policy panel. Deposits from your wallet into your own account are exempt from the agent limits: you sign them yourself.
+
+**Fails closed.** Nothing that spends is built when the limits, the day's activity or a fresh price can't be read. Prices are fresh only when both ETH and USDC came back within 5 minutes; a swap or liquidity check that has no price to compare with refuses. One wallet's verdicts are taken one at a time, counting automatic spends still in progress, so two requests at once can't run past the daily limit together. A spend record that couldn't be saved pauses that wallet's automatic actions until it is saved. `npm run test:fail-closed` checks each dependency (price feed, storage, RPC, quote API, language model).
+
+### Kill switch
+
+One action stops everything the agent would do on its own; while it is on, every payment, swap or liquidity change waits for the owner's OK (approvals, owner-signed sends and deposits keep working; what would be refused is still refused).
+
+- **For everyone:** `POST /admin/kill-switch` with `{"on": true, "reason": "…"}` (or `false` to turn it off), authorised with `Authorization: Bearer $ADMIN_TOKEN`; `GET /admin/kill-switch` shows it. Chats listed in `ADMIN_CHAT_IDS` can send `/pauseall` and `/resumeall` to the bot. Every linked Telegram chat is told. Without `ADMIN_TOKEN` the routes answer 404. If the switch can't be read (also at startup), automatic actions stay paused.
+- **For one wallet:** `/pause` in the linked Telegram chat (instant) or **Pause automatic actions** in the Limits sheet. Turning it back on (**Resume**, in the sheet or the banner) needs the same proof as raising a limit: the passkey, or a wallet signature when the wallet has none; an email sign-in without a passkey can't resume. `/resume` in Telegram only sends the link. `/status` says what is on.
+- Every change is kept in `audit:killswitch:global` / `audit:killswitch:<wallet>`, and the wallet's Telegram chat is told.
+
+```bash
+# from the bridge's machine, with ADMIN_TOKEN in the environment
+curl -s -X POST https://bridge.example/admin/kill-switch -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"on":true,"reason":"price feed looks wrong"}'
+```
+
+It stops the server from running anything on its own; a leaked agent key used directly is out of its reach (that's the on-chain `SPENDING_MODULE_ADDRESS` cap).
 
 ---
 
@@ -170,6 +189,8 @@ cp .env.example .env
 | `ENABLE_MOCK_TRADE=1` | Local dev only: enables `POST /mock-trade`. Off by default and ignored when `NODE_ENV=production` |
 | `LOG_USER_MESSAGES=1` | Local dev only: also logs the text of each chat message. Off by default and ignored when `NODE_ENV=production`; the log otherwise holds no message text, no plan summaries, no recipients and only shortened wallet addresses (`0x5879…5723`), with a short request id, outcome, risk score and timings per `/intent` request |
 | `SESSION_SECRET`, `SESSION_TTL_HOURS` | Only to share sessions across instances / change the 8h lifetime |
+| `ADMIN_TOKEN` | *Optional.* Turns on the team's kill switch, `POST/GET /admin/kill-switch` (see [Kill switch](#kill-switch)). At least 32 characters: `openssl rand -hex 32`. Unset (or shorter), the routes answer 404 and nothing else changes. Keep it secret: it can pause and resume automatic actions for everyone (it can't move funds) |
+| `ADMIN_CHAT_IDS` | *Optional.* Telegram chat ids, comma-separated, that may send `/pauseall` and `/resumeall` to the bot (needs `TELEGRAM_BOT_TOKEN`). Unset, no chat can. Your chat id: message @userinfobot |
 
 ### Run
 
@@ -207,7 +228,7 @@ Passkeys are bound to a domain: if the address changes (quick tunnels change on 
 
 ### Testing failures (development only)
 
-To see how the app behaves when the stored limits or the day's activity can't be read, start the bridge with `ORCHESTRA_FAULT_INJECT` set to one or more of `profile-read`, `activity-read` (the read fails), `profile-timeout`, `activity-timeout` (it never answers, so the 2-second timeout fires), comma-separated:
+To see how the app behaves when the stored limits or the day's activity can't be read, start the bridge with `ORCHESTRA_FAULT_INJECT` set to one or more of `profile-read`, `activity-read` (the read fails), `profile-timeout`, `activity-timeout` (it never answers, so the 2-second timeout fires), comma-separated. `price-read` / `price-stale` take the price away, `killswitch-read` makes the bridge start with automatic actions paused, and `activity-write` makes saving a spend fail (that wallet's automatic actions then pause):
 
 ```bash
 ORCHESTRA_FAULT_INJECT=profile-read PORT=3011 STORAGE_BACKEND=memory TELEGRAM_BOT_TOKEN= npx tsx src/integrations/ledger/serve.ts

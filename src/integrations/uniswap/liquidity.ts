@@ -89,9 +89,11 @@ export function resolveMaxLpDeviation(configured: unknown = process.env.LP_MAX_P
 
 /** Why the pool's price is unacceptable, or null. Unknown market prices skip the check. */
 export function lpPriceProblem(sqrtPriceX96: bigint, t0: LpSide, t1: LpSide, maxDeviation = resolveMaxLpDeviation()): string | null {
+  if (maxDeviation === Infinity) return null; // the operator turned the check off (LP_MAX_PRICE_DEVIATION)
   const m0 = getPriceUsd(t0.symbol);
   const m1 = getPriceUsd(t1.symbol);
-  if (!(m0 > 0 && m1 > 0) || maxDeviation === Infinity) return null;
+  // No market price: the pool's price can't be checked, so nothing is added (ORC-40).
+  if (!(m0 > 0 && m1 > 0)) return "Not adding liquidity: I can't check the market price right now, so I can't tell whether the pool's price is fair. Nothing was done. Please try again in a moment.";
   const pool = poolPrice(sqrtPriceX96, t0, t1);
   const market = m1 / m0;
   const deviation = Math.max(pool / market, market / pool) - 1;

@@ -5,6 +5,7 @@
 // count of automatic payments, what it has learned about their usual amounts, and the addresses
 // they've sent to (removable, never addable by hand). Words and form logic live in lib/limits.js;
 // the server decides whether a change needs proof (passkey, or a wallet signature without a passkey).
+// The "Pause automatic actions" switch (ORC-39) pauses at once; turning it off is like a raise.
 
 import { useState, useEffect, useCallback } from 'react';
 import { getPolicy, getHabit } from '@/lib/bridge';
@@ -12,8 +13,9 @@ import { saveLimits } from '@/lib/limitsFlow';
 import { shortAddress } from '@/lib/onboarding';
 import { LIMITS_TEXT, MAX_DAILY, MAX_COUNT, NO_NOTE, habitLine, confirmingText, removeConfirmText, formFrom, formAfterSave, changesFrom, noteAfterAction } from '@/lib/limits';
 import { HINT_COLOR, HINT_SIZE } from '@/lib/contrast';
+import { PAUSE_TEXT, pauseChange } from '@/lib/pause';
 
-export default function LimitsSheet({ ledger, onClose, buttonStyle }) {
+export default function LimitsSheet({ ledger, onClose, buttonStyle, onPauseChange }) {
   const wallet = ledger.walletAddress;
   const [policy, setPolicy] = useState(null);
   const [recipients, setRecipients] = useState([]);
@@ -22,10 +24,12 @@ export default function LimitsSheet({ ledger, onClose, buttonStyle }) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState(NO_NOTE);
   const [confirming, setConfirming] = useState(null); // the saved address being removed, asked about inline
+  const [paused, setPaused] = useState(false);
 
   const show = useCallback((limits) => {
     setPolicy(limits.policy);
     setRecipients(limits.knownRecipients || []);
+    setPaused(!!limits.paused);
     setForm(formFrom(limits.policy));
   }, []);
 
@@ -41,11 +45,13 @@ export default function LimitsSheet({ ledger, onClose, buttonStyle }) {
   const run = async (change, { resetOnFail = false } = {}) => {
     setBusy(true);
     setNote(NO_NOTE);
+    const resuming = change.pauseAuto === false;
     try {
-      const out = await saveLimits(ledger, change, (method) => setNote({ text: confirmingText(method), bad: false }));
+      const out = await saveLimits(ledger, change, (method) => setNote({ text: confirmingText(method, resuming ? 'resume' : 'raise'), bad: false }));
       if (out.saved) {
         show(out.limits);
-        setNote({ text: LIMITS_TEXT.saved, bad: false });
+        setNote({ text: change.pauseAuto === undefined ? LIMITS_TEXT.saved : (out.limits.paused ? PAUSE_TEXT.paused : PAUSE_TEXT.resumed), bad: false });
+        if (change.pauseAuto !== undefined) onPauseChange?.();
       } else {
         if (resetOnFail) setForm(formAfterSave(out, policy));
         setNote({ text: LIMITS_TEXT.cancelled, bad: false });
@@ -79,6 +85,13 @@ export default function LimitsSheet({ ledger, onClose, buttonStyle }) {
       {!policy && !note.bad && <p style={{ fontSize: HINT_SIZE, color: HINT_COLOR, margin: 0 }}>Loading…</p>}
       {policy && (
         <>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#E8E4DE', cursor: busy ? 'default' : 'pointer' }}>
+            <input type="checkbox" checked={paused} disabled={busy}
+              onChange={(e) => { moveOn(); run(pauseChange(e.target.checked)); }} />
+            {PAUSE_TEXT.toggle}
+          </label>
+          <p style={{ margin: '4px 0 12px', fontSize: HINT_SIZE, color: HINT_COLOR }}>{PAUSE_TEXT.toggleHint}</p>
+
           <label style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 13, color: '#B9B5AE' }}>
             {LIMITS_TEXT.daily}
             <input type="number" min="0" max={MAX_DAILY} value={form.daily} disabled={busy}

@@ -62,11 +62,12 @@ export function habitLine(habit) {
   return `You usually send around ${formatUsd(habit.typicalMaxUsd)}, so I'll ask before anything much bigger.`;
 }
 
-/** What to say while the proof for raising a limit is being collected. */
-export function confirmingText(method) {
+/** What to say while the proof for raising a limit (or resuming, `what: 'resume'`) is being collected. */
+export function confirmingText(method, what = 'raise') {
+  const lead = what === 'resume' ? 'Turning automatic actions back on needs your OK.' : 'Raising a limit needs your OK.';
   return method === 'wallet'
-    ? 'Raising a limit needs your OK. Check your wallet to sign.'
-    : `Raising a limit needs your OK. Confirm with your passkey (${PASSKEY_MEANS}).`;
+    ? `${lead} Check your wallet to sign.`
+    : `${lead} Confirm with your passkey (${PASSKEY_MEANS}).`;
 }
 
 /** Cancelling the passkey or wallet prompt changes nothing. */
