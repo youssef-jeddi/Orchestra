@@ -173,7 +173,7 @@ class ZeroGStorage {
 //   memory           memory only — tests and the eval, so they never touch real data
 //   0g               0G decentralized storage; opt-in only, and it needs the ZERO_G_* keys
 // 0G is never picked implicitly: a stray ZERO_G_* value in .env can't change where data goes.
-let storageBackend: {
+type StorageBackend = {
   write: (key: string, data: unknown) => Promise<void>;
   read: (key: string) => Promise<unknown | null>;
   readMany: (collection: string, filter?: Record<string, unknown>) => Promise<unknown[]>;
@@ -182,32 +182,33 @@ let storageBackend: {
   clear: () => Promise<void>;
 };
 
-const STORAGE_MODE = (process.env.STORAGE_BACKEND || 'file').trim().toLowerCase();
+function createStorageBackend(): StorageBackend {
+  const mode = (process.env.STORAGE_BACKEND || 'file').trim().toLowerCase();
 
-if (STORAGE_MODE === '0g') {
-  if (!(process.env.ZERO_G_PRIVATE_KEY && process.env.ZERO_G_RPC_URL && process.env.ZERO_G_INDEXER_URL)) {
-    throw new Error('[Storage] STORAGE_BACKEND=0g needs ZERO_G_PRIVATE_KEY, ZERO_G_RPC_URL and ZERO_G_INDEXER_URL');
+  if (mode === '0g') {
+    if (!(process.env.ZERO_G_PRIVATE_KEY && process.env.ZERO_G_RPC_URL && process.env.ZERO_G_INDEXER_URL)) {
+      throw new Error('[Storage] STORAGE_BACKEND=0g needs ZERO_G_PRIVATE_KEY, ZERO_G_RPC_URL and ZERO_G_INDEXER_URL');
+    }
+    console.log('[Storage] Using 0G decentralized storage');
+    const s = new ZeroGStorage();
+    return {
+      write: s.write.bind(s),
+      read: s.read.bind(s),
+      readMany: s.readMany.bind(s),
+      append: s.append.bind(s),
+      delete: s.delete.bind(s),
+      clear: s.clear.bind(s),
+    };
   }
-  console.log('[Storage] Using 0G decentralized storage');
-  const s = new ZeroGStorage();
-  storageBackend = {
-    write: s.write.bind(s),
-    read: s.read.bind(s),
-    readMany: s.readMany.bind(s),
-    append: s.append.bind(s),
-    delete: s.delete.bind(s),
-    clear: s.clear.bind(s),
-  };
-} else {
-  if (STORAGE_MODE !== 'file' && STORAGE_MODE !== 'memory') {
-    throw new Error(`[Storage] unknown STORAGE_BACKEND "${STORAGE_MODE}" (use file, memory or 0g)`);
+  if (mode !== 'file' && mode !== 'memory') {
+    throw new Error(`[Storage] unknown STORAGE_BACKEND "${mode}" (use file, memory or 0g)`);
   }
-  const file = STORAGE_MODE === 'file'
+  const file = mode === 'file'
     ? path.resolve(process.env.STORAGE_FILE || path.join(process.cwd(), '.orchestra', 'storage.json'))
     : null;
   console.log(file ? `[Storage] Using local storage: ${file}` : '[Storage] Using in-memory storage (nothing survives a restart)');
   const local = new LocalStorage(file);
-  storageBackend = {
+  return {
     write: local.write.bind(local),
     read: local.read.bind(local),
     readMany: local.readMany.bind(local),
@@ -216,6 +217,15 @@ if (STORAGE_MODE === '0g') {
     clear: local.clear.bind(local),
   };
 }
+
+// One backend per process, kept on globalThis. Under some runtimes (tsx on Node 20) a module reached
+// through `await import()` can be evaluated a second time, giving a second copy of this file. With a
+// module-level store that meant two stores: one path wrote a passkey or limit the other never saw, and
+// with file storage two in-memory copies of storage.json would overwrite each other's changes.
+// Symbol.for() is process-wide, so every copy of this module finds and uses the same backend.
+const BACKEND_KEY = Symbol.for('orchestra.storage.backend');
+const processGlobal = globalThis as typeof globalThis & { [BACKEND_KEY]?: StorageBackend };
+const storageBackend: StorageBackend = (processGlobal[BACKEND_KEY] ??= createStorageBackend());
 
 export const write = storageBackend.write;
 export const read = storageBackend.read;
