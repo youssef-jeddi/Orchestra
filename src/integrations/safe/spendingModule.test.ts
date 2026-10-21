@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { ethers } from "ethers";
-import { isSpendingModuleEnabled, exceedsRemaining, remainingToday, DailyCapRevert, OVER_CAP_TEXT, OVER_CAP_NO_OWNER_TEXT } from "./spendingModule";
+import { isSpendingModuleEnabled, exceedsRemaining, remainingToday, DailyCapRevert, OVER_CAP_TEXT, OVER_CAP_NO_OWNER_TEXT, spendingModuleAddress, ModuleConfigError } from "./spendingModule";
 import { executeForAccount, type AccountExecDeps, type AccountExecInput } from "./accountExec";
 import { getRecentActivity, _resetPolicyStoreCache } from "../../policy/store";
 import { holdOwnerSign, submitOwnerSignature, getOwnerSign, ownerSignView, safeTxHashOf, clearOwnerSignRecords, SAFE_TX_TYPES, OWNER_SIGN_TTL_MS } from "./ownerSign";
@@ -49,8 +49,10 @@ test("SPENDING_MODULE_ADDRESS is read trimmed and must be a real address", () =>
     assert.equal(isSpendingModuleEnabled(), false);
     process.env.SPENDING_MODULE_ADDRESS = "  0x00000000000000000000000000000000000000c3\n";
     assert.equal(isSpendingModuleEnabled(), true);
+    // A malformed value never means "off" (that was the agent-as-owner fallback): it's on, and refuses.
     process.env.SPENDING_MODULE_ADDRESS = "0xnope";
-    assert.equal(isSpendingModuleEnabled(), false);
+    assert.equal(isSpendingModuleEnabled(), true);
+    assert.throws(() => spendingModuleAddress(), (e: any) => e instanceof ModuleConfigError && e.status === 503);
   } finally {
     if (before === undefined) delete process.env.SPENDING_MODULE_ADDRESS; else process.env.SPENDING_MODULE_ADDRESS = before;
   }
