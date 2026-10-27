@@ -24,6 +24,8 @@ import { SIGN_REFUSED, PASSKEY_PROMPT, isPasskeyRequired, shouldOfferPasskey, us
 import EmailPasskeySetup from '@/components/EmailPasskeySetup';
 import SocialPasskeySetup from '@/components/SocialPasskeySetup';
 import LimitsSheet from '@/components/LimitsSheet';
+import BackupSignIn from '@/components/BackupSignIn';
+import { hasFunds, backupPreviewEnabled } from '@/lib/backupSignIn';
 import { LIMITS_BUTTON_HINT } from '@/lib/limits';
 import { HINT_COLOR, HINT_SIZE } from '@/lib/contrast';
 import { headerState, CONNECTING_GIVE_UP_MS } from '@/lib/connection';
@@ -106,6 +108,12 @@ function SimpleChat() {
   const [passkeyReg, setPasskeyReg] = useState(false);
   const [showPasskeys, setShowPasskeys] = useState(false);
   const [showLimits, setShowLimits] = useState(false);
+  const [showAccount, setShowAccount] = useState(false); // sign-in methods and the backup sign-in (ORC-58)
+  // Dev-only: /simple?previewBackup=1 on `next dev` shows the panel and the nudge with stand-in accounts.
+  const [backupPreview, setBackupPreview] = useState(false);
+  useEffect(() => {
+    setBackupPreview(backupPreviewEnabled(process.env.NODE_ENV, window.location.search)); // read once from the address after mount
+  }, []);
 
   // Whether automatic actions are paused (ORC-39): read once signed in, every minute, after each
   // answer from the agent and after the Limits switch or Resume. A failed read keeps the last one.
@@ -349,6 +357,11 @@ function SimpleChat() {
   }, [ledger.walletAddress, emailWallet, session.hasPasskey, session.ready, accountReady]);
 
   const connected = !!ledger.walletAddress;
+  // Signed in through Privy's own wallet (passkey, email, …): the backup sign-in is offered to them only.
+  const privyEmbedded = !!PRIVY_APP_ID && connected && ledger.connectionType === 'privy';
+  // Signed in with their own wallet through Privy (MetaMask, …): the panel only says their recovery phrase is the backup.
+  const privyOwnWallet = !!PRIVY_APP_ID && connected && ledger.connectionType === 'external';
+  const accountPanel = privyEmbedded || privyOwnWallet;
   // Until the sign-in service says whether the user is already signed in, the header shows neither
   // "Sign in" nor the wallet buttons. If it never answers, the buttons appear after a few seconds.
   const [gaveUp, setGaveUp] = useState(false);
@@ -391,6 +404,7 @@ function SimpleChat() {
             )}
             {session.ready && <TelegramLink ledger={ledger} session={session} onError={(msg) => setMessages((m) => [...m, { role: 'agent', error: msg }])} />}
             {session.ready && <button onClick={() => setShowLimits((v) => !v)} style={pill(showLimits)} title={LIMITS_BUTTON_HINT}>Limits</button>}
+            {session.ready && (accountPanel || backupPreview) && <button onClick={() => setShowAccount((v) => !v)} style={pill(showAccount)} title="How you sign in, and a backup in case you lose this device">Account</button>}
             {session.ready && (passkeyReg
               ? <button onClick={() => setShowPasskeys((v) => !v)} style={pill(showPasskeys)} title="See, add or remove your passkeys">🔑 Passkeys</button>
               : <button onClick={registerPk} disabled={addBtn.disabled} style={pill(false)} title={emailWallet ? 'Add a passkey on this device' : ADD_PASSKEY_HINT}>{addBtn.label}</button>)}
@@ -402,6 +416,7 @@ function SimpleChat() {
           </div>
         ) : (
           <div style={{ display: 'flex', gap: 8 }}>
+            {backupPreview && <button onClick={() => setShowAccount((v) => !v)} style={pill(showAccount)}>Account</button>}
             <button onClick={ledger.connect} style={pill(false)}>Ledger</button>
             {PRIVY_APP_ID
               ? <button onClick={ledger.privyLogin} style={pill(true)} title="Passkey, email, or the wallet you already have">Sign in</button>
@@ -435,6 +450,11 @@ function SimpleChat() {
       )}
       {connected && session.ready && showLimits && (
         <LimitsSheet ledger={ledger} onClose={() => setShowLimits(false)} buttonStyle={approveBtn} onPauseChange={loadPause} />
+      )}
+      {/* The dev preview also shows signed out, so it can be tried on any port (Privy only allows listed origins). */}
+      {(backupPreview || (connected && session.ready && accountPanel)) && (
+        <BackupSignIn preview={backupPreview} wallet={ledger.walletAddress} funded={safe.safeStatus === 'deployed' && hasFunds(safe.balances)}
+          showPanel={showAccount} onClosePanel={() => setShowAccount(false)} buttonStyle={approveBtn} pillStyle={pill} />
       )}
       {connected && session.ready && <SafeSetup safe={safe} canFund={userMaySign({ emailWallet, hasPasskey: session.hasPasskey }, 'deposit')} ledger={ledger} onMoved={movedFunds} onError={(msg) => setMessages((m) => [...m, { role: 'agent', error: msg }])} />}
 
