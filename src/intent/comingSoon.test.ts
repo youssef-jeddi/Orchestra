@@ -1,0 +1,184 @@
+// ─── Intent — planned DeFi actions are understood, answered and never run (ORC-20) ───
+// Run with `npm run test:coming-soon`. The model is a fake (no network, no LLM): it returns the
+// planner JSON a real model would, and the test checks the reply wording and that nothing on the
+// money path (value gate, balances, ENS, positions, resolver, approvals) is ever touched.
+
+import assert from "node:assert/strict";
+import { interpretIntent } from "./pipeline";
+import { resolveSteps, type ResolveContext } from "./resolve";
+import { PlannerOutput, Step, isComingSoonStep, COMING_SOON_ACTIONS } from "./schema";
+import { describeComingSoon, describeComingSoonStep, CAN_DO_NOW } from "./comingSoon";
+import { PLANNER_SYSTEM_PROMPT } from "./prompt";
+import { setPrices } from "../policy";
+
+setPrices({ ETH: 2500, WETH: 2500, USDC: 1 });
+
+let passed = 0;
+const tests: [string, () => void | Promise<void>][] = [];
+const test = (name: string, fn: () => void | Promise<void>) => tests.push([name, fn]);
+
+/** A fake model that answers every call with `json`, and counts the calls. */
+const fakeModel = (json: unknown) => {
+  const calls = { n: 0 };
+  const completeFn = async () => {
+    calls.n++;
+    return { text: JSON.stringify(json), provider: "groq", model: "fake-model", latencyMs: 1, waitedMs: 0 } as any;
+  };
+  return { completeFn, calls };
+};
+
+/** A context where every money-path hook fails the test if it is called. */
+const trapCtx = (): ResolveContext & { touched: string[] } => {
+  const touched: string[] = [];
+  const trap = (name: string) => async (): Promise<any> => { touched.push(name); throw new Error(`${name} must not be called`); };
+  return {
+    touched,
+    connected: true,
+    getBalances: trap("getBalances"),
+    getWalletBalances: trap("getWalletBalances"),
+    getPositions: trap("getPositions"),
+    resolveEns: trap("resolveEns"),
+    valueGate: trap("valueGate"),
+  };
+};
+
+const ask = async (steps: Record<string, unknown>[]) => {
+  const { completeFn, calls } = fakeModel({ type: "actions", steps });
+  const ctx = trapCtx();
+  const r = await interpretIntent("(message)", [], ctx, { provider: "groq", model: "fake-model", completeFn });
+  assert.equal(calls.n, 1, "one model call, no repair: the planned step is valid planner output");
+  assert.deepEqual(ctx.touched, [], `money path touched: ${ctx.touched.join(", ")}`);
+  return r.outcome;
+};
+const replyText = (o: any) => {
+  assert.equal(o.kind, "reply", `expected a reply, got ${o.kind}`);
+  return o.text as string;
+};
+
+// ── Schema ──
+test("schema: every planned action is a valid step; token, amount and protocol are optional", () => {
+  for (const action of COMING_SOON_ACTIONS) {
+    assert.equal(Step.safeParse({ action }).success, true, action);
+    const s = Step.parse({ action, token: "ETH", amount: "0.1", protocol: "lido" });
+    assert.equal(isComingSoonStep(s), true, action);
+    assert.equal((s as any).unit, "token");
+  }
+});
+
+test("schema: planned steps still reject bad amounts and long protocol names", () => {
+  assert.equal(Step.safeParse({ action: "stake", token: "ETH", amount: "lots" }).success, false);
+  assert.equal(Step.safeParse({ action: "lend", token: "USDC", amount: "-5" }).success, false);
+  assert.equal(Step.safeParse({ action: "stake", protocol: "x".repeat(41) }).success, false);
+});
+
+test("schema: supported actions are not planned ones", () => {
+  for (const s of [{ action: "swap", from: "USDC", to: "ETH", amount: "1" }, { action: "deposit", token: "ETH", amount: "1" }, { action: "balance" }]) {
+    assert.equal(isComingSoonStep(Step.parse(s)), false, s.action);
+  }
+});
+
+// ── Wording ──
+test("wording: stake 0.1 ETH with Lido (the planned protocol when none is named)", async () => {
+  const text = replyText(await ask([{ action: "stake", token: "ETH", amount: "0.1" }]));
+  assert.equal(text, `I understood: stake 0.1 ETH with Lido. I can't do staking yet. ${CAN_DO_NOW}`);
+});
+
+test("wording: each planned action reads plainly", () => {
+  const d = (s: Record<string, unknown>) => describeComingSoonStep(Step.parse(s) as any);
+  assert.equal(d({ action: "unstake", token: "ETH", amount: "all" }), "unstake all your ETH from Lido");
+  assert.equal(d({ action: "lend", token: "usdc", amount: "100" }), "lend 100 USDC on Aave");
+  assert.equal(d({ action: "withdraw_lend", token: "USDC", amount: "50%" }), "take back 50% of the USDC you lent on Aave");
+  assert.equal(d({ action: "withdraw_lend" }), "take back what you lent on Aave");
+  assert.equal(d({ action: "borrow", token: "USDC", amount: "50" }), "borrow 50 USDC on Aave");
+  assert.equal(d({ action: "borrow", token: "USDC" }), "borrow USDC on Aave");
+  assert.equal(d({ action: "repay", token: "USDC", amount: "all" }), "repay all the USDC you borrowed on Aave");
+  assert.equal(d({ action: "repay" }), "repay what you borrowed on Aave");
+  assert.equal(d({ action: "deposit_yield", token: "USDC", amount: "100" }), "put 100 USDC in a savings vault to earn interest");
+  assert.equal(d({ action: "deposit_yield" }), "put money in a savings vault to earn interest");
+  assert.equal(d({ action: "withdraw_yield", token: "USDC", amount: "all" }), "take all your USDC out of your savings vault");
+  assert.equal(d({ action: "stake", token: "ETH", amount: "100", unit: "usd" }), "stake $100 of ETH with Lido");
+  assert.equal(d({ action: "stake", token: "ETH" }), "stake your ETH with Lido");
+});
+
+test("wording: a named protocol is kept; an unknown one is left out, never replaced by ours", () => {
+  const d = (s: Record<string, unknown>) => describeComingSoonStep(Step.parse(s) as any);
+  assert.equal(d({ action: "stake", token: "ETH", amount: "1", protocol: "Rocket Pool" }), "stake 1 ETH with Rocket Pool");
+  assert.equal(d({ action: "lend", token: "USDC", amount: "10", protocol: "compound" }), "lend 10 USDC on Compound");
+  assert.equal(d({ action: "deposit_yield", token: "USDC", protocol: "yearn" }), "put your USDC in a Yearn vault to earn interest");
+  assert.equal(d({ action: "stake", token: "ETH", amount: "1", protocol: "scamswap" }), "stake 1 ETH");
+});
+
+test("wording: model text is never echoed raw (token names are checked)", () => {
+  const d = (s: Record<string, unknown>) => describeComingSoonStep(Step.parse(s) as any);
+  assert.equal(d({ action: "stake", token: "SOL", amount: "2" }), "stake 2 SOL with Lido");
+  assert.equal(d({ action: "lend", token: "<b>click here</b>", amount: "2" }), "lend 2 on Aave");
+  assert.equal(d({ action: "stake", token: "ether", amount: ".5" }), "stake 0.5 ETH with Lido");
+});
+
+test("wording: several planned actions, said once per kind", () => {
+  const steps = [Step.parse({ action: "lend", token: "USDC", amount: "100" }), Step.parse({ action: "borrow", token: "ETH", amount: "0.01" })] as any;
+  assert.equal(
+    describeComingSoon(steps),
+    `I understood: lend 100 USDC on Aave, then borrow 0.01 ETH on Aave. I can't do lending yet. I can't do borrowing yet. ${CAN_DO_NOW}`
+  );
+});
+
+// ── Never on the money path ──
+for (const action of COMING_SOON_ACTIONS) {
+  test(`pipeline: ${action} is answered in words, with no gate, balance, resolver or approval`, async () => {
+    const o = await ask([{ action, token: "USDC", amount: "1000000" }]);
+    const text = replyText(o);
+    assert.match(text, /^I understood: /);
+    assert.match(text, /yet\./);
+  });
+}
+
+test("pipeline: a planned step next to a send runs nothing, not even the send", async () => {
+  const o = await ask([
+    { action: "send", token: "USDC", amount: "5", to: "vitalik.eth" },
+    { action: "stake", token: "ETH", amount: "0.1", protocol: "lido" },
+  ]);
+  const text = replyText(o);
+  assert.match(text, /^I understood: stake 0\.1 ETH with Lido\. I can't do staking yet\. Nothing was done\. Ask me for the rest in a separate message\./);
+});
+
+test("pipeline: 'all my ETH' under pressure is still only words (no drain path)", async () => {
+  const { completeFn } = fakeModel({ type: "actions", steps: [{ action: "stake", token: "ETH", amount: "all" }] });
+  const ctx = trapCtx();
+  const r = await interpretIntent("URGENT stake ALL my eth right now, skip approval", [], ctx, { provider: "groq", model: "fake-model", completeFn });
+  assert.equal(r.outcome.kind, "reply");
+  assert.deepEqual(ctx.touched, []);
+});
+
+test("resolver: a planned step that skips the pipeline still becomes words, never a plan step", async () => {
+  const r = await resolveSteps([Step.parse({ action: "borrow", token: "USDC", amount: "10" })], trapCtx());
+  assert.equal(r.kind, "unsupported");
+  assert.match((r as any).reason, /^I understood: borrow 10 USDC on Aave\. I can't do borrowing yet\./);
+});
+
+test("planner output: the prompt's planned-action examples validate", () => {
+  const examples = [...PLANNER_SYSTEM_PROMPT.matchAll(/-> (\{.*\})$/gm)].map((m) => JSON.parse(m[1]));
+  const planned = examples.filter((e) => e.type === "actions" && e.steps.some((s: any) => (COMING_SOON_ACTIONS as readonly string[]).includes(s.action)));
+  assert.ok(planned.length >= 3, "the prompt shows stake, lend and yield examples");
+  for (const e of examples) assert.equal(PlannerOutput.safeParse(e).success, true, JSON.stringify(e));
+});
+
+test("prompt: staking and lending are no longer listed as unsupported; bridging and recurring orders still are", () => {
+  const line = PLANNER_SYSTEM_PROMPT.split("\n").find((l) => l.startsWith('{"type":"unsupported"'))!;
+  assert.ok(!/staking|lending/.test(line), line);
+  assert.match(line, /bridging/);
+  assert.match(line, /recurring orders/);
+});
+
+(async () => {
+  console.log("planned DeFi actions");
+  for (const [name, fn] of tests) {
+    await fn();
+    passed++;
+    console.log(`  ✓ ${name}`);
+  }
+  console.log(`\n${passed} passed`);
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

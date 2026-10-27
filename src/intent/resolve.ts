@@ -11,6 +11,7 @@ import { computePlanValueUsd, getPriceUsd, formatTokenAmount, type IntentType } 
 import { lookupToken, SUPPORTED_SYMBOLS, type TokenDef } from "./tokens";
 import { planRemove, type Position } from "../integrations/uniswap/liquidity";
 import type { StepT } from "./schema";
+import { describeComingSoon } from "./comingSoon";
 import { PRICE_UNAVAILABLE_REASON } from "./messages";
 
 export interface ResolveContext {
@@ -249,6 +250,12 @@ async function resolveStep(step: StepT, order: number, ctx: ResolveContext): Pro
         valueUsd,
       };
     }
+
+    // Planned actions are answered by the pipeline before resolution. Should one ever get here,
+    // it still becomes words, never a plan step the executor could pick up.
+    case "stake": case "unstake": case "lend": case "withdraw_lend":
+    case "borrow": case "repay": case "deposit_yield": case "withdraw_yield":
+      throw unsupported(describeComingSoon([step]));
   }
 }
 

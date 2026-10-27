@@ -18,6 +18,8 @@ import {
 import { messageSignals, type MessageSignals } from "../policy/messageSignals";
 import { planIntent, type PlanOptions, type PlanResult } from "./planner";
 import { resolveSteps, type ResolveContext, type ResolvedStep, type PlanStep } from "./resolve";
+import { isComingSoonStep } from "./schema";
+import { describeComingSoon } from "./comingSoon";
 
 export type IntentOutcome =
   | { kind: "reply"; text: string }
@@ -109,6 +111,14 @@ export async function interpretIntent(
   if (out.type === "reply") return { planner, outcome: { kind: "reply", text: out.text } };
   if (out.type === "clarify") return { planner, outcome: { kind: "clarify", question: out.question } };
   if (out.type === "unsupported") return { planner, outcome: { kind: "unsupported", reason: out.reason } };
+
+  // Planned DeFi actions (stake, lend, borrow, savings vaults) are answered in words here, before
+  // the value gate, the resolver, the limits or an approval: nothing in such a message is built or
+  // run, not even a supported step next to it, so a planned action can never reach execution.
+  const comingSoon = out.steps.filter(isComingSoonStep);
+  if (comingSoon.length > 0) {
+    return { planner, outcome: { kind: "reply", text: describeComingSoon(comingSoon, out.steps.length - comingSoon.length) } };
+  }
 
   // Asked before resolution, so a balance answer ("not enough USDC") never takes the place of the
   // limits/price answer: with the limits unreadable or no fresh price, nothing about a spend is built.
