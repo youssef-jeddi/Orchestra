@@ -31,6 +31,7 @@ const DECLINE_LABELS = {
   swap: "Don't swap",
   add_liquidity: "Don't add",
   remove_liquidity: "Don't take out",
+  plan: "Don't do any of it",
 };
 
 /** The decline button's text, by the kind of action. */
@@ -92,7 +93,10 @@ export const DONE_TEXT = 'Done.';
 const failedText = (message) => `It didn't go through: ${message || 'something went wrong'}`;
 
 /** The outcome stored on a card after a passkey approval went through. */
-export const doneOutcome = (result) => ({ status: 'done', txHash: result?.txHash, explorerUrl: result?.explorerUrl });
+export const doneOutcome = (result) => ({
+  status: 'done', txHash: result?.txHash, explorerUrl: result?.explorerUrl,
+  ...(Array.isArray(result?.steps) ? { steps: result.steps } : {}),
+});
 
 /**
  * The outcome to settle the card with after the approval call failed, from the approval's state on
@@ -102,7 +106,10 @@ export const doneOutcome = (result) => ({ status: 'done', txHash: result?.txHash
 export function outcomeAfterError(err, approval, intentType) {
   switch (approval?.status) {
     case 'executed': return doneOutcome(approval);
-    case 'failed': return { status: 'failed', text: failedText(approval.error || err?.message) };
+    // A plan's error already starts with which step didn't go through, and why.
+    case 'failed': return Array.isArray(approval.steps)
+      ? { status: 'failed', text: String(approval.error || failedText(err?.message)), steps: approval.steps }
+      : { status: 'failed', text: failedText(approval.error || err?.message) };
     case 'rejected': return { status: 'ended', kind: 'declined', text: declinedText(intentType) };
     case 'expired': return { status: 'ended', kind: 'expired', text: expiredText(intentType) };
     // The server no longer has it at all (it lapsed, or was cleared after a long wait): nothing to approve.
@@ -153,4 +160,27 @@ export function cardView({ outcome, ended, signing, declining, settledElsewhere,
     approveDisabled: !!signing || !!declining,
     declineDisabled: !!signing || !!declining,
   };
+}
+
+// ── Multi-step plans (ORC-21) ──
+
+/** The line under a plan's steps while it waits for an OK: one OK covers every step. */
+export function planHint(data) {
+  const n = data?.planData?.steps?.length;
+  if (data?.intentType !== 'plan' || !n || data.autoExecuted) return '';
+  return `Approving covers all ${n} steps. They run one after another, and if one doesn't go through I stop there.`;
+}
+
+const STEP_MARK = { done: '✓', failed: '✗', 'not-run': '–' };
+const STEP_NOTE = { failed: " — didn't go through", 'not-run': ' — not started' };
+
+/** One line per step of a plan that ran: its mark, words and receipt (only for a step that went through). */
+export function planStepLines(steps) {
+  if (!Array.isArray(steps)) return [];
+  return steps.map((st, i) => ({
+    key: `${st.index ?? i}`,
+    status: st.status,
+    text: `${STEP_MARK[st.status] ?? '–'} ${(st.index ?? i) + 1}. ${st.summary}${STEP_NOTE[st.status] ?? ''}`,
+    receiptUrl: st.status === 'done' ? st.explorerUrl : undefined,
+  }));
 }
