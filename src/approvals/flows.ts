@@ -136,6 +136,7 @@ export async function executeApprovalFlow(
 export async function executePlanApprovalFlow(
   a: PendingApproval,
   run: (a: PendingApproval, onStepDone: (step: { intentType: string; execution: Record<string, unknown> }, outcome: StepOutcome) => Promise<void>) => Promise<PlanRunResult>,
+  notifier?: OverCapNotifier,
 ): Promise<{ txHash: string; explorerUrl: string; steps: StepOutcome[]; text: string }> {
   const onStepDone = async (step: { intentType: string; execution: Record<string, unknown> }, outcome: StepOutcome) => {
     try {
@@ -158,6 +159,8 @@ export async function executePlanApprovalFlow(
   } catch (err: any) {
     if (!isUserFacing(err)) console.error(`[approval] ${a.id} failed unexpectedly: ${safeErr(err)}`);
     await settle(a, { error: executionErrorMessage(err) });
+    // A sends-only plan over the daily ceiling, approved in Telegram: send the link to sign it as owner.
+    await notifyOverCap(a, err, notifier);
     throw err;
   }
   a.steps = result.steps.map(({ index, summary, status, txHash, explorerUrl, error }) => ({ index, summary, status, txHash, explorerUrl, error }));

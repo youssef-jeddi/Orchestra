@@ -2,7 +2,8 @@
 // A message with up to three money-moving steps ("swap half my ETH to USDC and send 5 USDC to
 // alice.eth") becomes one plan, approved once. Each step stays its own transaction through the
 // account, run in order and never bundled into one MultiSend, so every step keeps its own guards
-// (balance, quote re-check, pool price) and the owner-sign browser check (ORC-113) still only ever
+// (balance, quote re-check, pool price). Over the account's daily ceiling, a plan of sends only is
+// signed by the owner one send at a time, so the owner-sign browser check (ORC-113) still only ever
 // sees a plain transfer.
 //
 // What was approved is the most each step may spend. A step whose amount depends on an earlier one
@@ -17,7 +18,7 @@ import { TOKENS, type TokenDef } from "../intent/tokens";
 import { ETH_GAS_RESERVE, type AmountRule } from "../intent/resolve";
 import type { PlanAction } from "../intent/pipeline";
 import type { AdapterResult, Balances } from "./adapters";
-import { UserFacingError } from "../utils/userFacing";
+import { UserFacingError, OverCapError } from "../utils/userFacing";
 
 /** One step as held server-side (in the approval record, or in memory for an automatic run). */
 export interface PlanStepRecord {
@@ -62,12 +63,32 @@ export function hasSwapOrLiquidity(steps: { intentType: string }[]): boolean {
 
 export const OVER_CEILING_PLAN_WITH_SWAP =
   "This would go past what your account lets me move on my own today. Plans with a swap or a liquidity change can't be signed by you yet, so nothing was done. Try smaller amounts, or try again after the daily reset.";
+/** A sends-only plan over the ceiling when the owner-sign offer couldn't be prepared. */
 export const OVER_CEILING_PLAN_SENDS =
-  "This would go past what your account lets me move on my own today, so nothing was done. Ask for each send on its own: you can then sign it yourself with your wallet. Or try again after the daily reset.";
+  "This would go past what your account lets me move on my own today, so nothing was done. Try smaller amounts, or try again after the daily reset.";
 
-/** The plain answer when a plan's total is over the account's on-chain daily ceiling. */
+/** A sends-only plan over the ceiling (ORC-21): the owner signs its sends with their wallet, one after another. */
+export function overCeilingOwnerSignText(count: number): string {
+  return `This would go past what your account lets me move on my own today, so nothing was sent yet. You can sign the ${count} sends yourself with your wallet as the account owner, one after another, or try again after the daily reset.`;
+}
+
+/** The plain answer when a plan's total is over the account's on-chain daily ceiling and no owner-sign is offered. */
 export function overCeilingReason(steps: { intentType: string }[]): string {
   return hasSwapOrLiquidity(steps) ? OVER_CEILING_PLAN_WITH_SWAP : OVER_CEILING_PLAN_SENDS;
+}
+
+/** A sends-only plan's sends as owner-sign payments: each a plain transfer, with what it claims to send. */
+export function ownerSends(steps: PlanStepRecord[]): Array<{ summary: string; batch: Array<{ to: string; value: string; data: string }>; meta: { valueUsd: number; to?: string; token?: string; amount?: string; symbol?: string } }> {
+  return steps.map((s) => {
+    const d = (s.execution as any)?.sendData;
+    if (s.intentType !== "send" || !d?.unsignedTx) throw new UserFacingError("Only a plan of sends can be signed by you.");
+    const tx = d.unsignedTx;
+    return {
+      summary: s.summary,
+      batch: [{ to: tx.to, value: String(tx.value || "0"), data: tx.data || "0x" }],
+      meta: { valueUsd: s.valueUsd, to: d.to, token: d.token, amount: String(d.amount), symbol: d.symbol },
+    };
+  });
 }
 
 function tokenOf(symbol: string): TokenDef {
@@ -228,6 +249,8 @@ export async function runPlan(steps: PlanStepRecord[], deps: RunDeps): Promise<P
   try {
     await deps.beforeStart?.();
   } catch (err) {
+    // Over the ceiling with an owner-sign offer: the caller answers it like a single over-cap request.
+    if (err instanceof OverCapError) throw err;
     return { steps: outcomes, complete: false, text: deps.errorText(err), refused: true };
   }
 
@@ -288,13 +311,24 @@ export function planOutcomeText(outcomes: StepOutcome[]): string {
 
 /**
  * The check before a plan's first step: its total must fit in what the account still lets the
- * agent move today. Over it, a single request would offer the owner-sign path; a plan can't take
- * it (a plan with a swap or a liquidity step can't be owner-signed at all, ORC-113), so it is
- * answered in plain words and nothing runs. `fits` is accountExec's fitsDailyCeiling.
+ * agent move today. Over it, a plan of sends only goes to owner-sign like a single over-cap send:
+ * `offerSends` holds its sends for the owner's wallet, one at a time, and an OverCapError carries
+ * the first (ORC-21). A plan with a swap or a liquidity step can't be owner-signed (ORC-113 only
+ * lets the wallet sign a plain payment), so it is answered in plain words and nothing runs; so is a
+ * sends-only plan when no offer could be prepared. `fits` is accountExec's fitsDailyCeiling.
  */
-export function ceilingCheck(steps: PlanStepRecord[], fits: (valueUsd: number) => Promise<boolean>): () => Promise<void> {
+export function ceilingCheck(
+  steps: PlanStepRecord[],
+  fits: (valueUsd: number) => Promise<boolean>,
+  offerSends?: (sends: ReturnType<typeof ownerSends>) => Promise<Record<string, unknown> | null>,
+): () => Promise<void> {
   return async () => {
     const total = steps.reduce((sum, s) => sum + s.valueUsd, 0);
-    if (!(await fits(total))) throw new UserFacingError(overCeilingReason(steps), 409);
+    if (await fits(total)) return;
+    if (!hasSwapOrLiquidity(steps) && offerSends) {
+      const offer = await offerSends(ownerSends(steps)).catch(() => null);
+      if (offer) throw new OverCapError(overCeilingOwnerSignText(steps.length), offer);
+    }
+    throw new UserFacingError(overCeilingReason(steps), 409);
   };
 }

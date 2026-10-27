@@ -23,7 +23,7 @@ import { onboarding, isAccountReady } from "../safe/onboard";
 import { OnboardingError, ACCOUNT_NOT_READY_REASON } from "../safe/onboarding";
 import { errorResponse, isUserFacing, executionErrorMessage } from "./errors";
 import { UserFacingError, OverCapError } from "../../utils/userFacing";
-import { submitOwnerSignature, relayWithAgent, getOwnerSign, ownerSignView } from "../safe/ownerSign";
+import { submitOwnerSignature, relayWithAgent, getOwnerSign, ownerSignView, offerOwnerSignSeries } from "../safe/ownerSign";
 import { readPositions, type Position } from "../uniswap/liquidity";
 import { tokenByAddress } from "../../intent/tokens";
 import { executePlan } from "../../executor";
@@ -41,7 +41,7 @@ import { loginRequest, login, issueToken, requireSession, sessionWallet, verifyT
 import { verifyPrivyUser, importPrivyPasskeys, noteEmailSignIn, verifyEmailForPasskey } from "../../auth/privy";
 import { getAdapter, type Balances } from "../../executor/adapters";
 import { interpretIntent, assessAction, assessPlan, planSummary, type MultiStepPlan } from "../../intent/pipeline";
-import { buildPlanSteps, runPlan, ceilingCheck, overCeilingReason, executionPayload, type PlanStepRecord, type StepOutcome } from "../../executor/plan";
+import { buildPlanSteps, runPlan, ceilingCheck, overCeilingReason, hasSwapOrLiquidity, executionPayload, type PlanStepRecord, type StepOutcome } from "../../executor/plan";
 import { fitsDailyCeiling } from "../safe/accountExec";
 import { sanitizeHistory } from "../../intent/planner";
 import { INTENT_FALLBACK_ERROR, LIMITS_UNREADABLE_REASON, PRICE_UNAVAILABLE_REASON } from "../../intent/messages";
@@ -832,21 +832,33 @@ async function respondWithPlan(plan: MultiStepPlan, r: PlanRequest): Promise<voi
   const fits = (valueUsd: number) => fitsDailyCeiling(safeAddress, valueUsd);
 
   if (decision.verdict === "AUTO_EXECUTE") {
-    const run = await runPlan(built.steps, {
-      beforeStart: ceilingCheck(built.steps, fits),
-      readBalances: () => fetchBalances(provider, safeAddress),
-      execute: (step) => executePlanStep(wallet, safeAddress, step),
-      // Only a step that went through counts toward the daily limit, as it finishes.
-      onStepDone: async (step, outcome) => {
-        await recordActivity(wallet, spendActivity({
-          valueUsd: outcome.valueUsd, to: (step.execution as any)?.sendData?.to,
-          token: (step.execution as any)?.quoteData?.tokenIn ?? (step.execution as any)?.sendData?.token,
-          txHash: outcome.txHash, explorerUrl: outcome.explorerUrl, source: "auto",
-        })).catch(() => {});
-        if (step.intentType === "send") await rememberSentRecipient(wallet, "send", step.execution);
-      },
-      errorText: executionErrorMessage,
-    });
+    let run: Awaited<ReturnType<typeof runPlan>>;
+    try {
+      run = await runPlan(built.steps, {
+        beforeStart: ceilingCheck(built.steps, fits, planOwnerSignOffer(wallet, safeAddress)),
+        readBalances: () => fetchBalances(provider, safeAddress),
+        execute: (step) => executePlanStep(wallet, safeAddress, step),
+        // Only a step that went through counts toward the daily limit, as it finishes.
+        onStepDone: async (step, outcome) => {
+          await recordActivity(wallet, spendActivity({
+            valueUsd: outcome.valueUsd, to: (step.execution as any)?.sendData?.to,
+            token: (step.execution as any)?.quoteData?.tokenIn ?? (step.execution as any)?.sendData?.token,
+            txHash: outcome.txHash, explorerUrl: outcome.explorerUrl, source: "auto",
+          })).catch(() => {});
+          if (step.intentType === "send") await rememberSentRecipient(wallet, "send", step.execution);
+        },
+        errorText: executionErrorMessage,
+      });
+    } catch (err: any) {
+      // A sends-only plan over the on-chain daily ceiling: offer it to the owner's wallet, like a single send.
+      if (!(err instanceof OverCapError)) throw err;
+      console.log(`[intent ${rid}] plan over the daily ceiling — owner-sign offered`);
+      res.status(409).json({
+        error: err.message, code: err.code, ...(err.ownerSign ? { ownerSign: err.ownerSign } : {}),
+        intentType, autoExecuted: false, plan: view, assessment,
+      });
+      return;
+    }
     console.log(`[intent ${rid}] plan auto-run: ${run.steps.filter((s) => s.status === "done").length}/${run.steps.length} steps done`);
     if (run.refused) {
       unsupported(run.text);
@@ -864,9 +876,11 @@ async function respondWithPlan(plan: MultiStepPlan, r: PlanRequest): Promise<voi
     return;
   }
 
-  // Held for one OK: answered now when the plan can't fit in today's ceiling, rather than after the OK.
+  // Held for one OK. A plan with a swap or a liquidity step that can't fit in today's ceiling is
+  // answered now, rather than after the OK: it could never run. A plan of sends only is held like a
+  // single send: after the OK it goes to owner-sign if it is still over (ORC-21).
   try {
-    if (!(await fits(plan.valueUsd))) {
+    if (!(await fits(plan.valueUsd)) && hasSwapOrLiquidity(built.steps)) {
       unsupported(overCeilingReason(built.steps));
       return;
     }
@@ -901,6 +915,18 @@ async function respondWithPlan(plan: MultiStepPlan, r: PlanRequest): Promise<voi
 /** A plan's step outcomes for the chat: summaries, receipts and the plain overall line. */
 function planResultView(steps: StepOutcome[], text: string, complete: boolean) {
   return { complete, text, steps: steps.map(({ index, summary, status, txHash, explorerUrl }) => ({ index, summary, status, txHash, explorerUrl })) };
+}
+
+/** Holds a sends-only plan's sends for the owner's wallet, one at a time (null when that isn't possible). */
+function planOwnerSignOffer(wallet: string, safeAddress: string) {
+  return async (sends: Parameters<typeof offerOwnerSignSeries>[2]) => {
+    try {
+      return await offerOwnerSignSeries(wallet, safeAddress, sends);
+    } catch (err) {
+      console.warn(`[owner-sign] couldn't hold a plan's sends: ${safeErr(err)}`);
+      return null;
+    }
+  };
 }
 
 /** Run one plan step's stored payload through the account, like a single approved request. */
@@ -949,7 +975,7 @@ async function executePlanApproval(a: PendingApproval) {
   const steps = ((a.execution as any)?.planData?.steps ?? []) as PlanStepRecord[];
   try {
     const result = await executePlanApprovalFlow(a, (a, onStepDone) => runPlan(steps, {
-      beforeStart: ceilingCheck(steps, (valueUsd) => fitsDailyCeiling(a.safeAddress, valueUsd)),
+      beforeStart: ceilingCheck(steps, (valueUsd) => fitsDailyCeiling(a.safeAddress, valueUsd), planOwnerSignOffer(a.wallet, a.safeAddress)),
       readBalances: () => fetchBalances(provider, a.safeAddress),
       execute: (step) => executePlanStep(a.wallet, a.safeAddress, step),
       onStepDone,

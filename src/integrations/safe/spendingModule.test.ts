@@ -6,7 +6,7 @@ import { ethers } from "ethers";
 import { isSpendingModuleEnabled, exceedsRemaining, remainingToday, DailyCapRevert, OVER_CAP_TEXT, OVER_CAP_NO_OWNER_TEXT, spendingModuleAddress, ModuleConfigError } from "./spendingModule";
 import { executeForAccount, type AccountExecDeps, type AccountExecInput } from "./accountExec";
 import { getRecentActivity, _resetPolicyStoreCache } from "../../policy/store";
-import { holdOwnerSign, submitOwnerSignature, getOwnerSign, ownerSignView, safeTxHashOf, clearOwnerSignRecords, SAFE_TX_TYPES, OWNER_SIGN_TTL_MS } from "./ownerSign";
+import { holdOwnerSign, submitOwnerSignature, getOwnerSign, ownerSignView, safeTxHashOf, clearOwnerSignRecords, SAFE_TX_TYPES, OWNER_SIGN_TTL_MS, NEXT_SEND_FAILED_TEXT, type OwnerSend } from "./ownerSign";
 import { registerSafeArgs, REGISTERED_SPENDING_LIMIT } from "./policyContract";
 import { errorResponse } from "../ledger/errors";
 // @ts-expect-error plain JS helpers shared with the frontend, no type declarations
@@ -177,6 +177,52 @@ test("the owner's signature over the held hash is relayed once, and the relay is
   assert.deepEqual(sent, [r.id]);
   await assert.rejects(submitOwnerSignature(owner.address, r.id, await sign(owner, r), relayOk(sent)), /already sent/);
   assert.equal(sent.length, 1);
+});
+
+// ─── A sends-only plan over the ceiling: signed one send at a time (ORC-21) ───
+
+const planSend = (n: number): OwnerSend => ({
+  summary: `Send ${n} USDC to Bob`, batch: [{ to: "0x00000000000000000000000000000000000000e5", value: "0", data: "0x" }],
+  meta: { valueUsd: n, to: stranger.address, amount: String(n), symbol: "USDC" },
+});
+
+test("a plan's send: the offer says which send it is, and the next is held only after this one went through", async () => {
+  clearOwnerSignRecords();
+  _resetPolicyStoreCache();
+  const r = holdOwnerSign({ wallet: owner.address, safeAddress: SAFE, summary: "Send 1 USDC to Bob", call, valueUsd: 1, series: { index: 0, total: 3 }, rest: [planSend(2), planSend(3)] });
+  assert.deepEqual(ownerSignView(r).series, { index: 0, total: 3 });
+  assert.equal("rest" in ownerSignView(r), false, "the sends still to come stay on the server");
+  const held: any[] = [];
+  const sent: string[] = [];
+  const out = await submitOwnerSignature(owner.address, r.id, await sign(owner, r), {
+    relay: async (rec) => { sent.push(rec.id); return "0xplan1"; },
+    holdNext: async (rec) => { held.push({ sent: [...sent], rest: rec.rest, series: rec.series }); return { kind: "safe-owner", id: "next-1", series: { index: 1, total: 3 } }; },
+  });
+  assert.equal(out.txHash, "0xplan1");
+  assert.deepEqual(out.next, { kind: "safe-owner", id: "next-1", series: { index: 1, total: 3 } });
+  assert.equal(held.length, 1);
+  assert.deepEqual(held[0].sent, [r.id], "the next send is held after this one was relayed (fresh nonce)");
+  assert.deepEqual(held[0].rest.map((x: OwnerSend) => x.summary), ["Send 2 USDC to Bob", "Send 3 USDC to Bob"]);
+  // Each send counts toward the daily limit when it goes through, on its own.
+  const rows = (await getRecentActivity(owner.address)).filter((x) => x.txHash === "0xplan1");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].valueUsd, 1);
+  assert.equal(rows[0].source, "owner");
+});
+
+test("a plan's send: if the next one can't be prepared, the send still counts and the user is told plainly", async () => {
+  clearOwnerSignRecords();
+  const r = holdOwnerSign({ wallet: owner.address, safeAddress: SAFE, summary: "Send 1 USDC", call, series: { index: 0, total: 2 }, rest: [planSend(2)] });
+  const out = await submitOwnerSignature(owner.address, r.id, await sign(owner, r), { ...relayOk([]), holdNext: async () => { throw new Error("rpc down"); } });
+  assert.equal(out.txHash, "0xabc");
+  assert.equal(out.next, undefined);
+  assert.equal(out.nextError, NEXT_SEND_FAILED_TEXT);
+  // The last send of a plan (or a single send) has no next one.
+  const last = holdOwnerSign({ wallet: owner.address, safeAddress: SAFE, summary: "Send 2 USDC", call: { ...call, nonce: 8 }, series: { index: 1, total: 2 } });
+  let asked = 0;
+  const end = await submitOwnerSignature(owner.address, last.id, await sign(owner, last), { ...relayOk([]), holdNext: async () => { asked++; return {}; } });
+  assert.equal(asked, 0);
+  assert.deepEqual(Object.keys(end).sort(), ["explorerUrl", "txHash"]);
 });
 
 test("attack: a signature from another wallet is refused, nothing is relayed", async () => {

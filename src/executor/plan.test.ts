@@ -2,7 +2,8 @@
 // Run with `npm run test:plans`. Covers ORC-21: a message with 2 or 3 money-moving steps becomes
 // one plan with one verdict and one approval, run one step after another; a dependent amount is
 // filled in from what actually happened and only goes down; a failure stops the plan and only the
-// steps that ran count; over the limit asks; 4 steps and an over-ceiling plan with a swap are refused.
+// steps that ran count; over the limit asks; 4 steps and an over-ceiling plan with a swap are refused;
+// an over-ceiling plan of sends only goes to owner-sign, one plain send at a time.
 
 import assert from "node:assert/strict";
 import { ethers } from "ethers";
@@ -12,8 +13,9 @@ import { setPrices } from "../policy";
 import { getAdapter, type AdapterResult, type Balances } from "./adapters";
 import {
   buildPlanSteps, runPlan, ceilingCheck, executionPayload, fillAmount, withAmount, payloadAmount, planOutcomeText,
-  OVER_CEILING_PLAN_WITH_SWAP, OVER_CEILING_PLAN_SENDS, type PlanStepRecord,
+  OVER_CEILING_PLAN_WITH_SWAP, OVER_CEILING_PLAN_SENDS, overCeilingOwnerSignText, ownerSends, type PlanStepRecord,
 } from "./plan";
+import { OverCapError } from "../utils/userFacing";
 import { fitsDailyCeiling } from "../integrations/safe/accountExec";
 import { createApproval, claim, getApproval, _resetApprovals } from "../approvals";
 import { executePlanApprovalFlow } from "../approvals/flows";
@@ -366,19 +368,94 @@ test("an over-ceiling plan with a swap is refused in plain words before anything
   assert.deepEqual(r.steps.map((s) => s.status), ["not-run", "not-run"]);
 });
 
-test("an over-ceiling plan of sends only is refused too, pointing to sending them one at a time; under the ceiling it runs", async () => {
+test("an over-ceiling plan of sends only goes to owner-sign like a single send: one plain transfer per send, nothing run by the agent", async () => {
+  const plan = await planOf(actions(send("USDC", "1", ALICE), send("ETH", "0.001", BOB)));
+  const steps = await built(plan);
+  const chain = fakeChain(BAL);
+  const offered: any[] = [];
+  const offer = async (sends: any[]) => { offered.push(sends); return { kind: "safe-owner", id: "o1" }; };
+  await assert.rejects(
+    runPlan(steps, { ...chain.deps, beforeStart: ceilingCheck(steps, (v) => fitsDailyCeiling(SAFE, v, overCeiling), offer) }),
+    (e: any) => e instanceof OverCapError && e.code === "over_daily_cap" && e.message === overCeilingOwnerSignText(2) && (e.ownerSign as any)?.id === "o1",
+  );
+  assert.equal(chain.ran.length, 0);
+  assert.equal(offered.length, 1);
+  const [usdc, eth] = offered[0];
+  // Each send is its own plain payment (no MultiSend), carrying what it claims to send for the browser check.
+  assert.equal(usdc.batch.length, 1);
+  assert.equal(usdc.batch[0].to, USDC_SEPOLIA);
+  assert.equal(usdc.batch[0].value, "0");
+  assert.deepEqual({ to: usdc.meta.to, amount: usdc.meta.amount, symbol: usdc.meta.symbol }, { to: ALICE, amount: "1", symbol: "USDC" });
+  assert.equal(usdc.meta.valueUsd, 1);
+  assert.deepEqual(eth.batch, [{ to: BOB, value: ethers.parseEther("0.001").toString(), data: "0x" }]);
+  assert.equal(eth.meta.symbol, "ETH");
+});
+
+test("an over-ceiling plan of sends only without an offer (none possible) is answered in plain words; under the ceiling it runs; unreadable fails closed", async () => {
   const plan = await planOf(actions(send("USDC", "1", ALICE), send("USDC", "1", BOB)));
   const steps = await built(plan);
   const refused = await runPlan(steps, { ...fakeChain(BAL).deps, beforeStart: ceilingCheck(steps, (v) => fitsDailyCeiling(SAFE, v, overCeiling)) });
+  assert.equal(refused.refused, true);
   assert.equal(refused.text, OVER_CEILING_PLAN_SENDS);
+  const noOffer = await runPlan(steps, { ...fakeChain(BAL).deps, beforeStart: ceilingCheck(steps, (v) => fitsDailyCeiling(SAFE, v, overCeiling), async () => null) });
+  assert.equal(noOffer.text, OVER_CEILING_PLAN_SENDS);
+  const failing = await runPlan(steps, { ...fakeChain(BAL).deps, beforeStart: ceilingCheck(steps, (v) => fitsDailyCeiling(SAFE, v, overCeiling), async () => { throw new Error("rpc"); }) });
+  assert.equal(failing.text, OVER_CEILING_PLAN_SENDS);
   const roomy = { enabled: () => true, remainingCents: async () => 100_000n };
-  const ok = await runPlan(steps, { ...fakeChain(BAL).deps, beforeStart: ceilingCheck(steps, (v) => fitsDailyCeiling(SAFE, v, roomy)) });
+  let asked = 0;
+  const ok = await runPlan(steps, { ...fakeChain(BAL).deps, beforeStart: ceilingCheck(steps, (v) => fitsDailyCeiling(SAFE, v, roomy), async () => { asked++; return { id: "x" }; }) });
   assert.equal(ok.complete, true);
-  // An unreadable ceiling fails closed.
+  assert.equal(asked, 0, "under the ceiling nothing is offered");
   const unreadable = { enabled: () => true, remainingCents: async () => { throw new Error("rpc down"); } };
-  const closed = await runPlan(steps, { ...fakeChain(BAL).deps, beforeStart: ceilingCheck(steps, (v) => fitsDailyCeiling(SAFE, v, unreadable)) });
+  const closed = await runPlan(steps, { ...fakeChain(BAL).deps, beforeStart: ceilingCheck(steps, (v) => fitsDailyCeiling(SAFE, v, unreadable), async () => { asked++; return { id: "x" }; }) });
   assert.equal(closed.refused, true);
   assert.match(closed.text, /couldn't check your account's daily ceiling/);
+  assert.equal(asked, 0, "an unreadable ceiling offers nothing");
+});
+
+test("an over-ceiling plan with a swap is never offered to owner-sign, even with an offer available (ORC-113 stays strict)", async () => {
+  const plan = await planOf(actions(swap("USDC", "ETH", "2"), send("USDC", "1", ALICE)));
+  const steps = await built(plan);
+  let asked = 0;
+  const r = await runPlan(steps, { ...fakeChain(BAL).deps, beforeStart: ceilingCheck(steps, (v) => fitsDailyCeiling(SAFE, v, overCeiling), async () => { asked++; return { id: "x" }; }) });
+  assert.equal(r.text, OVER_CEILING_PLAN_WITH_SWAP);
+  assert.equal(asked, 0);
+  assert.throws(() => ownerSends(steps), /Only a plan of sends/);
+});
+
+test("an approved sends-only plan over the ceiling: the approval fails with the owner-sign answer, nothing is recorded, and Telegram gets the link", async () => {
+  _resetApprovals();
+  _resetPolicyStoreCache();
+  const wallet = freshWallet();
+  const plan = await planOf(actions(send("USDC", "2", ALICE), send("USDC", "3", BOB)));
+  const steps = await built(plan);
+  const a = await createApproval({
+    wallet, safeAddress: SAFE, intentType: "plan", summary: plan.summary, valueUsd: plan.valueUsd,
+    reason: "test", triggered: ["daily-limit"], execution: { planData: { steps } },
+  });
+  a.channel = "telegram";
+  a.telegram = { chatId: 42, messageId: 7 } as any;
+  await claim(a.id, wallet);
+  const chain = fakeChain(BAL);
+  const links: string[] = [];
+  const notifier = { link: async (_c: number, _t: string, _b: string, url: string) => { links.push(url); }, text: async () => {} };
+  const prev = process.env.PUBLIC_APP_URL;
+  process.env.PUBLIC_APP_URL = "https://app.example";
+  try {
+    await assert.rejects(
+      executePlanApprovalFlow(a, (_a, onStepDone) => runPlan(steps, {
+        ...chain.deps, onStepDone,
+        beforeStart: ceilingCheck(steps, (v) => fitsDailyCeiling(SAFE, v, overCeiling), async () => ({ kind: "safe-owner", id: "held-1" })),
+      }), notifier),
+      (e: any) => e instanceof OverCapError && (e.ownerSign as any)?.id === "held-1",
+    );
+  } finally {
+    if (prev === undefined) delete process.env.PUBLIC_APP_URL; else process.env.PUBLIC_APP_URL = prev;
+  }
+  assert.equal(chain.ran.length, 0);
+  assert.equal(getApproval(a.id)!.status, "failed");
+  assert.deepEqual(links, ["https://app.example/simple?ownerSign=held-1"]);
+  assert.deepEqual(await getRecentActivity(wallet), [], "nothing counts until the owner's sends go through");
 });
 
 test("planOutcomeText: nothing ran when the first step fails", () => {

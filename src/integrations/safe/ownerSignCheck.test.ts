@@ -11,7 +11,7 @@ import { faultOn } from "../../utils/faultInject";
 // @ts-expect-error plain JS helpers shared with the frontend, no type declarations
 import { checkOwnerSign, NOT_A_PAYMENT, REFUSED, SEPOLIA_CHAIN_ID } from "../../../frontend/src/lib/ownerSignCheck.js";
 // @ts-expect-error plain JS helpers shared with the frontend, no type declarations
-import { ownerSignCard } from "../../../frontend/src/lib/ownerSign.js";
+import { ownerSignCard, seriesLabel, afterOwnerSign } from "../../../frontend/src/lib/ownerSign.js";
 // @ts-expect-error plain JS helpers shared with the frontend, no type declarations
 import { signOwnerRequest } from "../../../frontend/src/lib/signing.js";
 
@@ -243,6 +243,29 @@ test("the chat card: decoded text and a Sign button, or the plain refusal and no
   assert.equal(ownerSignCard(offerFor(usdcSend()), undefined).canSign, false, "no account yet: nothing to sign");
   assert.equal(ownerSignCard(null, SAFE), null);
   assert.doesNotMatch(NOT_A_PAYMENT, /delegate|module|safe|calldata|0x/i, "no jargon");
+});
+
+test("a plan's sends signed one at a time (ORC-21): the card says which send it is, and the next one follows the receipt", () => {
+  const o = offerFor(usdcSend());
+  const first = ownerSignCard({ ...o, series: { index: 0, total: 2 } }, SAFE);
+  assert.equal(first.canSign, true);
+  assert.match(first.text, /^Send 1 of 2: Sign with your wallet to send 2000 USDC/);
+  assert.equal(ownerSignCard(o, SAFE).text.startsWith("Send "), false, "a single send has no label");
+  for (const bad of [{ index: 2, total: 2 }, { index: -1, total: 2 }, { index: 0, total: 1 }, { index: "0", total: 2 }, null]) {
+    assert.equal(seriesLabel({ series: bad }), "", JSON.stringify(bad));
+  }
+  // The series label can't turn a refused transaction into a signable one.
+  const refused = ownerSignCard({ ...offerFor(tamperedCall(SAFE, usdcSend())), series: { index: 0, total: 2 } }, SAFE);
+  assert.deepEqual(refused, { canSign: false, refused: true, text: NOT_A_PAYMENT });
+
+  const next = { ...o, series: { index: 1, total: 2 } };
+  const msgs = afterOwnerSign({ txHash: "0x1", explorerUrl: "https://e/1", next });
+  assert.deepEqual(msgs[0], { role: "system", txHash: "0x1", explorerUrl: "https://e/1" });
+  assert.equal(msgs[1].ownerSign, next);
+  assert.equal(msgs[1].tone, "info");
+  assert.deepEqual(afterOwnerSign({ txHash: "0x1", explorerUrl: "u" }).length, 1);
+  assert.deepEqual(afterOwnerSign({ txHash: "0x1", explorerUrl: "u", nextError: "couldn't" })[1], { role: "agent", error: "couldn't" });
+  assert.equal(afterOwnerSign({ txHash: "0x1", explorerUrl: "u", next: { kind: "other", id: "x" } }).length, 1, "only an offer we know how to sign");
 });
 
 /** A wallet that records whether it was ever asked to sign. */

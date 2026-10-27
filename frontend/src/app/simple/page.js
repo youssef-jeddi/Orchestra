@@ -14,7 +14,7 @@ import {
 import PauseBanner from '@/components/PauseBanner';
 import { activityRow, ownerSignIdFromSearch, ACTIVITY_EMPTY, EXPIRED_OWNER_SIGN } from '@/lib/activity';
 import { signOwnerRequest } from '@/lib/signing';
-import { errorMessage, ownerSignCard } from '@/lib/ownerSign';
+import { errorMessage, ownerSignCard, afterOwnerSign } from '@/lib/ownerSign';
 import { registerPasskey, approveWithPasskey, setUpPhonePasskey, removePasskey } from '@/lib/passkey';
 import { addPasskeyButton, explainPasskeyAddError } from '@/lib/passkeyErrors';
 import { PRIVY_APP_ID } from '@/lib/privy';
@@ -234,7 +234,8 @@ function SimpleChat() {
     setSigningIdx(idx);
     try {
       const result = await signOwnerRequest(ledger, offer, { emailWallet, hasPasskey: session.hasPasskey }, safe.safeAddress);
-      setMessages((m) => [...m, { role: 'system', txHash: result.txHash, explorerUrl: result.explorerUrl }]);
+      // Its card loses the Sign button; a plan's next send (if any) follows with its own.
+      setMessages((m) => [...m.map((x, i) => (i === idx ? { ...x, signed: true } : x)), ...afterOwnerSign(result)]);
       movedFunds();
     } catch (err) {
       setMessages((m) => [...m, { role: 'agent', error: err.message }]);
@@ -515,11 +516,12 @@ function MessageRow({ m, idx, onExecute, onPasskey, onOwnerSign, onAddPasskeyHer
   if (m.error) {
     // An owner-sign offer is decoded here, not described by the bridge: a refused one shows only the refusal.
     const owner = ownerSignCard(m.ownerSign, safeAddress);
+    const tint = m.tone === 'info' ? '#E8E4DE' : '#FF453A';
     return (
-      <div style={{ alignSelf: 'flex-start', maxWidth: '90%', color: '#FF453A', fontSize: 14,
-        border: '1px solid #FF453A44', borderRadius: 12, padding: '10px 14px', background: '#FF453A11' }}>
+      <div style={{ alignSelf: 'flex-start', maxWidth: '90%', color: tint, fontSize: 14,
+        border: `1px solid ${tint}44`, borderRadius: 12, padding: '10px 14px', background: `${tint}11` }}>
         {owner?.refused ? owner.text : m.error}
-        {owner?.canSign && (
+        {owner?.canSign && !m.signed && (
           <div style={{ marginTop: 10 }}>
             <div style={{ color: '#E8E4DE', marginBottom: 10 }}>{owner.text}</div>
             <button onClick={() => onOwnerSign(m.ownerSign, idx)} disabled={signing} style={approveBtn(signing)}>
