@@ -5,19 +5,24 @@
 // and the bridge session comes from Privy's identity token (/auth/privy).
 //
 // Without NEXT_PUBLIC_PRIVY_APP_ID the app falls back to MetaMask + Ledger.
+// Google sign-in shows only with NEXT_PUBLIC_PRIVY_GOOGLE=1 (see loginMethods.js).
 
 import { sepolia } from 'viem/chains';
+import { loginMethodsFor, loginMessageFor } from './loginMethods';
 
 export const PRIVY_APP_ID = process.env.NEXT_PUBLIC_PRIVY_APP_ID || '';
+// Written out in full so Next.js inlines it at build time.
+const GOOGLE_FLAG = process.env.NEXT_PUBLIC_PRIVY_GOOGLE;
 
 export const privyConfig = {
-  // Each method must also be enabled in the Privy dashboard.
-  loginMethods: ['passkey', 'email', 'wallet'],
+  // Each method must also be enabled in the Privy dashboard: this list decides which buttons show,
+  // so a method listed here but off in the dashboard gives a button that fails. Google is opt-in.
+  loginMethods: loginMethodsFor(GOOGLE_FLAG),
   appearance: {
     theme: '#0F0F12',
     accentColor: '#C084FC',
     landingHeader: 'Sign in to Orchestra',
-    loginMessage: 'Use a passkey or your email. Already have a wallet? Connect it.',
+    loginMessage: loginMessageFor(GOOGLE_FLAG),
     walletChainType: 'ethereum-only',
     // Rabby and other browser wallets show up under detected wallets; Trust and
     // mobile wallets through WalletConnect.
