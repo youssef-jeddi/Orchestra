@@ -805,7 +805,11 @@ async function respondWithPlan(plan: MultiStepPlan, r: PlanRequest): Promise<voi
     return;
   }
   // Every step runs through the account: without a finished one there is nothing to run or hold.
-  if (!wallet || !safeAddress || !(await isAccountReady(wallet))) {
+  if (!wallet) {
+    unsupported("Sign in first: these steps run from your account.");
+    return;
+  }
+  if (!safeAddress || !(await isAccountReady(wallet))) {
     unsupported(ACCOUNT_NOT_READY_REASON);
     return;
   }
