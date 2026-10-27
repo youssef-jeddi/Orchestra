@@ -16,6 +16,7 @@ import {
 import { LocalStorage } from "../integrations/zero-g/memoryStorage";
 import { TEST_RP as RP } from "../integrations/passkey/softPasskey";
 import { faultOn, faultInjectProblem } from "../utils/faultInject";
+import { isolatedEnv } from "../utils/testEnv";
 import { interpretIntent } from "../intent/pipeline";
 import { LIMITS_UNREADABLE_REASON } from "../intent/messages";
 
@@ -170,7 +171,7 @@ test("fault injection is inert in production and on 0G storage, and the bridge r
   assert.match(faultInjectProblem(env({ ORCHESTRA_FAULT_INJECT: "typo" }))!, /unknown/);
   // The real bridge: exits with 1 and a clear error before it listens.
   const run = spawnSync(process.execPath, ["--import", "tsx", "src/integrations/ledger/serve.ts"], {
-    env: { ...process.env, NODE_ENV: "production", ORCHESTRA_FAULT_INJECT: "profile-read", STORAGE_BACKEND: "memory", PORT: "0" },
+    env: isolatedEnv({ NODE_ENV: "production", ORCHESTRA_FAULT_INJECT: "profile-read", STORAGE_BACKEND: "memory", PORT: "0" }),
     encoding: "utf-8", timeout: 60_000,
   });
   assert.equal(run.status, 1);

@@ -18,6 +18,7 @@ import { ethers } from "ethers";
 import { isOwnAddress, approvalBelongsTo, broadcastSenderProblem } from "./access";
 import { issueToken, verifyToken, _setSecret } from "../../auth";
 import { BridgeServer } from "./bridge";
+import { isolatedEnv } from "../../utils/testEnv";
 
 let passed = 0;
 const tests: [string, () => void | Promise<void>][] = [];
@@ -44,6 +45,23 @@ function withEnv(env: Partial<Record<(typeof ENV_KEYS)[number], string>>, fn: ()
 }
 
 // ── The origin allowlist (pure) ──
+
+test("a test bridge never gets the developer's .env or real credentials", () => {
+  const saved = { PRIVY_APP_SECRET: process.env.PRIVY_APP_SECRET, AGENT_PRIVATE_KEY: process.env.AGENT_PRIVATE_KEY };
+  process.env.PRIVY_APP_SECRET = "real-looking-secret";
+  process.env.AGENT_PRIVATE_KEY = "0x" + "11".repeat(32);
+  try {
+    const env = isolatedEnv({ PORT: "1234" });
+    assert.equal(env.PRIVY_APP_SECRET, undefined);
+    assert.equal(env.AGENT_PRIVATE_KEY, undefined);
+    assert.equal(env.PORT, "1234");
+    // dotenv reads DOTENV_CONFIG_PATH instead of ./.env: an empty file, so nothing is loaded.
+    assert.equal(fs.readFileSync(env.DOTENV_CONFIG_PATH!, "utf-8"), "");
+    assert.equal(isolatedEnv({ PRIVY_APP_SECRET: "fake" }).PRIVY_APP_SECRET, "fake"); // a test can still pass one in
+  } finally {
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
+});
 
 test("default (ALLOWED_ORIGINS unset, not production): localhost on any port only — no domain or preview is built in", () => {
   withEnv({}, () => {
@@ -202,10 +220,10 @@ let port = 0;
 async function startBridge(env: Record<string, string>): Promise<{ child: ChildProcess; port: number }> {
   const p = await freePort();
   const c = spawn(process.execPath, ["--import", "tsx", "src/integrations/ledger/serve.ts"], { // node directly: kill() reaches the bridge itself, no wrapper left behind
-    env: {
-      ...process.env, STORAGE_BACKEND: "memory", TELEGRAM_BOT_TOKEN: "", PORT: String(p), SESSION_SECRET: SECRET,
+    env: isolatedEnv({
+      STORAGE_BACKEND: "memory", TELEGRAM_BOT_TOKEN: "", PORT: String(p), SESSION_SECRET: SECRET,
       ALLOWED_ORIGINS: TEST_ORIGINS, PUBLIC_APP_URL: "", ENABLE_MOCK_TRADE: "", NODE_ENV: "", ...env,
-    },
+    }),
     stdio: "ignore",
   });
   for (let i = 0; i < 120; i++) {
@@ -369,7 +387,7 @@ test("the session travels in the Authorization header: the bridge never sets a c
 function startAndWatch(env: Record<string, string>): Promise<{ code: number | null; output: string; listened: boolean }> {
   return freePort().then((p) => new Promise((resolve) => {
     const c = spawn(process.execPath, ["--import", "tsx", "src/integrations/ledger/serve.ts"], {
-      env: { ...process.env, STORAGE_BACKEND: "memory", TELEGRAM_BOT_TOKEN: "", PORT: String(p), SESSION_SECRET: SECRET, ALLOWED_ORIGINS: "", PUBLIC_APP_URL: "", ENABLE_MOCK_TRADE: "", ...env },
+      env: isolatedEnv({ STORAGE_BACKEND: "memory", TELEGRAM_BOT_TOKEN: "", PORT: String(p), SESSION_SECRET: SECRET, ALLOWED_ORIGINS: "", PUBLIC_APP_URL: "", ENABLE_MOCK_TRADE: "", ...env }),
       stdio: ["ignore", "pipe", "pipe"],
     });
     let output = "";
