@@ -30,6 +30,7 @@ const batch = [{ to: "0x00000000000000000000000000000000000000e5", value: "1", d
 function fake(over: Partial<AccountExecDeps> & { remaining?: bigint } = {}) {
   const calls: string[] = [];
   const deps: AccountExecDeps = {
+    gasBudget: async () => {},
     enabled: () => true,
     remainingCents: async () => over.remaining ?? 100_000n,
     viaModule: async () => { calls.push("module"); return "0xmodule"; },

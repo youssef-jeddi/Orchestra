@@ -15,6 +15,7 @@ import { safeCallFor, type SafeCall } from "./spendingModule";
 import { recordActivity, spendActivity } from "../../policy/store";
 import { safeErr } from "../../utils/redact";
 import { faultOn } from "../../utils/faultInject";
+import { assertGasBudget, noteRelayerGas } from "../../policy/gasStore";
 
 export const OWNER_SIGN_TTL_MS = 10 * 60_000;
 
@@ -138,6 +139,8 @@ export function getOwnerSign(wallet: string, id: unknown, now = Date.now()): Own
 export interface OwnerSignDeps {
   /** Send the stored transaction with the owner's signature; returns the tx hash. */
   relay: (r: OwnerSignRecord, signature: string) => Promise<string>;
+  /** Throws when the account's network fees for today are used up or can't be read (ORC-31); defaults to the real check. */
+  gasBudget?: (safeAddress: string) => Promise<void>;
   now?: () => number;
 }
 
@@ -162,6 +165,10 @@ export async function submitOwnerSignature(wallet: string, id: unknown, signatur
   }
   if (signer.toLowerCase() !== r.wallet) throw new UserFacingError("That signature isn't from your wallet. Sign with the wallet you signed in with.", 401);
 
+  // The relayer pays this one's gas too (ORC-31): over today's allowance, it isn't sent and stays pending.
+  await (deps.gasBudget ?? assertGasBudget)(r.safeAddress);
+  // Re-checked after that wait: a second submit that arrived meanwhile mustn't send it again.
+  if (r.status !== "pending") throw new UserFacingError("That request was already sent.", 409);
   r.status = "executing"; // claimed before anything is sent: a double submit can't send twice
   try {
     const txHash = await deps.relay(r, signature);
@@ -193,6 +200,7 @@ export async function relayWithAgent(r: OwnerSignRecord, signature: string): Pro
   const gasLimit = await safeGasLimit(() => safe.execTransaction.estimateGas(...args));
   const tx = await safe.execTransaction(...args, gasLimit ? { gasLimit } : {});
   const receipt = await tx.wait();
+  await noteRelayerGas({ account: r.safeAddress, kind: "owner-sign", txHash: tx.hash, receipt, wallet: r.wallet }); // ORC-31
   if (receipt && Number(receipt.status) === 0) {
     throw new UserFacingError(`This didn't go through, so your funds were not moved. You can see what happened here: https://sepolia.etherscan.io/tx/${tx.hash}`);
   }

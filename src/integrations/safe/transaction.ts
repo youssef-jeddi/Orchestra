@@ -4,6 +4,7 @@ import Safe from '@safe-global/protocol-kit';
 import { ethers } from 'ethers';
 import { PERMIT2, UNIVERSAL_ROUTER } from '../uniswap/types';
 import { makeSepoliaProvider, sepoliaRpcUrl } from '../../utils/rpc';
+import { noteRelayerGas } from '../../policy/gasStore';
 
 export async function initSafe(safeAddress: string, signerPrivateKey: string): Promise<InstanceType<typeof Safe>> {
   return Safe.init({
@@ -112,6 +113,8 @@ export async function executeBatchViaSafe(
   const result = await safe.executeTransaction(signedTx, opts) as { hash?: string; transactionResponse?: { wait: () => Promise<{ status?: number } | null> } };
   const hash = result.hash || "";
   const receipt = await result.transactionResponse?.wait?.();
+  // What the relayer paid (ORC-31), reverted or not: the gas is spent either way.
+  await noteRelayerGas({ account: safeAddress, kind: "action", txHash: hash, receipt: receipt as any });
   if (receipt && Number(receipt.status) === 0) {
     // Shown to the user (chat error, approval card, Telegram): plain words; the technical detail stays in the log.
     console.error(`[safe] transaction reverted on-chain (GS013, the inner call failed): ${hash}`);

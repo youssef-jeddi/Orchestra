@@ -35,6 +35,7 @@ import {
   type PolicyProfile,
 } from "../../policy";
 import { getRecentActivity, recordActivity, spendActivity, readPolicyInputs } from "../../policy/store";
+import { gasView } from "../../policy/gasStore";
 import { readLimits, requestConfirmation, applyChange, dailyLimitFor } from "../../policy/limits";
 import { loginRequest, login, issueToken, requireSession, sessionWallet, verifyToken, AuthError } from "../../auth";
 import { verifyPrivyUser, importPrivyPasskeys, noteEmailSignIn, verifyEmailForPasskey } from "../../auth/privy";
@@ -987,6 +988,17 @@ app.get("/activity", requireSession, async (_req, res) => {
     const activity = [...rows].sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).slice(0, 20);
     res.json({ activity });
   } catch (e: any) { sendError(res, e); }
+});
+
+// Network fees Orchestra paid today for the signed-in wallet's account (ORC-31), for the small line
+// on /simple. A failed read is an error, never "nothing paid".
+app.get("/gas", requireSession, async (_req, res) => {
+  try {
+    res.json(await gasView(await storedSafeOf(res.locals.wallet as string)));
+  } catch (e: any) {
+    console.error(`[gas] couldn't read today's fees: ${safeErr(e)}`);
+    res.status(503).json({ error: "I couldn't read today's network fees just now." });
+  }
 });
 
 // ─── Approval status (the frontend polls this while an approval is out on another channel) ───
