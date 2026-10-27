@@ -96,6 +96,41 @@ test("wording: the nudge and help say what the backup is for, without jargon", (
   assert.match(b.BACKUP_HELP, /same account/);
 });
 
+test("dev-only preview: on only for `next dev` with ?previewBackup=1, never in a built app", () => {
+  assert.equal(b.backupPreviewEnabled("development", "?previewBackup=1"), true);
+  assert.equal(b.backupPreviewEnabled("development", "?ownerSign=x&previewBackup=1"), true);
+  for (const env of ["production", "test", undefined, ""]) {
+    assert.equal(b.backupPreviewEnabled(env, "?previewBackup=1"), false, `NODE_ENV=${env}`);
+  }
+  assert.equal(b.backupPreviewEnabled("development", "?previewBackup=0"), false);
+  assert.equal(b.backupPreviewEnabled("development", ""), false);
+  assert.equal(b.backupPreviewEnabled("development", undefined), false);
+  // The stand-in is a passkey-only person, so the preview shows the nudge and both add buttons.
+  assert.equal(b.isPasskeyOnly(b.PREVIEW_ACCOUNTS), true);
+  assert.equal(b.canLinkEmail(b.PREVIEW_ACCOUNTS), true);
+  assert.equal(b.usesOwnWallet(b.PREVIEW_ACCOUNTS), false);
+});
+
+test("own wallet (MetaMask through Privy): its recovery phrase is the backup, no email offer", () => {
+  assert.equal(b.usesOwnWallet([METAMASK]), true);
+  assert.equal(b.usesOwnWallet([PASSKEY, EMBEDDED]), false);
+  assert.equal(b.usesOwnWallet([EMBEDDED, EMAIL]), false);
+  assert.equal(b.usesOwnWallet(undefined), false);
+  assert.match(b.WALLET_USER_TEXT, /recovery phrase/);
+  assert.doesNotMatch(b.WALLET_USER_TEXT, /email/i);
+});
+
+test("a passkey on another device: plain help and errors, and it doesn't change who counts as passkey-only", () => {
+  assert.equal(b.linkError("exited_link_flow", "passkey"), null);
+  assert.match(b.linkError("linked_to_another_user", "passkey"), /passkey already belongs to another account/);
+  assert.match(b.linkError("whatever", "passkey"), /couldn't add that passkey/);
+  assert.match(b.linkError("whatever"), /couldn't add your email/, "email stays the default");
+  for (const text of [b.PASSKEY_HELP, b.LINKED_PASSKEY_OK, b.linkError("whatever", "passkey")]) {
+    assert.ok(!/\b(Safe|Privy|embedded|seed|WebAuthn|credential)\b/i.test(text), text);
+  }
+  assert.equal(b.isPasskeyOnly([PASSKEY, { ...PASSKEY, credentialId: "laptop" }, EMBEDDED]), true, "the nudge still asks for an email");
+});
+
 (async () => {
   console.log("backup sign-in");
   for (const [name, fn] of tests) {

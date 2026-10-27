@@ -83,12 +83,48 @@ export const BACKUP_HELP =
   "If you lose this device, sign in with your email instead and you'll find the same account and money.";
 export const LINKED_EMAIL_OK = 'Email added. You can now sign in with it on any device.';
 
-/** A plain sentence for a failed link, or null when the user just closed the window. */
-export function linkError(code) {
+export const LINKED_PASSKEY_OK = 'Passkey added. You can now sign in with it on that device too.';
+export const PASSKEY_HELP =
+  'For example on your laptop or a second phone. Your browser can also show a QR code to save it on another device.';
+/** For someone who signs in with their own wallet (MetaMask through Privy): no email offer, their phrase is the backup. */
+export const WALLET_USER_TEXT =
+  'You sign in with your own wallet. Its recovery phrase is your backup: keep it somewhere safe, and you can get back to your account from any device.';
+
+/** True when the person signs in with their own wallet (MetaMask, …) rather than Privy's embedded one. */
+export const usesOwnWallet = (linkedAccounts = []) =>
+  (linkedAccounts || []).some((a) => a?.type === 'wallet' && a.walletClientType && a.walletClientType !== 'privy');
+
+/** A plain sentence for a failed link, or null when the user just closed the window. `kind` is 'email' or 'passkey'. */
+export function linkError(code, kind = 'email') {
   if (code === 'exited_link_flow' || code === 'exited_auth_flow') return null;
+  if (kind === 'passkey') {
+    if (code === 'linked_to_another_user') return 'That passkey already belongs to another account, so it can\'t be added here.';
+    if (code === 'disallowed_login_method' || code === 'not_supported') return "Passkey sign-in isn't turned on for Orchestra yet.";
+    return "We couldn't add that passkey. Please try again, or add your email instead.";
+  }
   if (code === 'linked_to_another_user') return 'That email already belongs to another account, so it can\'t be added here. Use a different email.';
   if (code === 'cannot_link_more_of_type') return 'This account already has an email.';
   if (code === 'disallowed_login_method' || code === 'not_supported') return "Email sign-in isn't turned on for Orchestra yet.";
   if (code === 'invalid_credentials') return "That code didn't work. Try again and ask for a new one.";
   return "We couldn't add your email. Please try again.";
 }
+
+// ── Dev-only preview ──
+
+/**
+ * `/simple?previewBackup=1` on `next dev`: the panel and the nudge as a passkey-only user sees them,
+ * with stand-in accounts, even when signed out (Privy only allows listed origins). `nodeEnv` is
+ * process.env.NODE_ENV, which `next build` fixes to "production", so it can never turn on in a
+ * built app (prod, Vercel previews, `next start`). Nothing is linked: the buttons only simulate it.
+ */
+export function backupPreviewEnabled(nodeEnv, search) {
+  if (nodeEnv !== 'development') return false;
+  try { return new URLSearchParams(search || '').get('previewBackup') === '1'; } catch { return false; }
+}
+
+/** The linked accounts the preview pretends to have: one passkey and the embedded wallet. */
+export const PREVIEW_ACCOUNTS = [
+  { type: 'passkey', credentialId: 'preview' },
+  { type: 'wallet', walletClientType: 'privy', address: '0x0000000000000000000000000000000000000000' },
+];
+export const PREVIEW_NOTE = 'Preview only (dev): nothing was linked to an account.';
