@@ -9,10 +9,11 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { OrchestraProvider, useOrchestra } from '@/context/OrchestraContext';
 import {
   sendIntent, getPrices, getPasskeyStatus, getApproval,
-  getTelegramStatus, telegramLinkRequest, telegramLink, listPasskeys, rejectApproval, getOwnerSign, getActivity, getPauseStatus,
+  getTelegramStatus, telegramLinkRequest, telegramLink, listPasskeys, rejectApproval, getOwnerSign, getActivity, getGasToday, getPauseStatus,
 } from '@/lib/bridge';
 import PauseBanner from '@/components/PauseBanner';
 import { activityRow, ownerSignIdFromSearch, ACTIVITY_EMPTY, EXPIRED_OWNER_SIGN } from '@/lib/activity';
+import { gasLine } from '@/lib/gas';
 import { signOwnerRequest } from '@/lib/signing';
 import { errorMessage, ownerSignCard } from '@/lib/ownerSign';
 import { registerPasskey, approveWithPasskey, setUpPhonePasskey, removePasskey } from '@/lib/passkey';
@@ -91,7 +92,15 @@ function SimpleChat() {
     getActivity().then((d) => setActivity(d.activity || [])).catch(() => {});
   }, [ledger.walletAddress, session.ready]);
   useEffect(() => { loadActivity(); }, [loadActivity]);
-  const movedFunds = useCallback(() => { refreshSoon(refreshBalances); refreshSoon(loadActivity); }, [refreshBalances, loadActivity]);
+  // Network fees Orchestra paid today (ORC-31): re-read with the activity list and after each answer.
+  // A failed read shows no line rather than a wrong figure.
+  const [gasToday, setGasToday] = useState(null);
+  const loadGas = useCallback(() => {
+    if (!ledger.walletAddress || !session.ready) { setGasToday(null); return; }
+    getGasToday().then(setGasToday).catch(() => setGasToday(null));
+  }, [ledger.walletAddress, session.ready]);
+  useEffect(() => { loadGas(); }, [loadGas]);
+  const movedFunds = useCallback(() => { refreshSoon(refreshBalances); refreshSoon(loadActivity); refreshSoon(loadGas); }, [refreshBalances, loadActivity, loadGas]);
   const [signingIdx, setSigningIdx] = useState(null);
   const [prices, setPrices] = useState(null);
   const [passkeyReg, setPasskeyReg] = useState(false);
@@ -151,8 +160,9 @@ function SimpleChat() {
       setMessages((m) => [...m, errorMessage(err)]);
     } finally {
       setBusy(false);
+      loadGas(); // an over-budget refusal changes the line too
     }
-  }, [ledger.walletAddress, movedFunds, loadPause]);
+  }, [ledger.walletAddress, movedFunds, loadPause, loadGas]);
 
   const send = useCallback(async (raw) => {
     const text = (raw ?? input).trim();
@@ -429,6 +439,7 @@ function SimpleChat() {
       {connected && session.ready && <SafeSetup safe={safe} canFund={userMaySign({ emailWallet, hasPasskey: session.hasPasskey }, 'deposit')} ledger={ledger} onMoved={movedFunds} onError={(msg) => setMessages((m) => [...m, { role: 'agent', error: msg }])} />}
 
       {connected && session.ready && <RecentActivity rows={activity} />}
+      {connected && session.ready && <GasCovered view={gasToday} />}
 
       {/* Messages */}
       <main style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 16, padding: '24px 0' }}>
@@ -942,6 +953,13 @@ function PhoneSetupButton({ session, onDone, onError }) {
       {state === 'sending' ? 'Sending…' : '🔐 Set up phone passkey'}
     </button>
   );
+}
+
+/** One small line: the network fees Orchestra paid for this account today (ORC-31). */
+function GasCovered({ view }) {
+  const line = gasLine(view);
+  if (!line) return null;
+  return <p style={{ margin: '6px 2px 0', fontSize: 12, color: HINT_COLOR }}>{line}</p>;
 }
 
 function RecentActivity({ rows }) {
