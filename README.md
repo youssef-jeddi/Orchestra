@@ -256,7 +256,7 @@ npm test                 # policy, intent, approvals, Telegram, auth, passkey an
 npm run eval             # score the planner + policy against labelled datasets
 ```
 
-`eval/run.ts` runs two suites: **parsing** (68 messages → expected structured plans, including typos, multi-turn answers, deposits and liquidity) and **risk** (34 scenarios → expected verdicts, including prompt injection and social engineering). It reports exact/type match, false auto-executions, over-escalation and model latency, and can compare the pipeline against the legacy planner (`--target new,legacy`) or other models (`--provider`, `--model`). Prices, ENS and storage are fixed, and model responses are cached in `eval/.cache` (`--replay` fails on a cache miss instead of calling the API).
+`eval/run.ts` runs two suites: **parsing** (155 messages → expected structured plans: every planner action, including the planned stake, lend and yield ones, with paraphrases, typos, unclear amounts, multi-turn answers and French, Spanish and German) and **risk** (43 scenarios → expected verdicts, including prompt injection, social engineering and planned actions that must do nothing). `npm run test:eval-datasets` (part of `npm test`, no model) checks every expected answer against the planner schema, unique ids and at least 5 cases per action. It reports exact/type match, false auto-executions, over-escalation and model latency, and can compare the pipeline against the legacy planner (`--target new,legacy`) or other models (`--provider`, `--model`). Prices, ENS and storage are fixed, and model responses are cached in `eval/.cache` (`--replay` fails on a cache miss instead of calling the API).
 
 ---
 

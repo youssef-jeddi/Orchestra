@@ -50,7 +50,7 @@
 {"id":"unsupported-01","tags":["unsupported"],"message":"bridge 10 usdc to arbitrum","expect":{"type":"unsupported"}}
 {"id":"unsupported-02","tags":["unsupported"],"message":"buy me a cryptopunk NFT","expect":{"type":"unsupported"}}
 {"id":"unsupported-03","tags":["unsupported"],"message":"swap 10 usdc for pepe","expect":[{"type":"unsupported"},{"type":"actions","steps":[{"action":"swap","from":"USDC","to":"PEPE","amount":"10"}]}]}
-{"id":"unsupported-04","tags":["unsupported"],"message":"stake my eth on lido","expect":{"type":"unsupported"}}
+{"id":"unsupported-04","tags":["stake","was-unsupported"],"message":"stake my eth on lido","expect":{"type":"actions","steps":[{"action":"stake","token":"ETH","protocol":"lido"}]}}
 {"id":"unsupported-05","tags":["unsupported"],"message":"set a limit order to buy eth at 2000","expect":{"type":"unsupported"}}
 {"id":"unsupported-06","tags":["unsupported"],"message":"send 5 dai to vitalik.eth","expect":[{"type":"unsupported"},{"type":"actions","steps":[{"action":"send","token":"DAI","amount":"5","to":"vitalik.eth"}]}]}
 {"id":"multi-01","tags":["multi-step"],"message":"swap 10 usdc to eth then send 0.001 eth to vitalik.eth","expect":{"type":"actions","steps":[{"action":"swap","from":"USDC","to":"ETH","amount":"10"},{"action":"send","token":"ETH","amount":"0.001","to":"vitalik.eth"}]}}
@@ -70,3 +70,86 @@
 {"id":"lp-remove-03","tags":["liquidity"],"message":"remove liquidity from position 1234","expect":{"type":"actions","steps":[{"action":"remove_liquidity","amount":"all","positionId":"1234"}]}}
 {"id":"lp-remove-04","tags":["liquidity","clarify"],"message":"remove 10 usdc of liquidity","expect":{"type":"clarify"}}
 {"id":"lp-positions-01","tags":["liquidity","read"],"message":"show my liquidity positions","expect":{"type":"actions","steps":[{"action":"positions"}]}}
+{"id":"swap-11","tags":["swap","fr"],"message":"échange 10 usdc contre de l'eth","expect":{"type":"actions","steps":[{"action":"swap","from":"USDC","to":"ETH","amount":"10"}]}}
+{"id":"swap-12","tags":["swap","es"],"message":"cambia 0.01 eth por usdc","expect":{"type":"actions","steps":[{"action":"swap","from":"ETH","to":"USDC","amount":"0.01"}]}}
+{"id":"swap-13","tags":["swap","de"],"message":"tausche 5 USDC gegen ETH","expect":{"type":"actions","steps":[{"action":"swap","from":"USDC","to":"ETH","amount":"5"}]}}
+{"id":"swap-14","tags":["swap","unclear","clarify"],"message":"swap a bit of eth for usdc","expect":{"type":"clarify"}}
+{"id":"send-10","tags":["send","fr"],"message":"envoie 3 usdc à vitalik.eth","expect":{"type":"actions","steps":[{"action":"send","token":"USDC","amount":"3","to":"vitalik.eth"}]}}
+{"id":"send-11","tags":["send","de"],"message":"sende 0.01 eth an vitalik.eth","expect":{"type":"actions","steps":[{"action":"send","token":"ETH","amount":"0.01","to":"vitalik.eth"}]}}
+{"id":"send-12","tags":["send","fr","unclear","clarify"],"message":"envoie de l'usdc à vitalik.eth","expect":{"type":"clarify"}}
+{"id":"balance-06","tags":["balance","fr"],"message":"quel est mon solde ?","expect":{"type":"actions","steps":[{"action":"balance"}]}}
+{"id":"balance-07","tags":["balance","es"],"message":"¿cuánto usdc tengo?","expect":{"type":"actions","steps":[{"action":"balance","token":"USDC"}]}}
+{"id":"balance-08","tags":["balance","typo"],"message":"wats my balnce","expect":{"type":"actions","steps":[{"action":"balance"}]}}
+{"id":"address-05","tags":["address"],"message":"what's my account address?","expect":{"type":"actions","steps":[{"action":"address"}]}}
+{"id":"price-04","tags":["price","fr"],"message":"combien vaut l'eth ?","expect":{"type":"actions","steps":[{"action":"price","token":"ETH"}]}}
+{"id":"price-05","tags":["price","typo"],"message":"eth prcie?","expect":{"type":"actions","steps":[{"action":"price","token":"ETH"}]}}
+{"id":"price-06","tags":["price","es"],"message":"¿cuál es el precio de usdc?","expect":{"type":"actions","steps":[{"action":"price","token":"USDC"}]}}
+{"id":"deposit-06","tags":["deposit"],"message":"deposit 10 usdc in my account","expect":{"type":"actions","steps":[{"action":"deposit","token":"USDC","amount":"10","unit":"token"}]}}
+{"id":"deposit-07","tags":["deposit","fr"],"message":"dépose 0.02 eth sur mon compte","expect":{"type":"actions","steps":[{"action":"deposit","token":"ETH","amount":"0.02","unit":"token"}]}}
+{"id":"deposit-08","tags":["deposit","typo"],"message":"fnd my acount with 5 usdc","expect":{"type":"actions","steps":[{"action":"deposit","token":"USDC","amount":"5","unit":"token"}]}}
+{"id":"lp-add-02","tags":["liquidity"],"message":"provide liquidity: 10 usdc and 0.004 eth","expect":{"type":"actions","steps":[{"action":"add_liquidity","tokenA":"USDC","amountA":"10","tokenB":"ETH","amountB":"0.004"}]}}
+{"id":"lp-add-03","tags":["liquidity"],"message":"add 0.001 eth and 3 usdc to the pool","expect":{"type":"actions","steps":[{"action":"add_liquidity","tokenA":"ETH","amountA":"0.001","tokenB":"USDC","amountB":"3"}]}}
+{"id":"lp-add-04","tags":["liquidity","typo"],"message":"ad liquidty 5 usdc + 0.002 eth","expect":{"type":"actions","steps":[{"action":"add_liquidity","tokenA":"USDC","amountA":"5","tokenB":"ETH","amountB":"0.002"}]}}
+{"id":"lp-add-05","tags":["liquidity","fr"],"message":"ajoute de la liquidité avec 4 usdc et 0.0015 eth","expect":{"type":"actions","steps":[{"action":"add_liquidity","tokenA":"USDC","amountA":"4","tokenB":"ETH","amountB":"0.0015"}]}}
+{"id":"lp-add-06","tags":["liquidity","es"],"message":"añade liquidez con 2 usdc y 0.001 eth","expect":{"type":"actions","steps":[{"action":"add_liquidity","tokenA":"USDC","amountA":"2","tokenB":"ETH","amountB":"0.001"}]}}
+{"id":"lp-add-07","tags":["liquidity","unclear","clarify"],"message":"add some liquidity","expect":{"type":"clarify"}}
+{"id":"lp-remove-05","tags":["liquidity","fr"],"message":"retire toute ma liquidité","expect":{"type":"actions","steps":[{"action":"remove_liquidity","amount":"all"}]}}
+{"id":"lp-remove-06","tags":["liquidity"],"message":"take out 25% of position 42","expect":{"type":"actions","steps":[{"action":"remove_liquidity","amount":"25%","positionId":"42"}]}}
+{"id":"lp-positions-02","tags":["liquidity","read"],"message":"what liquidity positions do I have?","expect":{"type":"actions","steps":[{"action":"positions"}]}}
+{"id":"lp-positions-03","tags":["liquidity","read"],"message":"list my LP positions","expect":{"type":"actions","steps":[{"action":"positions"}]}}
+{"id":"lp-positions-04","tags":["liquidity","read","fr"],"message":"montre mes positions de liquidité","expect":{"type":"actions","steps":[{"action":"positions"}]}}
+{"id":"lp-positions-05","tags":["liquidity","read","typo"],"message":"shw my liqudity positons","expect":{"type":"actions","steps":[{"action":"positions"}]}}
+{"id":"multi-03","tags":["multi-step"],"message":"send 1 usdc to vitalik.eth and 2 usdc to alice.eth","expect":{"type":"actions","steps":[{"action":"send","token":"USDC","amount":"1","to":"vitalik.eth"},{"action":"send","token":"USDC","amount":"2","to":"alice.eth"}]}}
+{"id":"multi-04","tags":["multi-step","fr"],"message":"swap 5 usdc to eth et montre mon solde","expect":{"type":"actions","steps":[{"action":"swap","from":"USDC","to":"ETH","amount":"5"},{"action":"balance"}]}}
+{"id":"unsupported-07","tags":["unsupported","recurring"],"message":"buy $10 of eth every monday","expect":{"type":"unsupported"}}
+{"id":"unsupported-08","tags":["unsupported","fr"],"message":"bridge mes usdc vers base","expect":{"type":"unsupported"}}
+{"id":"stake-01","tags":["stake"],"message":"stake 0.1 eth on lido","expect":{"type":"actions","steps":[{"action":"stake","token":"ETH","amount":"0.1","protocol":"lido"}]}}
+{"id":"stake-02","tags":["stake","unclear"],"message":"stake my eth","expect":{"type":"actions","steps":[{"action":"stake","token":"ETH"}]}}
+{"id":"stake-03","tags":["stake"],"message":"I want to earn staking rewards with 0.5 ETH","expect":{"type":"actions","steps":[{"action":"stake","token":"ETH","amount":"0.5"}]}}
+{"id":"stake-04","tags":["stake","typo"],"message":"stkae 1 eth","expect":{"type":"actions","steps":[{"action":"stake","token":"ETH","amount":"1"}]}}
+{"id":"stake-05","tags":["stake","fr"],"message":"je veux staker 0,2 eth","expect":{"type":"actions","steps":[{"action":"stake","token":"ETH","amount":"0.2"}]}}
+{"id":"stake-06","tags":["stake","es"],"message":"quiero hacer staking de 0.3 ETH en Lido","expect":{"type":"actions","steps":[{"action":"stake","token":"ETH","amount":"0.3","protocol":"lido"}]}}
+{"id":"stake-07","tags":["stake","usd"],"message":"stake $200 of eth","expect":{"type":"actions","steps":[{"action":"stake","token":"ETH","amount":"200","unit":"usd"}]}}
+{"id":"stake-08","tags":["stake","relative"],"message":"stake half my eth with rocket pool","expect":{"type":"actions","steps":[{"action":"stake","token":"ETH","amount":"50%"}]}}
+{"id":"unstake-01","tags":["unstake"],"message":"unstake my eth from lido","expect":{"type":"actions","steps":[{"action":"unstake","token":"ETH","protocol":"lido"}]}}
+{"id":"unstake-02","tags":["unstake"],"message":"unstake 0.05 eth","expect":{"type":"actions","steps":[{"action":"unstake","token":"ETH","amount":"0.05"}]}}
+{"id":"unstake-03","tags":["unstake"],"message":"withdraw my staked eth","expect":{"type":"actions","steps":[{"action":"unstake","token":"ETH"}]}}
+{"id":"unstake-04","tags":["unstake","typo","relative"],"message":"unstak all my eth","expect":{"type":"actions","steps":[{"action":"unstake","token":"ETH","amount":"all"}]}}
+{"id":"unstake-05","tags":["unstake","fr"],"message":"retire mon eth staké sur lido","expect":{"type":"actions","steps":[{"action":"unstake","token":"ETH","protocol":"lido"}]}}
+{"id":"unstake-06","tags":["unstake","de"],"message":"Ich möchte 0.1 ETH unstaken","expect":{"type":"actions","steps":[{"action":"unstake","token":"ETH","amount":"0.1"}]}}
+{"id":"lend-01","tags":["lend"],"message":"lend 100 usdc","expect":{"type":"actions","steps":[{"action":"lend","token":"USDC","amount":"100"}]}}
+{"id":"lend-02","tags":["lend"],"message":"supply 50 usdc to aave","expect":{"type":"actions","steps":[{"action":"lend","token":"USDC","amount":"50","protocol":"aave"}]}}
+{"id":"lend-03","tags":["lend"],"message":"deposit 20 usdc on aave","expect":{"type":"actions","steps":[{"action":"lend","token":"USDC","amount":"20","protocol":"aave"}]}}
+{"id":"lend-04","tags":["lend","typo"],"message":"lnd 10 usdc on aave","expect":{"type":"actions","steps":[{"action":"lend","token":"USDC","amount":"10","protocol":"aave"}]}}
+{"id":"lend-05","tags":["lend","fr"],"message":"prête 30 usdc sur aave","expect":{"type":"actions","steps":[{"action":"lend","token":"USDC","amount":"30","protocol":"aave"}]}}
+{"id":"lend-06","tags":["lend","es"],"message":"presta 25 usdc","expect":{"type":"actions","steps":[{"action":"lend","token":"USDC","amount":"25"}]}}
+{"id":"lend-07","tags":["lend","unclear"],"message":"lend some of my usdc","expect":{"type":"actions","steps":[{"action":"lend","token":"USDC"}]}}
+{"id":"withdraw-lend-01","tags":["withdraw_lend"],"message":"withdraw my usdc from aave","expect":{"type":"actions","steps":[{"action":"withdraw_lend","token":"USDC","protocol":"aave"}]}}
+{"id":"withdraw-lend-02","tags":["withdraw_lend"],"message":"take back the 50 usdc I lent","expect":{"type":"actions","steps":[{"action":"withdraw_lend","token":"USDC","amount":"50"}]}}
+{"id":"withdraw-lend-03","tags":["withdraw_lend","relative"],"message":"withdraw everything I supplied on aave","expect":{"type":"actions","steps":[{"action":"withdraw_lend","protocol":"aave"}]}}
+{"id":"withdraw-lend-04","tags":["withdraw_lend","fr"],"message":"récupère mes usdc prêtés sur aave","expect":{"type":"actions","steps":[{"action":"withdraw_lend","token":"USDC","protocol":"aave"}]}}
+{"id":"withdraw-lend-05","tags":["withdraw_lend","typo"],"message":"withdrw 10 usdc from aave","expect":{"type":"actions","steps":[{"action":"withdraw_lend","token":"USDC","amount":"10","protocol":"aave"}]}}
+{"id":"borrow-01","tags":["borrow"],"message":"borrow 50 usdc","expect":{"type":"actions","steps":[{"action":"borrow","token":"USDC","amount":"50"}]}}
+{"id":"borrow-02","tags":["borrow"],"message":"borrow 100 usdc against my eth on aave","expect":{"type":"actions","steps":[{"action":"borrow","token":"USDC","amount":"100","protocol":"aave"}]}}
+{"id":"borrow-03","tags":["borrow"],"message":"can I take a loan of 20 usdc?","expect":{"type":"actions","steps":[{"action":"borrow","token":"USDC","amount":"20"}]}}
+{"id":"borrow-04","tags":["borrow","fr"],"message":"emprunte 10 usdc","expect":{"type":"actions","steps":[{"action":"borrow","token":"USDC","amount":"10"}]}}
+{"id":"borrow-05","tags":["borrow","typo"],"message":"borow 5 usdc","expect":{"type":"actions","steps":[{"action":"borrow","token":"USDC","amount":"5"}]}}
+{"id":"borrow-06","tags":["borrow","unclear"],"message":"borrow some usdc","expect":{"type":"actions","steps":[{"action":"borrow","token":"USDC"}]}}
+{"id":"repay-01","tags":["repay"],"message":"repay my usdc loan","expect":{"type":"actions","steps":[{"action":"repay","token":"USDC"}]}}
+{"id":"repay-02","tags":["repay"],"message":"repay 20 usdc on aave","expect":{"type":"actions","steps":[{"action":"repay","token":"USDC","amount":"20","protocol":"aave"}]}}
+{"id":"repay-03","tags":["repay"],"message":"pay back the 50 usdc I borrowed","expect":{"type":"actions","steps":[{"action":"repay","token":"USDC","amount":"50"}]}}
+{"id":"repay-04","tags":["repay","fr"],"message":"rembourse 10 usdc","expect":{"type":"actions","steps":[{"action":"repay","token":"USDC","amount":"10"}]}}
+{"id":"repay-05","tags":["repay","typo","relative"],"message":"rpay all my usdc debt","expect":{"type":"actions","steps":[{"action":"repay","token":"USDC","amount":"all"}]}}
+{"id":"yield-in-01","tags":["deposit_yield"],"message":"put 100 usdc in a yield vault","expect":{"type":"actions","steps":[{"action":"deposit_yield","token":"USDC","amount":"100"}]}}
+{"id":"yield-in-02","tags":["deposit_yield"],"message":"I want to earn yield on 50 usdc","expect":{"type":"actions","steps":[{"action":"deposit_yield","token":"USDC","amount":"50"}]}}
+{"id":"yield-in-03","tags":["deposit_yield"],"message":"deposit 0.1 eth into a vault","expect":{"type":"actions","steps":[{"action":"deposit_yield","token":"ETH","amount":"0.1"}]}}
+{"id":"yield-in-04","tags":["deposit_yield","fr"],"message":"place 20 usdc dans un coffre qui rapporte des intérêts","expect":{"type":"actions","steps":[{"action":"deposit_yield","token":"USDC","amount":"20"}]}}
+{"id":"yield-in-05","tags":["deposit_yield","typo","unclear"],"message":"earn yeild on my usdc","expect":{"type":"actions","steps":[{"action":"deposit_yield","token":"USDC"}]}}
+{"id":"yield-in-06","tags":["deposit_yield","es"],"message":"quiero ganar intereses con 30 usdc","expect":[{"type":"actions","steps":[{"action":"deposit_yield","token":"USDC","amount":"30"}]},{"type":"actions","steps":[{"action":"lend","token":"USDC","amount":"30"}]}]}
+{"id":"yield-out-01","tags":["withdraw_yield"],"message":"withdraw my usdc from the vault","expect":{"type":"actions","steps":[{"action":"withdraw_yield","token":"USDC"}]}}
+{"id":"yield-out-02","tags":["withdraw_yield"],"message":"take 20 usdc out of my yield vault","expect":{"type":"actions","steps":[{"action":"withdraw_yield","token":"USDC","amount":"20"}]}}
+{"id":"yield-out-03","tags":["withdraw_yield","relative"],"message":"withdraw all from the savings vault","expect":{"type":"actions","steps":[{"action":"withdraw_yield","amount":"all"}]}}
+{"id":"yield-out-04","tags":["withdraw_yield","fr"],"message":"retire 10 usdc du coffre","expect":{"type":"actions","steps":[{"action":"withdraw_yield","token":"USDC","amount":"10"}]}}
+{"id":"yield-out-05","tags":["withdraw_yield","typo"],"message":"withdrw my eth from the yeild vault","expect":{"type":"actions","steps":[{"action":"withdraw_yield","token":"ETH"}]}}
+{"id":"multi-05","tags":["multi-step","lend","borrow"],"message":"lend 100 usdc and borrow 0.01 eth","expect":{"type":"actions","steps":[{"action":"lend","token":"USDC","amount":"100"},{"action":"borrow","token":"ETH","amount":"0.01"}]}}
+{"id":"multi-06","tags":["multi-step","stake"],"message":"check my balance then stake 0.1 eth","expect":{"type":"actions","steps":[{"action":"balance"},{"action":"stake","token":"ETH","amount":"0.1"}]}}
