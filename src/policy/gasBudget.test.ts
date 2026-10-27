@@ -3,13 +3,14 @@
 // Run with `npm run test:gas-budget`.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { ethers } from "ethers";
 import {
   DAILY_GAS_BUDGET, GAS_OVER_BUDGET_TEXT, GAS_UNREADABLE_TEXT, gasDay, gasDayKey, gasRowFromReceipt, gasBudgetStatus,
   parseGasDay, sumGas, type GasRow,
 } from "./gasBudget";
 import {
-  assertGasBudget, gasStatusToday, recordGasRow, noteRelayerGas, readGasHistory, gasView, _resetGasStore, _gasSaved,
+  assertGasBudget, gasBudgetRefusal, gasStatusToday, recordGasRow, noteRelayerGas, readGasHistory, gasView, _resetGasStore, _gasSaved,
 } from "./gasStore";
 import * as storage from "../integrations/zero-g/storage";
 import { executeForAccount, type AccountExecDeps } from "../integrations/safe/accountExec";
@@ -267,6 +268,34 @@ test("/simple's line: plain words, small amounts readable, nothing when nothing 
   assert.equal(formatEthAmount("0"), "0 ETH");
   assert.equal(formatEthAmount("junk"), null);
   for (const s of [GAS_USED_UP, GAS_OVER_BUDGET_TEXT, GAS_UNREADABLE_TEXT]) assert.doesNotMatch(s, /\bgas\b|relayer|paymaster|wei|gwei/i, "no jargon for newcomers");
+});
+
+test("early check (before any approval card, Telegram request or owner-sign card): same answers as at execution", async () => {
+  assert.equal(await gasBudgetRefusal(SAFE), null, "allowance left: nothing to say");
+  await recordGasRow(SAFE, row(DAILY_GAS_BUDGET.gasUnits, 1n));
+  assert.equal(await gasBudgetRefusal(SAFE), GAS_OVER_BUDGET_TEXT, "used up: the plain refusal");
+  assert.equal(await gasBudgetRefusal(OTHER), null, "per account");
+  process.env.ORCHESTRA_FAULT_INJECT = "gas-read";
+  try {
+    assert.equal(await gasBudgetRefusal("0x00000000000000000000000000000000000000d6"), GAS_UNREADABLE_TEXT, "unreadable: fails closed, like execution");
+  } finally { delete process.env.ORCHESTRA_FAULT_INJECT; }
+  process.env.ORCHESTRA_FAULT_INJECT = "gas-over-budget";
+  try {
+    assert.equal(await gasBudgetRefusal(OTHER), GAS_OVER_BUDGET_TEXT, "the dev fault the browser test uses");
+  } finally { delete process.env.ORCHESTRA_FAULT_INJECT; }
+  // A check that fails in some unexpected way still refuses, with no internals in the sentence.
+  assert.equal(await gasBudgetRefusal(SAFE, async () => { throw new Error("rpc https://secret"); }), GAS_UNREADABLE_TEXT);
+});
+
+test("/intent checks the allowance before it builds, holds an approval, asks Telegram or runs anything", () => {
+  const src = readFileSync("src/integrations/ledger/serve.ts", "utf-8");
+  const intent = src.slice(src.indexOf('app.post("/intent"'));
+  const early = intent.indexOf("await gasBudgetRefusal(safeAddress)");
+  assert.ok(early > 0, "the early check is in /intent");
+  for (const later of ["await adapter.build(ctx)", "await adapter.execute(ctx, result)", "await createApproval(", "await sendApprovalMessage("]) {
+    const at = intent.indexOf(later);
+    assert.ok(at > early, `${later} comes after the early check`);
+  }
 });
 
 (async () => {

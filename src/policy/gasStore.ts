@@ -71,6 +71,22 @@ export async function assertGasBudget(account: string): Promise<void> {
   }
 }
 
+/**
+ * The early check, before anything is offered for an action the relayer would send (ORC-31): an
+ * approval card, a Telegram approval request or an automatic run. Returns the sentence to answer
+ * with, or null when there is allowance left. Same rules as assertGasBudget, which still runs at
+ * execution (the allowance can run out between the OK and the send): used up gives the used-up
+ * sentence, and an unreadable allowance fails closed with the "couldn't check" one.
+ */
+export async function gasBudgetRefusal(account: string, assert: (account: string) => Promise<void> = assertGasBudget): Promise<string | null> {
+  try {
+    await assert(account);
+    return null;
+  } catch (err) {
+    return err instanceof UserFacingError ? err.message : GAS_UNREADABLE_TEXT;
+  }
+}
+
 /** Add one paid transaction to its account's day. Never throws. */
 export async function recordGasRow(account: string, row: GasRow): Promise<void> {
   const day = gasDay(Date.parse(row.at) || Date.now());

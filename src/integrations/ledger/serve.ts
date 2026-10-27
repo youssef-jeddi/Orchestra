@@ -35,7 +35,7 @@ import {
   type PolicyProfile,
 } from "../../policy";
 import { getRecentActivity, recordActivity, spendActivity, readPolicyInputs } from "../../policy/store";
-import { gasView } from "../../policy/gasStore";
+import { gasView, gasBudgetRefusal } from "../../policy/gasStore";
 import { readLimits, requestConfirmation, applyChange, dailyLimitFor } from "../../policy/limits";
 import { loginRequest, login, issueToken, requireSession, sessionWallet, verifyToken, AuthError } from "../../auth";
 import { verifyPrivyUser, importPrivyPasskeys, noteEmailSignIn, verifyEmailForPasskey } from "../../auth/privy";
@@ -575,6 +575,18 @@ app.post("/intent", async (req, res) => {
     if (adapter.execute && safeAddress && wallet && !(await isAccountReady(wallet))) {
       res.json({ status: "unsupported", intentType, reason: ACCOUNT_NOT_READY_REASON, reasoning: ACCOUNT_NOT_READY_REASON, plan, timing: timing() });
       return;
+    }
+
+    // The account's network fee allowance for today, before anything is offered (ORC-31): over it
+    // (or unreadable: fail closed), no approval card, Telegram request or owner-sign card is shown
+    // for something the relayer couldn't send anyway. Execution checks it again.
+    if (adapter.execute && safeAddress) {
+      const gasRefusal = await gasBudgetRefusal(safeAddress);
+      if (gasRefusal) {
+        console.log(`[intent ${rid}] ${intentType} refused before any approval: network fee allowance`);
+        res.json({ status: "unsupported", intentType, reason: gasRefusal, reasoning: gasRefusal, plan, timing: timing() });
+        return;
+      }
     }
 
     const ctx = {
