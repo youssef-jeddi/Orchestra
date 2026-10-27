@@ -100,14 +100,19 @@ async function sendTx(ledger, tx, gasLimit) {
 
 // ── Sign a request that went past the account's on-chain daily ceiling ──
 // `offer` is what the server held and returned (id + the EIP-712 typed data of that exact Safe
-// transaction). The wallet signs it as the account's owner and only the signature goes back; the
-// server relays what it stored. Nothing here builds or changes the transaction.
-export async function signOwnerRequest(ledger, offer, who) {
+// transaction). It is decoded here first (ownerSignCheck.js, ORC-113): anything but a plain payment
+// from `safeAddress`, the account this page shows, is refused before the wallet opens. The wallet
+// signs typed data rebuilt from the decoded fields, never the server's, so what was shown and what
+// is signed can't differ; only the signature goes back and the server relays what it stored.
+export async function signOwnerRequest(ledger, offer, who, safeAddress) {
   assertMaySign(who, 'safe-owner');
   if (!offer?.id || !offer?.typedData) throw new Error('There is nothing to sign any more. Ask again.');
+  const { checkOwnerSign } = await import('./ownerSignCheck');
+  const check = checkOwnerSign(offer, { safeAddress });
+  if (!check.ok) throw new Error(check.message);
   const { ethers } = await import('ethers');
   if (usesProvider(ledger)) await ensureSepolia(ledger.getProvider()); // the typed data is bound to Sepolia
-  const sig = await ledger.signTyped(offer.typedData);
+  const sig = await ledger.signTyped(check.typedData);
   // Ledger returns {v,r,s}; provider wallets return a serialized hex string.
   const signature = typeof sig === 'string' ? sig : ethers.Signature.from({ v: sig.v, r: sig.r, s: sig.s }).serialized;
   const result = await submitOwnerSignature(offer.id, signature);

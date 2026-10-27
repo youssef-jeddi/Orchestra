@@ -14,7 +14,7 @@ import {
 import PauseBanner from '@/components/PauseBanner';
 import { activityRow, ownerSignIdFromSearch, ACTIVITY_EMPTY, EXPIRED_OWNER_SIGN } from '@/lib/activity';
 import { signOwnerRequest } from '@/lib/signing';
-import { errorMessage } from '@/lib/ownerSign';
+import { errorMessage, ownerSignCard } from '@/lib/ownerSign';
 import { registerPasskey, approveWithPasskey, setUpPhonePasskey, removePasskey } from '@/lib/passkey';
 import { addPasskeyButton, explainPasskeyAddError } from '@/lib/passkeyErrors';
 import { PRIVY_APP_ID } from '@/lib/privy';
@@ -233,7 +233,7 @@ function SimpleChat() {
   const signAsOwner = useCallback(async (offer, idx) => {
     setSigningIdx(idx);
     try {
-      const result = await signOwnerRequest(ledger, offer, { emailWallet, hasPasskey: session.hasPasskey });
+      const result = await signOwnerRequest(ledger, offer, { emailWallet, hasPasskey: session.hasPasskey }, safe.safeAddress);
       setMessages((m) => [...m, { role: 'system', txHash: result.txHash, explorerUrl: result.explorerUrl }]);
       movedFunds();
     } catch (err) {
@@ -241,7 +241,7 @@ function SimpleChat() {
     } finally {
       setSigningIdx(null);
     }
-  }, [ledger, emailWallet, session.hasPasskey, movedFunds]);
+  }, [ledger, emailWallet, session.hasPasskey, movedFunds, safe.safeAddress]);
 
   // Opened from Telegram's /resume link (?resume=1): open the Limits sheet, where Resume is.
   useEffect(() => {
@@ -265,7 +265,8 @@ function SimpleChat() {
     getOwnerSign(id)
       .then((offer) => setMessages((m) => [...m, errorMessage({
         code: 'over_daily_cap',
-        message: 'To send this, sign it with your wallet. ' + (offer.summary || ''),
+        // Not the bridge's summary: the card shows what the transaction itself sends (ORC-113).
+        message: 'This is over what your account may send on its own today.',
         data: { ownerSign: offer },
       })]))
       .catch(() => setMessages((m) => [...m, { role: 'agent', error: EXPIRED_OWNER_SIGN }]));
@@ -453,7 +454,7 @@ function SimpleChat() {
 
         {messages.map((m, i) => (
           <MessageRow key={i} m={m} idx={i} onExecute={execute} onPasskey={approvePasskey} onOwnerSign={signAsOwner}
-            onAddPasskeyHere={registerPk} addingPasskey={addingPasskey} onMoved={movedFunds}
+            onAddPasskeyHere={registerPk} addingPasskey={addingPasskey} onMoved={movedFunds} safeAddress={safe.safeAddress}
             passkeyReg={passkeyReg} signing={signingIdx === i}
             onAddPasskey={() => setSetupOpen(true)} canAddPasskey={needsFirstPasskey} />
         ))}
@@ -499,7 +500,7 @@ function SimpleChat() {
   );
 }
 
-function MessageRow({ m, idx, onExecute, onPasskey, onOwnerSign, onAddPasskeyHere, addingPasskey, onMoved, passkeyReg, signing, onAddPasskey, canAddPasskey }) {
+function MessageRow({ m, idx, onExecute, onPasskey, onOwnerSign, onAddPasskeyHere, addingPasskey, onMoved, passkeyReg, signing, onAddPasskey, canAddPasskey, safeAddress }) {
   if (m.passkeyPrompt || isPasskeyRequired(m.data)) {
     return <PasskeyPrompt text={m.passkeyPrompt ? PASSKEY_PROMPT : agentText(m.data)} onAdd={onAddPasskey} canAdd={canAddPasskey} />;
   }
@@ -512,12 +513,15 @@ function MessageRow({ m, idx, onExecute, onPasskey, onOwnerSign, onAddPasskeyHer
     );
   }
   if (m.error) {
+    // An owner-sign offer is decoded here, not described by the bridge: a refused one shows only the refusal.
+    const owner = ownerSignCard(m.ownerSign, safeAddress);
     return (
       <div style={{ alignSelf: 'flex-start', maxWidth: '90%', color: '#FF453A', fontSize: 14,
         border: '1px solid #FF453A44', borderRadius: 12, padding: '10px 14px', background: '#FF453A11' }}>
-        {m.error}
-        {m.ownerSign && (
+        {owner?.refused ? owner.text : m.error}
+        {owner?.canSign && (
           <div style={{ marginTop: 10 }}>
+            <div style={{ color: '#E8E4DE', marginBottom: 10 }}>{owner.text}</div>
             <button onClick={() => onOwnerSign(m.ownerSign, idx)} disabled={signing} style={approveBtn(signing)}>
               {signing ? 'Check your wallet…' : '✍️ Sign with my wallet'}
             </button>
