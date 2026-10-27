@@ -17,6 +17,8 @@ const Amount = z.preprocess(
 
 const Unit = z.enum(["token", "usd"]).default("token");
 const TokenSymbol = z.string().min(1).max(20);
+/** "previous": the amount ("all", "50%") is a share of what the step before produced (ORC-21). */
+const Of = z.literal("previous").optional();
 
 export const SwapStep = z.object({
   action: z.literal("swap"),
@@ -26,6 +28,7 @@ export const SwapStep = z.object({
   unit: Unit,
   /** "in": amount is what's spent (default). "out": amount is what's received. */
   side: z.enum(["in", "out"]).default("in"),
+  of: Of,
 });
 
 export const SendStep = z.object({
@@ -34,6 +37,7 @@ export const SendStep = z.object({
   amount: Amount,
   unit: Unit,
   to: z.string().min(1).max(100),
+  of: Of,
 });
 
 export const BalanceStep = z.object({

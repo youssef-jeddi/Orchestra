@@ -17,14 +17,15 @@ import {
 } from "../policy";
 import { messageSignals, type MessageSignals } from "../policy/messageSignals";
 import { planIntent, type PlanOptions, type PlanResult } from "./planner";
-import { resolveSteps, type ResolveContext, type ResolvedStep, type PlanStep } from "./resolve";
+import { resolveSteps, type ResolveContext, type ResolvedStep, type PlanStep, type AmountRule } from "./resolve";
 
 export type IntentOutcome =
   | { kind: "reply"; text: string }
   | { kind: "clarify"; question: string }
   | { kind: "unsupported"; reason: string }
   | { kind: "read"; steps: ResolvedStep[] }
-  | { kind: "action"; action: ActionPlan };
+  | { kind: "action"; action: ActionPlan }
+  | { kind: "plan"; plan: MultiStepPlan };
 
 export interface ActionPlan {
   id: string;
@@ -37,6 +38,41 @@ export interface ActionPlan {
   signals?: MessageSignals;
   /** All or most of the account's funds in this one action (see movesMostFunds). Decided by code, not the model. */
   movesAllFunds?: boolean;
+}
+
+/** One step of a multi-step plan: an action of its own, plus how its amounts are filled in when it runs. */
+export interface PlanAction extends ActionPlan {
+  /** See AmountRule. `fromStep` is an index into the plan's steps. */
+  amounts: AmountRule[];
+  /** What a swap step is expected to bring in (market estimate; the quote refines it). */
+  output?: { symbol: string; amount: number };
+}
+
+/** Up to MAX_PLAN_STEPS money-moving steps, approved together and run one after another (ORC-21). */
+export interface MultiStepPlan {
+  id: string;
+  summary: string;
+  steps: PlanAction[];
+  /** The total of the steps: what the plan counts toward the daily limit at most. */
+  valueUsd: number;
+  signals?: MessageSignals;
+  movesAllFunds?: boolean;
+}
+
+/**
+ * The most money-moving steps one message may hold. Each runs as its own transaction and each
+ * waits for the one before, so a long plan keeps the user waiting and widens what one OK covers.
+ */
+export const MAX_PLAN_STEPS = 3;
+
+export const TOO_MANY_STEPS_REASON = (n: number) =>
+  `That's ${n} things to do at once, and I can do up to ${MAX_PLAN_STEPS} in one message. Please split it into smaller requests.`;
+export const PLAN_WITH_DEPOSIT_REASON =
+  "Moving money from your wallet into your account is something you confirm yourself in your wallet. Ask for that on its own first, then for the rest.";
+
+/** "I'll do these 2 things, one after another:\n1. …\n2. …" (the plan's card and approval summary). */
+export function planSummary(summaries: string[]): string {
+  return `I'll do these ${summaries.length} things, one after another:\n${summaries.map((s, i) => `${i + 1}. ${s}`).join("\n")}`;
 }
 
 export interface InterpretResult {
@@ -122,16 +158,45 @@ export async function interpretIntent(
   const actions = resolved.steps.filter((s) => VALUE_BEARING.has(s.action));
   if (actions.length === 0) return { planner, outcome: { kind: "read", steps: resolved.steps } };
 
+  const signals = messageSignals(message);
   if (actions.length > 1) {
-    const list = actions.map((s, i) => `${i + 1}. ${s.summary}`).join("\n");
+    if (actions.length > MAX_PLAN_STEPS) return { planner, outcome: { kind: "unsupported", reason: TOO_MANY_STEPS_REASON(actions.length) } };
+    // A deposit is signed in the user's own wallet, not run by the agent: it can't be one of the agent's steps.
+    if (actions.some((s) => s.action === "deposit")) return { planner, outcome: { kind: "unsupported", reason: PLAN_WITH_DEPOSIT_REASON } };
+    const steps: PlanAction[] = [];
+    for (const s of actions) {
+      const index = resolved.steps.indexOf(s);
+      steps.push({
+        id: crypto.randomUUID(),
+        intentType: s.plan.action,
+        summary: s.summary,
+        steps: [s.plan],
+        params: s.plan.params,
+        valueUsd: s.valueUsd,
+        signals,
+        movesAllFunds: await movesMostFunds(out.steps[index], s, signals, ctx),
+        // `fromStep` pointed at the message's steps; the plan holds only the money-moving ones.
+        amounts: (s.amounts ?? []).map((r) => (r.fromStep == null ? r : { ...r, fromStep: actions.indexOf(resolved.steps[r.fromStep]) })),
+        ...(s.output ? { output: s.output } : {}),
+      });
+    }
     return {
       planner,
-      outcome: { kind: "clarify", question: `I can only do one thing per message for now. Which one should I do first?\n${list}` },
+      outcome: {
+        kind: "plan",
+        plan: {
+          id: crypto.randomUUID(),
+          summary: planSummary(steps.map((s) => s.summary)),
+          steps,
+          valueUsd: steps.reduce((sum, s) => sum + s.valueUsd, 0),
+          signals,
+          movesAllFunds: steps.some((s) => s.movesAllFunds),
+        },
+      },
     };
   }
 
   const step = actions[0];
-  const signals = messageSignals(message);
   const movesAllFunds = await movesMostFunds(out.steps[resolved.steps.indexOf(step)], step, signals, ctx);
   return {
     planner,
@@ -203,4 +268,70 @@ export function assessAction(action: ActionPlan, input: AssessInput = {}): Polic
     paused: input.paused,
   });
   return { ...decision, typicalMaxUsd };
+}
+
+const VERDICT_RANK: Record<string, number> = { AUTO_EXECUTE: 0, INFO: 0, NEEDS_APPROVAL: 1, BLOCKED: 2 };
+const METHOD_RANK: Record<string, number> = { none: 0, wallet: 1, passkey: 2, ledger: 3 };
+
+/**
+ * Deterministic verdict for a multi-step plan (ORC-21). Every step is checked on its own, with the
+ * steps before it counted as already spent (so the daily limit and the count of automatic actions
+ * see the whole plan), and the plan's total is checked as one action. The strictest answer wins:
+ * one step that needs an OK makes the whole plan need it, one refused step refuses the plan.
+ */
+export function assessPlan(plan: MultiStepPlan, input: AssessInput = {}): PolicyDecision & { typicalMaxUsd?: number } {
+  const now = input.now ?? Date.now();
+  // The habit baseline comes from what really ran, never from this plan's own steps.
+  let profile = input.profile;
+  let typicalMaxUsd: number | undefined;
+  if (profile && input.history && profile.typicalMaxUsd == null) {
+    const habit = computeHabitProfile(input.history);
+    if (habit.typicalMaxUsd != null) {
+      typicalMaxUsd = habit.typicalMaxUsd;
+      profile = { ...profile, typicalMaxUsd };
+    }
+  }
+  // A recipient typed in the message is "planned" when any step pays it, not only the step being checked.
+  const signals = plan.signals && planSignals(plan, profile);
+  const allSteps = plan.steps.flatMap((s) => s.steps);
+
+  const total = assessAction(
+    { ...plan, intentType: "swap", steps: allSteps, params: {}, signals },
+    { ...input, profile, now },
+  );
+  const decisions: PolicyDecision[] = [total];
+  let history = [...(input.history ?? [])];
+  for (const step of plan.steps) {
+    decisions.push(assessAction({ ...step, signals }, { ...input, profile, history, now }));
+    history = [...history, { valueUsd: step.valueUsd, at: new Date(now).toISOString(), source: "auto" }];
+  }
+
+  const worst = decisions.reduce((a, b) => (VERDICT_RANK[b.verdict] > VERDICT_RANK[a.verdict] ? b : a));
+  if (worst.verdict === "BLOCKED") return { ...worst, typicalMaxUsd };
+  if (worst.verdict !== "NEEDS_APPROVAL") return { ...total, typicalMaxUsd };
+
+  // One reason per rule, the plan-wide one first, so the card doesn't repeat itself.
+  const held = decisions.filter((d) => d.verdict === "NEEDS_APPROVAL");
+  const triggered = [...new Set(held.flatMap((d) => d.triggered))];
+  const reasons = [...new Set(held.map((d) => d.reason))];
+  const approvalMethod = held.map((d) => d.approvalMethod).reduce((a, b) => ((METHOD_RANK[b] ?? 0) > (METHOD_RANK[a] ?? 0) ? b : a));
+  return {
+    verdict: "NEEDS_APPROVAL",
+    riskScore: Math.max(...held.map((d) => d.riskScore)),
+    reason: reasons.join(" "),
+    requiresLedger: approvalMethod === "ledger",
+    triggered,
+    approvalMethod,
+    typicalMaxUsd,
+  };
+}
+
+/** The message's signals with the mentions every step accounts for removed (a step's recipient, a label in the summary). */
+function planSignals(plan: MultiStepPlan, profile: PolicyProfile | undefined): MessageSignals {
+  const s = plan.signals!;
+  const recipients = new Set(plan.steps.map((st) => String(st.params.to ?? "").toLowerCase()).filter(Boolean));
+  const known = new Set((profile?.knownAddresses ?? []).filter((a) => typeof a === "string").map((a) => a.toLowerCase()));
+  const summary = plan.summary.toLowerCase();
+  const mentions = s.mentions.filter((m) => (m.startsWith("0x") ? !recipients.has(m) && !known.has(m) : !summary.includes(m)));
+  return { ...s, mentions };
 }

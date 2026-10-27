@@ -33,13 +33,16 @@ import {
   pricesUsable,
   getPrices,
   type PolicyProfile,
+  type ActivityRecord,
 } from "../../policy";
 import { getRecentActivity, recordActivity, spendActivity, readPolicyInputs } from "../../policy/store";
 import { readLimits, requestConfirmation, applyChange, dailyLimitFor } from "../../policy/limits";
 import { loginRequest, login, issueToken, requireSession, sessionWallet, verifyToken, AuthError } from "../../auth";
 import { verifyPrivyUser, importPrivyPasskeys, noteEmailSignIn, verifyEmailForPasskey } from "../../auth/privy";
 import { getAdapter, type Balances } from "../../executor/adapters";
-import { interpretIntent, assessAction } from "../../intent/pipeline";
+import { interpretIntent, assessAction, assessPlan, planSummary, type MultiStepPlan } from "../../intent/pipeline";
+import { buildPlanSteps, runPlan, ceilingCheck, overCeilingReason, executionPayload, type PlanStepRecord, type StepOutcome } from "../../executor/plan";
+import { fitsDailyCeiling } from "../safe/accountExec";
 import { sanitizeHistory } from "../../intent/planner";
 import { INTENT_FALLBACK_ERROR, LIMITS_UNREADABLE_REASON, PRICE_UNAVAILABLE_REASON } from "../../intent/messages";
 import { injectFault } from "../../utils/faultInject";
@@ -65,7 +68,7 @@ import {
   type PendingApproval,
 } from "../../approvals";
 import { describeApproval, describeOutcome, reviewOf } from "../../approvals/describe";
-import { approveWithPasskeyFlow, telegramDecisionFlow, executeApprovalFlow, rememberSentRecipient } from "../../approvals/flows";
+import { approveWithPasskeyFlow, telegramDecisionFlow, executeApprovalFlow, executePlanApprovalFlow, rememberSentRecipient } from "../../approvals/flows";
 import {
   telegramEnabled,
   getLink,
@@ -486,9 +489,8 @@ app.post("/intent", async (req, res) => {
       return;
     }
 
-    // ── Value-bearing action: deterministic verdict ──
-    const action = outcome.action;
-    const intentType = action.intentType;
+    // ── Value-bearing action or a multi-step plan (ORC-21): deterministic verdict ──
+    const intentType = outcome.kind === "plan" ? "plan" : outcome.action.intentType;
     li.intentType = intentType;
 
     // Nothing that spends runs unless the daily limit AND the day's total could be read: an
@@ -531,6 +533,15 @@ app.post("/intent", async (req, res) => {
     };
     // The kill switch (ORC-39): global, this wallet's own, or a spend record that couldn't be saved.
     const paused = pauseFor(wallet, storedProfile.paused);
+
+    if (outcome.kind === "plan") {
+      await respondWithPlan(outcome.plan, {
+        res, rid, li, wallet, safeAddress, profile, paused, activity, timing,
+        holdReservation: (release) => { releaseReservation = release; },
+      });
+      return;
+    }
+    const action = outcome.action;
     // One verdict at a time per wallet, counting automatic spends still in progress (ORC-40 fix B).
     const reserved = await decideWithReservation(
       wallet, action.valueUsd,
@@ -666,35 +677,10 @@ app.post("/intent", async (req, res) => {
 
       // A linked Telegram chat becomes the only way to approve it: the phone shows
       // what will actually execute, decoded from the stored payload.
-      const link = telegramEnabled() ? await getLink(wallet) : null;
-      if (link) {
-        try {
-          // With a phone passkey the chat only carries the review link: approving
-          // takes the review page + the phone's passkey, bound to the payload hash.
-          const rp = phoneRp();
-          const phonePasskey = !!rp && (await hasPhonePasskey(wallet));
-          let reviewUrl: string | undefined;
-          if (phonePasskey) {
-            const t = issueReviewToken(approval);
-            reviewUrl = `${rp!.origin}/phone/approve/${approval.id}?t=${encodeURIComponent(t)}`;
-          }
-          // Saved before the message goes out: after a restart this must still be a Telegram
-          // approval, never one the desktop passkey could approve.
-          approval.channel = "telegram";
-          approval.factor = phonePasskey ? "phone-passkey" : "telegram-button";
-          await persistApproval(approval);
-          const messageId = await sendApprovalMessage(link.chatId, approval.id, describeApproval(approval, { phonePasskey }), reviewUrl);
-          approval.telegram = { chatId: link.chatId, messageId };
-          await persistApproval(approval, { required: false });
-          console.log(`[intent ${rid}] [approval] ${approval.id} sent to Telegram (${approval.factor})`);
-        } catch (err: any) {
-          // Fail closed: never fall back to a weaker factor because the phone was unreachable.
-          console.error(`[intent ${rid}] [approval] ${approval.id} couldn't be sent to Telegram: ${safeErr(err)}`);
-          await settle(approval, { error: "I couldn't send the approval to Telegram, so nothing will execute." });
-          const reason = "I couldn't deliver the approval to your Telegram, so nothing will execute. Try again in a moment.";
-          res.json({ status: "unsupported", intentType, reason, reasoning: reason, plan, timing: timing() });
-          return;
-        }
+      const undelivered = await sendToLinkedTelegram(approval, rid);
+      if (undelivered) {
+        res.json({ status: "unsupported", intentType, reason: undelivered, reasoning: undelivered, plan, timing: timing() });
+        return;
       }
     }
 
@@ -732,17 +718,208 @@ app.post("/intent", async (req, res) => {
   }
 });
 
+/**
+ * Send a new approval to the wallet's linked Telegram chat, which then becomes the only way to
+ * approve it. Null when there is no link or it was sent; otherwise the plain reason to answer with
+ * (the approval is then failed: never a fallback to a weaker factor because the phone was unreachable).
+ */
+async function sendToLinkedTelegram(approval: PendingApproval, rid: string): Promise<string | null> {
+  const wallet = approval.wallet;
+  const link = telegramEnabled() ? await getLink(wallet) : null;
+  if (!link) return null;
+  try {
+    // With a phone passkey the chat only carries the review link: approving
+    // takes the review page + the phone's passkey, bound to the payload hash.
+    const rp = phoneRp();
+    const phonePasskey = !!rp && (await hasPhonePasskey(wallet));
+    let reviewUrl: string | undefined;
+    if (phonePasskey) {
+      const t = issueReviewToken(approval);
+      reviewUrl = `${rp!.origin}/phone/approve/${approval.id}?t=${encodeURIComponent(t)}`;
+    }
+    // Saved before the message goes out: after a restart this must still be a Telegram
+    // approval, never one the desktop passkey could approve.
+    approval.channel = "telegram";
+    approval.factor = phonePasskey ? "phone-passkey" : "telegram-button";
+    await persistApproval(approval);
+    const messageId = await sendApprovalMessage(link.chatId, approval.id, describeApproval(approval, { phonePasskey }), reviewUrl);
+    approval.telegram = { chatId: link.chatId, messageId };
+    await persistApproval(approval, { required: false });
+    console.log(`[intent ${rid}] [approval] ${approval.id} sent to Telegram (${approval.factor})`);
+    return null;
+  } catch (err: any) {
+    console.error(`[intent ${rid}] [approval] ${approval.id} couldn't be sent to Telegram: ${safeErr(err)}`);
+    await settle(approval, { error: "I couldn't send the approval to Telegram, so nothing will execute." });
+    return "I couldn't deliver the approval to your Telegram, so nothing will execute. Try again in a moment.";
+  }
+}
+
+interface PlanRequest {
+  res: express.Response;
+  rid: string;
+  li: Partial<IntentLogFields>;
+  wallet: string | undefined;
+  safeAddress: string | null;
+  profile: PolicyProfile;
+  paused: ReturnType<typeof pauseFor>;
+  activity: ActivityRecord[] | undefined;
+  timing: () => Record<string, unknown>;
+  holdReservation: (release: () => void) => void;
+}
+
+/**
+ * /intent for a multi-step plan (ORC-21): one verdict for the whole plan (assessPlan), every step
+ * built up front, then either all steps run now one after another, or one server-held approval
+ * covers them all. Each step runs through the account like a single request.
+ */
+async function respondWithPlan(plan: MultiStepPlan, r: PlanRequest): Promise<void> {
+  const { res, rid, wallet, safeAddress, profile, paused, timing } = r;
+  const intentType = "plan";
+  const reserved = await decideWithReservation(
+    wallet, plan.valueUsd,
+    async () => (wallet ? getRecentActivity(wallet) : r.activity),
+    (history) => assessPlan(plan, { profile, history, paused }),
+  );
+  r.holdReservation(reserved.release);
+  const decision = reserved.decision;
+  r.li.riskScore = decision.riskScore;
+  console.log(`[intent ${rid}] plan of ${plan.steps.length} → ${decision.verdict} (risk ${decision.riskScore}) rules: ${decision.triggered.length ? decision.triggered.join(",") : "none"}`);
+
+  const { signals: _signals, steps: planSteps, ...storedPlan } = plan;
+  append("plans", { ...storedPlan, steps: planSteps.map(({ signals: _s, ...st }) => st), flagId: "user-message", createdAt: new Date().toISOString() }).catch(() => {});
+  append("assessments", {
+    planId: plan.id, verdict: decision.verdict, riskScore: decision.riskScore, reasons: [decision.reason],
+    requiresLedger: decision.requiresLedger, assessedAt: new Date().toISOString(),
+  }).catch(() => {});
+
+  const assessment = {
+    verdict: decision.verdict, riskScore: decision.riskScore, reasons: [decision.reason],
+    requiresLedger: decision.approvalMethod === "ledger", triggered: decision.triggered, approvalMethod: decision.approvalMethod,
+  };
+  const view = { id: plan.id, summary: plan.summary, steps: plan.steps.flatMap((s) => s.steps), totalEstimatedValueUsd: plan.valueUsd };
+  const agentReasoning = { planner: `Understood: ${plan.summary}`, gatekeeper: decision.reason };
+  const unsupported = (reason: string) => res.json({ status: "unsupported", intentType, reason, reasoning: reason, plan: view, timing: timing() });
+
+  if (decision.verdict === "BLOCKED") {
+    res.json({ status: "ok", intentType, autoExecuted: false, safeAddress, plan: view, assessment, agentReasoning, timing: timing() });
+    return;
+  }
+  // Every step runs through the account: without a finished one there is nothing to run or hold.
+  if (!wallet || !safeAddress || !(await isAccountReady(wallet))) {
+    unsupported(ACCOUNT_NOT_READY_REASON);
+    return;
+  }
+
+  const built = await buildPlanSteps(plan.steps, {
+    build: (step) => getAdapter(step.intentType)!.build({
+      walletAddress: wallet, safeAddress, balanceAddress: safeAddress, provider,
+      params: step.params, planSummary: step.summary, planSteps: step.steps,
+      totalEstimatedValueUsd: step.valueUsd, balances: null,
+    }),
+    execution: approvalExecution,
+  });
+  if ("refusal" in built) {
+    console.log(`[intent ${rid}] plan refused while building a step`);
+    unsupported(built.refusal);
+    return;
+  }
+  view.summary = planSummary(built.steps.map((s) => s.summary));
+  agentReasoning.planner = `Understood: ${view.summary}`;
+  const fits = (valueUsd: number) => fitsDailyCeiling(safeAddress, valueUsd);
+
+  if (decision.verdict === "AUTO_EXECUTE") {
+    const run = await runPlan(built.steps, {
+      beforeStart: ceilingCheck(built.steps, fits),
+      readBalances: () => fetchBalances(provider, safeAddress),
+      execute: (step) => executePlanStep(wallet, safeAddress, step),
+      // Only a step that went through counts toward the daily limit, as it finishes.
+      onStepDone: async (step, outcome) => {
+        await recordActivity(wallet, spendActivity({
+          valueUsd: outcome.valueUsd, to: (step.execution as any)?.sendData?.to,
+          token: (step.execution as any)?.quoteData?.tokenIn ?? (step.execution as any)?.sendData?.token,
+          txHash: outcome.txHash, explorerUrl: outcome.explorerUrl, source: "auto",
+        })).catch(() => {});
+        if (step.intentType === "send") await rememberSentRecipient(wallet, "send", step.execution);
+      },
+      errorText: executionErrorMessage,
+    });
+    console.log(`[intent ${rid}] plan auto-run: ${run.steps.filter((s) => s.status === "done").length}/${run.steps.length} steps done`);
+    if (run.refused) {
+      unsupported(run.text);
+      return;
+    }
+    const last = [...run.steps].reverse().find((s) => s.status === "done");
+    res.json({
+      status: "ok", intentType, autoExecuted: !!last,
+      ...(last ? { txHash: last.txHash, explorerUrl: last.explorerUrl } : {}),
+      plan: view, assessment: { ...assessment, requiresLedger: false },
+      planData: { steps: built.steps.map((s) => s.summary) },
+      planResult: planResultView(run.steps, run.text, run.complete),
+      agentReasoning, timing: timing(),
+    });
+    return;
+  }
+
+  // Held for one OK: answered now when the plan can't fit in today's ceiling, rather than after the OK.
+  try {
+    if (!(await fits(plan.valueUsd))) {
+      unsupported(overCeilingReason(built.steps));
+      return;
+    }
+  } catch (err: any) {
+    unsupported(executionErrorMessage(err));
+    return;
+  }
+  let approval: PendingApproval;
+  try {
+    approval = await createApproval({
+      wallet, safeAddress, intentType: "plan", summary: view.summary, valueUsd: plan.valueUsd,
+      reason: decision.reason, triggered: decision.triggered, execution: { planData: { steps: built.steps } },
+    });
+  } catch (err: any) {
+    console.error(`[intent ${rid}] couldn't save the approval: ${safeErr(err)}`);
+    res.status(503).json({ error: "I couldn't save that request, so nothing was done. Please try again in a moment." });
+    return;
+  }
+  console.log(`[intent ${rid}] [approval] ${approval.id} pending, plan of ${built.steps.length} (hash ${approval.hash.slice(0, 18)}…)`);
+  const undelivered = await sendToLinkedTelegram(approval, rid);
+  if (undelivered) {
+    unsupported(undelivered);
+    return;
+  }
+  res.json({
+    status: "ok", intentType, autoExecuted: false, safeAddress, plan: view, assessment,
+    planData: { steps: built.steps.map((s) => s.summary) },
+    approval: approvalView(approval), agentReasoning, timing: timing(),
+  });
+}
+
+/** A plan's step outcomes for the chat: summaries, receipts and the plain overall line. */
+function planResultView(steps: StepOutcome[], text: string, complete: boolean) {
+  return { complete, text, steps: steps.map(({ index, summary, status, txHash, explorerUrl }) => ({ index, summary, status, txHash, explorerUrl })) };
+}
+
+/** Run one plan step's stored payload through the account, like a single approved request. */
+async function executePlanStep(wallet: string, safeAddress: string, step: PlanStepRecord): Promise<{ txHash: string; explorerUrl: string }> {
+  const adapter = getAdapter(step.intentType);
+  if (!adapter?.execute) throw new UserFacingError(`This ${step.intentType.replace(/_/g, " ")} can't be run from your account`);
+  await injectFault("execute");
+  const result = await adapter.execute({
+    walletAddress: wallet, safeAddress, balanceAddress: safeAddress, provider,
+    params: {}, planSummary: step.summary, planSteps: [], totalEstimatedValueUsd: step.valueUsd, balances: null,
+  }, { payload: step.execution });
+  if (!result) throw new UserFacingError("It ran but gave no result, so I can't confirm it went through");
+  return result;
+}
+
 /** The payload an approval stores for an agent-executed intent, or null if there's nothing to execute. */
 function approvalExecution(intentType: string, payload: Record<string, unknown> | undefined): Record<string, unknown> | null {
-  if (intentType === "swap" && payload?.quoteData) return { quoteData: payload.quoteData };
-  if (intentType === "send" && payload?.sendData) return { sendData: payload.sendData };
-  if (intentType === "add_liquidity" && payload?.lpData) return { lpData: payload.lpData };
-  if (intentType === "remove_liquidity" && payload?.lpRemoveData) return { lpRemoveData: payload.lpRemoveData };
-  return null;
+  return executionPayload(intentType, payload);
 }
 
 /** Execute a claimed approval's stored payload through the Safe and record the outcome. */
 async function executeApproval(a: PendingApproval): Promise<{ txHash: string; explorerUrl: string }> {
+  if (a.intentType === "plan") return executePlanApproval(a);
   try {
     const result = await executeApprovalFlow(a, async (a) => {
       const adapter = getAdapter(a.intentType);
@@ -759,6 +936,25 @@ async function executeApproval(a: PendingApproval): Promise<{ txHash: string; ex
   } catch (err: any) {
     console.error(`[approval] ${a.id} failed: ${safeErr(err)}`);
     // The approve routes answer with this error: the same sentence as the record, not "try again".
+    throw isUserFacing(err) ? err : new UserFacingError(executionErrorMessage(err), 502);
+  }
+}
+
+/** Run an approved plan's stored steps one after another (ORC-21); each step that ran is recorded as it finishes. */
+async function executePlanApproval(a: PendingApproval) {
+  const steps = ((a.execution as any)?.planData?.steps ?? []) as PlanStepRecord[];
+  try {
+    const result = await executePlanApprovalFlow(a, (a, onStepDone) => runPlan(steps, {
+      beforeStart: ceilingCheck(steps, (valueUsd) => fitsDailyCeiling(a.safeAddress, valueUsd)),
+      readBalances: () => fetchBalances(provider, a.safeAddress),
+      execute: (step) => executePlanStep(a.wallet, a.safeAddress, step),
+      onStepDone,
+      errorText: executionErrorMessage,
+    }));
+    console.log(`[approval] ${a.id} plan executed: ${result.steps.length} steps`);
+    return result;
+  } catch (err: any) {
+    console.error(`[approval] ${a.id} plan stopped: ${safeErr(err)}`);
     throw isUserFacing(err) ? err : new UserFacingError(executionErrorMessage(err), 502);
   }
 }

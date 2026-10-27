@@ -45,6 +45,26 @@ export interface ResolvedStep {
   price?: { symbol: string; usd: number };
   /** For balance steps: the token asked about, if any. */
   token?: string;
+  /** How each amount this step spends is filled in when it runs as part of a plan (ORC-21). */
+  amounts?: AmountRule[];
+  /** What a swap is expected to bring into the account (an estimate at market price, before any quote). */
+  output?: { symbol: string; amount: number };
+}
+
+/**
+ * Where a spend amount comes from. The resolved amount is always the most the step may spend;
+ * when the step runs, "balance" and "output" amounts are recomputed from what is actually there
+ * and only ever go down (see executor/plan.ts).
+ *   fixed    an exact amount the user gave
+ *   balance  a share ("all", "50%") of what the account holds when the step runs ("the rest")
+ *   output   a share of what step `fromStep` actually produced ("half of what I got")
+ */
+export interface AmountRule {
+  field: "amount" | "amountA" | "amountB";
+  symbol: string;
+  kind: "fixed" | "balance" | "output";
+  fraction: number;
+  fromStep?: number;
 }
 
 export type ResolveResult =
@@ -67,7 +87,16 @@ const ENS_NAME = /^[a-z0-9-]+(\.[a-z0-9-]+)*\.eth$/i;
 export async function resolveSteps(steps: StepT[], ctx: ResolveContext): Promise<ResolveResult> {
   try {
     const out: ResolvedStep[] = [];
-    for (const [i, step] of steps.entries()) out.push(await resolveStep(step, i, ctx));
+    // Several steps run one after another (ORC-21), so each later step is resolved against the
+    // balances the earlier ones leave behind: "swap half my ETH, then send all of it" can't count
+    // the same ETH twice, and "not enough" is answered before anything runs.
+    const delta: Record<string, number> = {};
+    for (const [i, step] of steps.entries()) {
+      const stepCtx = Object.keys(delta).length ? afterEarlierSteps(ctx, delta) : ctx;
+      const resolved = await resolveStep(step, i, stepCtx, out[i - 1]);
+      out.push(resolved);
+      if (steps.length > 1) applyEffects(resolved, delta);
+    }
     return { kind: "ok", steps: out };
   } catch (err) {
     if (err instanceof Stop) return err.result;
@@ -75,7 +104,65 @@ export async function resolveSteps(steps: StepT[], ctx: ResolveContext): Promise
   }
 }
 
-async function resolveStep(step: StepT, order: number, ctx: ResolveContext): Promise<ResolvedStep> {
+/** The context with the account's balances moved by what earlier steps of the same message spend and receive. */
+function afterEarlierSteps(ctx: ResolveContext, delta: Record<string, number>): ResolveContext {
+  return {
+    ...ctx,
+    getBalances: async () => {
+      const b = await ctx.getBalances();
+      if (!b) return null;
+      const moved = (held: number, symbol: string) => Math.max(0, held + (delta[symbol] ?? 0));
+      return { ...b, eth: moved(b.eth, "ETH"), weth: moved(b.weth, "WETH"), usdc: moved(b.usdc, "USDC") };
+    },
+  };
+}
+
+function applyEffects(r: ResolvedStep, delta: Record<string, number>): void {
+  const p = r.plan.params;
+  const add = (symbol: unknown, n: number) => { delta[String(symbol)] = (delta[String(symbol)] ?? 0) + n; };
+  if (r.action === "swap") add(p.symbolIn, -Number(p.amount));
+  if (r.action === "send") add(p.symbol, -Number(p.amount));
+  if (r.action === "add_liquidity") { add(p.symbolA, -Number(p.amountA)); add(p.symbolB, -Number(p.amountB)); }
+  if (r.output) add(r.output.symbol, r.output.amount);
+}
+
+/** "all" / "max" → 1, "50%" → 0.5, an exact amount → null. */
+function shareOf(raw: string): number | null {
+  if (raw === "all" || raw === "max") return 1;
+  if (raw.endsWith("%")) return Number(raw.slice(0, -1)) / 100;
+  return null;
+}
+
+function ruleFor(field: AmountRule["field"], raw: string, token: TokenDef): AmountRule {
+  const fraction = shareOf(raw);
+  return fraction == null ? { field, symbol: token.symbol, kind: "fixed", fraction: 1 } : { field, symbol: token.symbol, kind: "balance", fraction };
+}
+
+/**
+ * An amount that is a share of what the step before produced ("send half of what I get"). Only a
+ * swap produces something to share; the estimate here is the most it may be, refined by the quote
+ * and by what actually arrived when the plan runs.
+ */
+function fromPrevious(raw: string, token: TokenDef, previous: ResolvedStep | undefined, order: number): { amount: string; rule: AmountRule } {
+  if (!previous?.output) throw clarify(`How much ${token.symbol} do you mean? I can only use what a swap just before gives you, so give me an exact amount.`);
+  if (previous.output.symbol !== token.symbol) {
+    throw clarify(`The step before gives you ${previous.output.symbol}, not ${token.symbol}. How much ${token.symbol} do you mean?`);
+  }
+  const fraction = shareOf(raw);
+  if (fraction == null || !(fraction > 0 && fraction <= 1)) throw clarify(`What share of the ${token.symbol} you get should I use? Say "all" or a percentage like 50%.`);
+  const amount = formatAmount(previous.output.amount * fraction, token);
+  if (!(Number(amount) > 0)) throw clarify(`That swap gives too little ${token.symbol} to use. Can you give me an exact amount?`);
+  return { amount, rule: { field: "amount", symbol: token.symbol, kind: "output", fraction, fromStep: order - 1 } };
+}
+
+/** What a swap of `amountIn` is worth in the token received, at market price (0 when unpriced). */
+function estimatedOut(amountIn: string, from: TokenDef, to: TokenDef): number {
+  const pIn = getPriceUsd(from.symbol);
+  const pOut = getPriceUsd(to.symbol);
+  return pIn > 0 && pOut > 0 ? (Number(amountIn) * pIn) / pOut : 0;
+}
+
+async function resolveStep(step: StepT, order: number, ctx: ResolveContext, previous?: ResolvedStep): Promise<ResolvedStep> {
   switch (step.action) {
     case "price": {
       const token = requireToken(step.token);
@@ -119,7 +206,15 @@ async function resolveStep(step: StepT, order: number, ctx: ResolveContext): Pro
 
       let amountIn: string;
       let summary: string;
-      if (step.side === "out") {
+      let rule: AmountRule;
+      let received: number;
+      if (step.of === "previous" && step.side !== "out") {
+        const fromPrev = fromPrevious(step.amount, from, previous, order);
+        amountIn = fromPrev.amount;
+        rule = fromPrev.rule;
+        summary = `Swap ${amountIn} ${from.symbol} for ${to.symbol}`;
+        received = estimatedOut(amountIn, from, to);
+      } else if (step.side === "out") {
         if (!/^\d*\.?\d+$/.test(step.amount)) throw clarify(`How much ${from.symbol} do you want to spend?`);
         const amountOut = await resolveAmount(step.amount, step.unit, to, ctx, "receive");
         const pIn = getPriceUsd(from.symbol);
@@ -127,9 +222,13 @@ async function resolveStep(step: StepT, order: number, ctx: ResolveContext): Pro
         if (!(pIn > 0 && pOut > 0)) throw clarify(`How much ${from.symbol} do you want to spend?`);
         amountIn = formatAmount((Number(amountOut) * pOut) / pIn, from);
         summary = `Swap ~${amountIn} ${from.symbol} for ~${amountOut} ${to.symbol}`;
+        rule = { field: "amount", symbol: from.symbol, kind: "fixed", fraction: 1 };
+        received = Number(amountOut);
       } else {
         amountIn = await resolveAmount(step.amount, step.unit, from, ctx, "swap");
         summary = `Swap ${amountIn} ${from.symbol} for ${to.symbol}`;
+        rule = ruleFor("amount", step.amount, from);
+        received = estimatedOut(amountIn, from, to);
       }
       await requireBalance(amountIn, from, ctx, "swap");
 
@@ -138,13 +237,17 @@ async function resolveStep(step: StepT, order: number, ctx: ResolveContext): Pro
         symbolIn: from.symbol, symbolOut: to.symbol,
       };
       const valueUsd = computePlanValueUsd("swap", params);
-      return { action: "swap", summary: withUsd(summary, valueUsd, from), plan: planStep("uniswap", "swap", params, order, "300000"), valueUsd };
+      return {
+        action: "swap", summary: withUsd(summary, valueUsd, from), plan: planStep("uniswap", "swap", params, order, "300000"), valueUsd,
+        amounts: [rule], output: { symbol: to.symbol, amount: received },
+      };
     }
 
     case "send": {
       const token = requireToken(step.token);
       const { address, label } = await resolveRecipient(step.to, ctx);
-      const amount = await resolveAmount(step.amount, step.unit, token, ctx, "send");
+      const fromPrev = step.of === "previous" ? fromPrevious(step.amount, token, previous, order) : null;
+      const amount = fromPrev ? fromPrev.amount : await resolveAmount(step.amount, step.unit, token, ctx, "send");
       await requireBalance(amount, token, ctx, "send");
       const params = { token: token.address, to: address, amount, symbol: token.symbol };
       const valueUsd = computePlanValueUsd("send", params);
@@ -154,6 +257,7 @@ async function resolveStep(step: StepT, order: number, ctx: ResolveContext): Pro
         summary: withUsd(`Send ${amount} ${token.symbol} to ${who}`, valueUsd, token),
         plan: planStep("native", "send", params, order, "21000"),
         valueUsd,
+        amounts: [fromPrev ? fromPrev.rule : ruleFor("amount", step.amount, token)],
       };
     }
 
@@ -247,6 +351,7 @@ async function resolveStep(step: StepT, order: number, ctx: ResolveContext): Pro
         summary: `Add liquidity (lend to a trading pool to earn fees): ${amountA} ${a.symbol} + ${amountB} ${b.symbol} (~$${formatUsd(valueUsd)})`,
         plan: planStep("uniswap", "add_liquidity", params, order, "500000"),
         valueUsd,
+        amounts: [ruleFor("amountA", step.amountA, a), ruleFor("amountB", step.amountB, b)],
       };
     }
   }
