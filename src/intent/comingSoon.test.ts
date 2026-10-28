@@ -225,6 +225,9 @@ test("prompt: planned DeFi actions never clarify; coffre/savings vault means yie
   assert.match(PLANNER_SYSTEM_PROMPT, /vague amount like "some"/);
   assert.match(PLANNER_SYSTEM_PROMPT, /French "coffre"/);
   assert.match(PLANNER_SYSTEM_PROMPT, /take funds out of the yield vault/);
+  assert.match(PLANNER_SYSTEM_PROMPT, /missing or vague amount is NOT a reason to clarify/);
+  assert.match(PLANNER_SYSTEM_PROMPT, /ask-rule does not apply to stake/);
+  assert.match(PLANNER_SYSTEM_PROMPT, /supply my dai to a lending protocol/);
 });
 
 
