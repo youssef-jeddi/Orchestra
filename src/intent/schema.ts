@@ -116,7 +116,12 @@ export const Step = z.discriminatedUnion("action", [
 ]);
 
 export const PlannerOutput = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("actions"), steps: z.array(Step).min(1).max(5) }),
+  z.object({
+    type: z.literal("actions"),
+    steps: z.array(Step).min(1).max(5),
+    /** Language the user wrote in ("en", "fr", …). Used for coming-soon replies; English fallback. */
+    language: z.string().min(2).max(16).optional(),
+  }),
   z.object({ type: z.literal("clarify"), question: z.string().min(1).max(500) }),
   z.object({ type: z.literal("reply"), text: z.string().min(1).max(1500) }),
   z.object({ type: z.literal("unsupported"), reason: z.string().min(1).max(500) }),

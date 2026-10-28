@@ -117,7 +117,7 @@ export async function interpretIntent(
   // run, not even a supported step next to it, so a planned action can never reach execution.
   const comingSoon = out.steps.filter(isComingSoonStep);
   if (comingSoon.length > 0) {
-    return { planner, outcome: { kind: "reply", text: describeComingSoon(comingSoon, out.steps.length - comingSoon.length) } };
+    return { planner, outcome: { kind: "reply", text: describeComingSoon(comingSoon, out.steps.length - comingSoon.length, out.language) } };
   }
 
   // Asked before resolution, so a balance answer ("not enough USDC") never takes the place of the

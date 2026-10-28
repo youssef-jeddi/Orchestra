@@ -42,8 +42,10 @@ const trapCtx = (): ResolveContext & { touched: string[] } => {
   };
 };
 
-const ask = async (steps: Record<string, unknown>[]) => {
-  const { completeFn, calls } = fakeModel({ type: "actions", steps });
+const ask = async (steps: Record<string, unknown>[], language?: string) => {
+  const payload: Record<string, unknown> = { type: "actions", steps };
+  if (language) payload.language = language;
+  const { completeFn, calls } = fakeModel(payload);
   const ctx = trapCtx();
   const r = await interpretIntent("(message)", [], ctx, { provider: "groq", model: "fake-model", completeFn });
   assert.equal(calls.n, 1, "one model call, no repair: the planned step is valid planner output");
@@ -77,27 +79,48 @@ test("schema: supported actions are not planned ones", () => {
   }
 });
 
-// ── Wording ──
-test("wording: stake 0.1 ETH with Lido (the planned protocol when none is named)", async () => {
-  const text = replyText(await ask([{ action: "stake", token: "ETH", amount: "0.1" }]));
-  assert.equal(text, `I understood: stake 0.1 ETH with Lido. I can't do staking yet. ${CAN_DO_NOW}`);
+test("schema: actions may carry an optional language code", () => {
+  assert.equal(PlannerOutput.safeParse({ type: "actions", language: "fr", steps: [{ action: "borrow", token: "USDC", amount: "50" }] }).success, true);
+  assert.equal(PlannerOutput.safeParse({ type: "actions", steps: [{ action: "borrow", token: "USDC", amount: "50" }] }).success, true);
 });
 
-test("wording: each planned action reads plainly", () => {
+// ── Wording: protocol only when the user named it ──
+test("wording: English borrow without a protocol does not invent Aave", async () => {
+  const text = replyText(await ask([{ action: "borrow", token: "USDC", amount: "50" }], "en"));
+  assert.equal(text, `I understood: borrow 50 USDC. I can't do borrowing yet. ${CAN_DO_NOW}`);
+  assert.doesNotMatch(text, /Aave|Lido/i);
+});
+
+test("wording: English borrow with a named protocol keeps it", async () => {
+  const text = replyText(await ask([{ action: "borrow", token: "USDC", amount: "50", protocol: "aave" }], "en"));
+  assert.equal(text, `I understood: borrow 50 USDC on Aave. I can't do borrowing yet. ${CAN_DO_NOW}`);
+});
+
+test("wording: French borrow without a protocol is in French and names no protocol", async () => {
+  const text = replyText(await ask([{ action: "borrow", token: "USDC", amount: "50" }], "fr"));
+  assert.equal(
+    text,
+    "J'ai compris : emprunter 50 USDC. Je ne peux pas encore emprunter. Pour l'instant je peux envoyer, échanger, ajouter ou retirer de la liquidité, et vérifier ton solde ou les prix."
+  );
+  assert.doesNotMatch(text, /Aave|Lido|I understood|I can't/i);
+});
+
+test("wording: each planned action reads plainly (no default protocol)", () => {
   const d = (s: Record<string, unknown>) => describeComingSoonStep(Step.parse(s) as any);
-  assert.equal(d({ action: "unstake", token: "ETH", amount: "all" }), "unstake all your ETH from Lido");
-  assert.equal(d({ action: "lend", token: "usdc", amount: "100" }), "lend 100 USDC on Aave");
-  assert.equal(d({ action: "withdraw_lend", token: "USDC", amount: "50%" }), "take back 50% of the USDC you lent on Aave");
-  assert.equal(d({ action: "withdraw_lend" }), "take back what you lent on Aave");
-  assert.equal(d({ action: "borrow", token: "USDC", amount: "50" }), "borrow 50 USDC on Aave");
-  assert.equal(d({ action: "borrow", token: "USDC" }), "borrow USDC on Aave");
-  assert.equal(d({ action: "repay", token: "USDC", amount: "all" }), "repay all the USDC you borrowed on Aave");
-  assert.equal(d({ action: "repay" }), "repay what you borrowed on Aave");
+  assert.equal(d({ action: "unstake", token: "ETH", amount: "all" }), "unstake all your ETH");
+  assert.equal(d({ action: "lend", token: "usdc", amount: "100" }), "lend 100 USDC");
+  assert.equal(d({ action: "withdraw_lend", token: "USDC", amount: "50%" }), "take back 50% of the USDC you lent");
+  assert.equal(d({ action: "withdraw_lend" }), "take back what you lent");
+  assert.equal(d({ action: "borrow", token: "USDC", amount: "50" }), "borrow 50 USDC");
+  assert.equal(d({ action: "borrow", token: "USDC" }), "borrow USDC");
+  assert.equal(d({ action: "repay", token: "USDC", amount: "all" }), "repay all the USDC you borrowed");
+  assert.equal(d({ action: "repay" }), "repay what you borrowed");
   assert.equal(d({ action: "deposit_yield", token: "USDC", amount: "100" }), "put 100 USDC in a savings vault to earn interest");
   assert.equal(d({ action: "deposit_yield" }), "put money in a savings vault to earn interest");
   assert.equal(d({ action: "withdraw_yield", token: "USDC", amount: "all" }), "take all your USDC out of your savings vault");
-  assert.equal(d({ action: "stake", token: "ETH", amount: "100", unit: "usd" }), "stake $100 of ETH with Lido");
-  assert.equal(d({ action: "stake", token: "ETH" }), "stake your ETH with Lido");
+  assert.equal(d({ action: "stake", token: "ETH", amount: "100", unit: "usd" }), "stake $100 of ETH");
+  assert.equal(d({ action: "stake", token: "ETH" }), "stake your ETH");
+  assert.equal(d({ action: "stake", token: "ETH", amount: "0.1" }), "stake 0.1 ETH");
 });
 
 test("wording: a named protocol is kept; an unknown one is left out, never replaced by ours", () => {
@@ -106,20 +129,29 @@ test("wording: a named protocol is kept; an unknown one is left out, never repla
   assert.equal(d({ action: "lend", token: "USDC", amount: "10", protocol: "compound" }), "lend 10 USDC on Compound");
   assert.equal(d({ action: "deposit_yield", token: "USDC", protocol: "yearn" }), "put your USDC in a Yearn vault to earn interest");
   assert.equal(d({ action: "stake", token: "ETH", amount: "1", protocol: "scamswap" }), "stake 1 ETH");
+  assert.equal(d({ action: "borrow", token: "USDC", amount: "50", protocol: "aave" }), "borrow 50 USDC on Aave");
 });
 
 test("wording: model text is never echoed raw (token names are checked)", () => {
   const d = (s: Record<string, unknown>) => describeComingSoonStep(Step.parse(s) as any);
-  assert.equal(d({ action: "stake", token: "SOL", amount: "2" }), "stake 2 SOL with Lido");
-  assert.equal(d({ action: "lend", token: "<b>click here</b>", amount: "2" }), "lend 2 on Aave");
-  assert.equal(d({ action: "stake", token: "ether", amount: ".5" }), "stake 0.5 ETH with Lido");
+  assert.equal(d({ action: "stake", token: "SOL", amount: "2" }), "stake 2 SOL");
+  assert.equal(d({ action: "lend", token: "<b>click here</b>", amount: "2" }), "lend 2");
+  assert.equal(d({ action: "stake", token: "ether", amount: ".5" }), "stake 0.5 ETH");
 });
 
 test("wording: several planned actions, said once per kind", () => {
   const steps = [Step.parse({ action: "lend", token: "USDC", amount: "100" }), Step.parse({ action: "borrow", token: "ETH", amount: "0.01" })] as any;
   assert.equal(
     describeComingSoon(steps),
-    `I understood: lend 100 USDC on Aave, then borrow 0.01 ETH on Aave. I can't do lending yet. I can't do borrowing yet. ${CAN_DO_NOW}`
+    `I understood: lend 100 USDC, then borrow 0.01 ETH. I can't do lending yet. I can't do borrowing yet. ${CAN_DO_NOW}`
+  );
+});
+
+test("wording: unknown language codes fall back to English", () => {
+  const steps = [Step.parse({ action: "stake", token: "ETH", amount: "0.1" })] as any;
+  assert.equal(
+    describeComingSoon(steps, 0, "de"),
+    `I understood: stake 0.1 ETH. I can't do staking yet. ${CAN_DO_NOW}`
   );
 });
 
@@ -130,6 +162,7 @@ for (const action of COMING_SOON_ACTIONS) {
     const text = replyText(o);
     assert.match(text, /^I understood: /);
     assert.match(text, /yet\./);
+    assert.doesNotMatch(text, /\bon Aave\b|\bwith Lido\b/);
   });
 }
 
@@ -140,6 +173,15 @@ test("pipeline: a planned step next to a send runs nothing, not even the send", 
   ]);
   const text = replyText(o);
   assert.match(text, /^I understood: stake 0\.1 ETH with Lido\. I can't do staking yet\. Nothing was done\. Ask me for the rest in a separate message\./);
+});
+
+test("pipeline: language from the planner reaches the reply", async () => {
+  const o = await ask([{ action: "lend", token: "USDC", amount: "100" }], "fr");
+  const text = replyText(o);
+  assert.equal(
+    text,
+    "J'ai compris : prêter 100 USDC. Je ne peux pas encore prêter. Pour l'instant je peux envoyer, échanger, ajouter ou retirer de la liquidité, et vérifier ton solde ou les prix."
+  );
 });
 
 test("pipeline: 'all my ETH' under pressure is still only words (no drain path)", async () => {
@@ -153,13 +195,15 @@ test("pipeline: 'all my ETH' under pressure is still only words (no drain path)"
 test("resolver: a planned step that skips the pipeline still becomes words, never a plan step", async () => {
   const r = await resolveSteps([Step.parse({ action: "borrow", token: "USDC", amount: "10" })], trapCtx());
   assert.equal(r.kind, "unsupported");
-  assert.match((r as any).reason, /^I understood: borrow 10 USDC on Aave\. I can't do borrowing yet\./);
+  assert.match((r as any).reason, /^I understood: borrow 10 USDC\. I can't do borrowing yet\./);
+  assert.doesNotMatch((r as any).reason, /Aave/);
 });
 
 test("planner output: the prompt's planned-action examples validate", () => {
   const examples = [...PLANNER_SYSTEM_PROMPT.matchAll(/-> (\{.*\})$/gm)].map((m) => JSON.parse(m[1]));
   const planned = examples.filter((e) => e.type === "actions" && e.steps.some((s: any) => (COMING_SOON_ACTIONS as readonly string[]).includes(s.action)));
   assert.ok(planned.length >= 3, "the prompt shows stake, lend and yield examples");
+  assert.ok(planned.some((e) => e.language === "fr"), "the prompt shows a French planned-action example");
   for (const e of examples) assert.equal(PlannerOutput.safeParse(e).success, true, JSON.stringify(e));
 });
 
@@ -168,6 +212,12 @@ test("prompt: staking and lending are no longer listed as unsupported; bridging 
   assert.ok(!/staking|lending/.test(line), line);
   assert.match(line, /bridging/);
   assert.match(line, /recurring orders/);
+});
+
+test("prompt: actions carry a language field and replies must match the user's language", () => {
+  assert.match(PLANNER_SYSTEM_PROMPT, /"language":"en"\|"fr"/);
+  assert.match(PLANNER_SYSTEM_PROMPT, /Set "language" on actions/);
+  assert.match(PLANNER_SYSTEM_PROMPT, /must be in the same language/);
 });
 
 (async () => {
