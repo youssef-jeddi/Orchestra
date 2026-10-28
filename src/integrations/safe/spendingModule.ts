@@ -16,6 +16,7 @@ import { makeSepoliaProvider, sepoliaRpcUrl } from "../../utils/rpc";
 import { safeErr } from "../../utils/redact";
 import { safeGasLimit } from "./transaction";
 import { faultOn } from "../../utils/faultInject";
+import { noteRelayerGas } from "../../policy/gasStore";
 import { getAgentSigner, adoptAgentIfAccepted } from "./agentKeys";
 import { signExec, routerCallProblem, type ModuleCall } from "./agentAuth";
 
@@ -252,6 +253,7 @@ export async function execViaModule(
 
   const tx = await module.exec(...args, gasLimit ? { gasLimit } : {});
   const receipt = await tx.wait();
+  await noteRelayerGas({ account: safeAddress, kind: "action", txHash: tx.hash, receipt }); // ORC-31, reverted or not
   if (receipt && Number(receipt.status) === 0) {
     console.error(`[safe] module transaction reverted on-chain: ${tx.hash}`);
     throw new UserFacingError(`This didn't go through, so your funds were not moved. You can see what happened here: https://sepolia.etherscan.io/tx/${tx.hash}`);
@@ -299,6 +301,7 @@ async function realSubmit(moduleAddress: string, e: SignedExec, relayerKey: stri
   }
   const tx = await module.execSigned(...args, gasLimit ? { gasLimit } : {});
   const receipt = await tx.wait();
+  await noteRelayerGas({ account: e.safe, kind: "action", txHash: tx.hash, receipt }); // ORC-31, reverted or not
   if (receipt && Number(receipt.status) === 0) {
     console.error(`[safe] module transaction reverted on-chain: ${tx.hash}`);
     throw new UserFacingError(`This didn't go through, so your funds were not moved. You can see what happened here: https://sepolia.etherscan.io/tx/${tx.hash}`);

@@ -16,6 +16,7 @@ import { type AccountReads, type SetupRecord, finishWith, inspectWith, registerA
 import { POLICY_ABI, isPerAccountRegistry, registerSafeArgs, policyAddress as configuredPolicy } from "./policyContract";
 import { DEFAULT_SPENDING_LIMIT_USD, writeAccountRecord } from "./accountRecord";
 import { shortAddr } from "../../utils/redact";
+import { noteRelayerGas } from "../../policy/gasStore";
 
 export { DEFAULT_SPENDING_LIMIT_USD };
 
@@ -106,7 +107,8 @@ function registerOnPolicy(user: string, reads: AccountReads, track: (step: Setup
     // The registry is a record only; the on-chain ceiling lives in the spending module, so no limit is written here.
     const tx = await policy.registerSafe(...registerSafeArgs(reads.safeAddress, user));
     await tracker.sent(tx.hash);
-    await tx.wait();
+    const receipt = await tx.wait();
+    await noteRelayerGas({ account: reads.safeAddress, kind: "setup", txHash: tx.hash, receipt, wallet: user }); // ORC-31
     await tracker.settled();
     console.log(`[onboard] Policy registered: ${tx.hash}`);
   });

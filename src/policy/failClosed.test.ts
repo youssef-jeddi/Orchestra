@@ -214,6 +214,7 @@ test("fix C: a spend record that can't be saved pauses the wallet's automatic ru
 test("RPC: an unreadable on-chain daily ceiling sends nothing", async () => {
   let sent = 0;
   const deps: AccountExecDeps = {
+    gasBudget: async () => {},
     enabled: () => true,
     remainingCents: async () => { throw new Error("rpc down"); },
     viaModule: async () => { sent++; return "0x1"; },

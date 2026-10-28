@@ -6,6 +6,7 @@ import { shortAddr } from "../../utils/redact";
 import { sepoliaRpcUrl } from '../../utils/rpc';
 import { spendingModuleAddress, moduleVersion, SPENDING_MODULE_V2_ABI } from './spendingModule';
 import { UserFacingError } from '../../utils/userFacing';
+import { noteRelayerGas } from '../../policy/gasStore';
 
 /** Safe's SafeModuleSetup helper on Sepolia: its enableModules runs by delegatecall during setup. */
 export const SAFE_MODULE_SETUP = '0x2dd68b007B46fBe91B9A7c3EDa5A7a1063cB5b47';
@@ -140,6 +141,7 @@ export async function deploySafe(
   console.log(`[Safe] Deployment tx: ${txResponse.hash}`);
   await tracker?.sent(txResponse.hash);
   const receipt = await txResponse.wait();
+  await noteRelayerGas({ account: safeAddress, kind: 'setup', txHash: txResponse.hash, receipt, wallet: ledgerAddress }); // ORC-31
   await tracker?.settled();
   console.log(`[Safe] Deployed at: ${shortAddr(safeAddress)} (block ${receipt?.blockNumber})`);
 

@@ -280,6 +280,11 @@ export async function getActivity() {
   return bridgeFetch('/activity');
 }
 
+/** Network fees Orchestra paid today for the signed-in wallet's account (ORC-31). */
+export async function getGasToday() {
+  return bridgeFetch('/gas');
+}
+
 // ── Server-held approvals ──
 
 export async function getApproval(approvalId) {
