@@ -250,6 +250,21 @@ export async function passkeyRemove(id, assertion) {
   return bridgeFetch('/passkey/remove', { method: 'POST', body: JSON.stringify({ id, assertion }) });
 }
 
+/** Passkey recovery status after email-backup login (ORC-118). */
+export async function passkeyRecoveryStatus() {
+  return bridgeFetch('/passkey/recovery');
+}
+
+/** Start recovery after a fresh email code was verified (consumes it on the server). */
+export async function passkeyRecoveryStart() {
+  return bridgeFetch('/passkey/recovery/start', { method: 'POST', body: '{}' });
+}
+
+/** Cancel an in-flight or pending recovery (and remove a not-yet-active passkey). */
+export async function passkeyRecoveryCancel() {
+  return bridgeFetch('/passkey/recovery/cancel', { method: 'POST', body: '{}' });
+}
+
 export async function passkeyAuthOptions(walletAddress, approvalId) {
   return bridgeFetch('/passkey/auth-options', {
     method: 'POST', body: JSON.stringify({ walletAddress, approvalId }),

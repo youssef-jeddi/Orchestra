@@ -5,6 +5,7 @@
 // Pure, so a test can throw an error with a secret in it and see it never reaches the response.
 
 import { PasskeyError } from "../passkey";
+import { RecoveryError } from "../passkey/recovery";
 import { OnboardingError } from "../safe/onboarding";
 import { ApprovalError } from "../../approvals";
 import { AuthError } from "../../auth";
@@ -18,13 +19,14 @@ export const UNEXPECTED_ERROR = INTENT_FALLBACK_ERROR;
 /** Is this one of the errors raised on purpose, with a message that is safe to show? */
 export function isUserFacing(err: unknown): boolean {
   return err instanceof PasskeyError || err instanceof OnboardingError || err instanceof ApprovalError
-    || err instanceof AuthError || err instanceof LimitsError || err instanceof UserFacingError;
+    || err instanceof AuthError || err instanceof LimitsError || err instanceof UserFacingError
+    || err instanceof RecoveryError;
 }
 
 /** The status and JSON body for an error. */
 export function errorResponse(err: any): { status: number; body: Record<string, unknown> } {
   if (err instanceof LimitsError) return { status: err.status, body: { error: err.message, ...(err.code ? { code: err.code } : {}), ...err.extra } };
-  if (err instanceof PasskeyError || err instanceof OnboardingError) return { status: err.status, body: { error: err.message, code: err.code } };
+  if (err instanceof PasskeyError || err instanceof OnboardingError || err instanceof RecoveryError) return { status: err.status, body: { error: err.message, code: err.code } };
   if (err instanceof OverCapError) return { status: err.status, body: { error: err.message, code: err.code, ...(err.ownerSign ? { ownerSign: err.ownerSign } : {}) } };
   if (err instanceof ApprovalError || err instanceof AuthError || err instanceof UserFacingError) return { status: err.status, body: { error: err.message } };
   return { status: 500, body: { error: UNEXPECTED_ERROR } };
