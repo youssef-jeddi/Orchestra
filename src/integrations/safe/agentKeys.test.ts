@@ -255,6 +255,7 @@ test("v2 reverts map to plain messages; unknown errors pass through", () => {
 test("the signed-in wallet reaches the module path (v2 finds the account's key with it)", async () => {
   const seen: (string | undefined)[] = [];
   const deps: AccountExecDeps = {
+    gasBudget: async () => {},
     enabled: () => true,
     remainingCents: async () => 100_000n,
     viaModule: async (_s, _k, _b, _f, w) => { seen.push(w); return "0x1"; },

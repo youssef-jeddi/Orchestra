@@ -6,6 +6,8 @@
 // The contract enforces the same ceiling, so a wrong estimate here still can't move extra funds.
 // v1 or v2 is read from the module itself: v1 signs with the shared key, v2 has the account's own
 // key sign and the shared key only relay (ORC-38). v2 needs the signed-in wallet to find that key.
+// Before anything else, the account's network fee allowance for today is checked (ORC-31): over it,
+// or unreadable, nothing is sent and no owner-sign offer is made.
 
 import { UserFacingError } from "../../utils/userFacing";
 import {
@@ -15,6 +17,7 @@ import {
 } from "./spendingModule";
 import { executeBatchViaSafe } from "./transaction";
 import { offerOwnerSign } from "./ownerSign";
+import { assertGasBudget } from "../../policy/gasStore";
 
 export type Batch = Array<{ to: string; value: string; data: string }>;
 
@@ -37,6 +40,8 @@ export interface AccountExecInput {
 }
 
 export interface AccountExecDeps {
+  /** Throws when the account's network fees for today are used up or can't be read (ORC-31). */
+  gasBudget: (safeAddress: string) => Promise<void>;
   enabled: () => boolean;
   remainingCents: (safeAddress: string) => Promise<bigint>;
   /** `key` is the shared key (v1: the agent; v2: only the relayer); `wallet` finds the account's own key on v2. */
@@ -49,6 +54,7 @@ export interface AccountExecDeps {
 export interface OfferMeta { valueUsd: number; to?: string; token?: string; amount?: string; symbol?: string }
 
 const realDeps: AccountExecDeps = {
+  gasBudget: assertGasBudget,
   enabled: isSpendingModuleEnabled,
   remainingCents: (safe) => remainingToday(safe),
   viaModule: async (safe, key, batch, fallback, wallet) => {
@@ -78,6 +84,7 @@ async function overCap(input: AccountExecInput, deps: AccountExecDeps): Promise<
 
 /** Run a batch through the account: the owner path, or (module set) the capped module path. */
 export async function executeForAccount(input: AccountExecInput, deps: AccountExecDeps = realDeps): Promise<string> {
+  await deps.gasBudget(input.safeAddress); // first: over budget, nothing is read, offered or sent
   if (!deps.enabled()) return deps.viaOwner(input.safeAddress, input.agentKey, input.batch, input.fallbackGasLimit);
 
   let remaining: bigint;
