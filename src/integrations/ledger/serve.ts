@@ -781,7 +781,7 @@ async function respondWithPlan(plan: MultiStepPlan, r: PlanRequest): Promise<voi
     (history) => assessPlan(plan, { profile, history, paused }),
   );
   r.holdReservation(reserved.release);
-  const decision = reserved.decision;
+  let decision = reserved.decision;
   r.li.riskScore = decision.riskScore;
   console.log(`[intent ${rid}] plan of ${plan.steps.length} → ${decision.verdict} (risk ${decision.riskScore}) rules: ${decision.triggered.length ? decision.triggered.join(",") : "none"}`);
 
@@ -792,7 +792,7 @@ async function respondWithPlan(plan: MultiStepPlan, r: PlanRequest): Promise<voi
     requiresLedger: decision.requiresLedger, assessedAt: new Date().toISOString(),
   }).catch(() => {});
 
-  const assessment = {
+  let assessment = {
     verdict: decision.verdict, riskScore: decision.riskScore, reasons: [decision.reason],
     requiresLedger: decision.approvalMethod === "ledger", triggered: decision.triggered, approvalMethod: decision.approvalMethod,
   };
@@ -827,8 +827,43 @@ async function respondWithPlan(plan: MultiStepPlan, r: PlanRequest): Promise<voi
     unsupported(built.refusal);
     return;
   }
+  // Dependent "half of what I get" amounts are now quote-based (raised or lowered). Re-check the
+  // limits and the daily ceiling on that total before any card or automatic run; the card always
+  // shows these amounts, and they are never raised after an OK.
+  const totalUsd = built.steps.reduce((sum, st) => sum + st.valueUsd, 0);
   view.summary = planSummary(built.steps.map((s) => s.summary));
+  view.totalEstimatedValueUsd = totalUsd;
   agentReasoning.planner = `Understood: ${view.summary}`;
+  const refinedPlan: MultiStepPlan = {
+    ...plan,
+    summary: view.summary,
+    valueUsd: totalUsd,
+    steps: plan.steps.map((st, i) => ({
+      ...st,
+      summary: built.steps[i].summary,
+      valueUsd: built.steps[i].valueUsd,
+      params: { ...st.params, ...(st.intentType === "send" ? { amount: String((built.steps[i].execution as any)?.sendData?.amount ?? st.params.amount) } : {}) },
+    })),
+  };
+  reserved.release();
+  const rechecked = await decideWithReservation(
+    wallet, totalUsd,
+    async () => (wallet ? getRecentActivity(wallet) : r.activity),
+    (history) => assessPlan(refinedPlan, { profile, history, paused }),
+  );
+  r.holdReservation(rechecked.release);
+  decision = rechecked.decision;
+  Object.assign(assessment, {
+    verdict: decision.verdict, riskScore: decision.riskScore, reasons: [decision.reason],
+    requiresLedger: decision.approvalMethod === "ledger", triggered: decision.triggered, approvalMethod: decision.approvalMethod,
+  });
+  agentReasoning.gatekeeper = decision.reason;
+  r.li.riskScore = decision.riskScore;
+  if (decision.verdict === "BLOCKED") {
+    console.log(`[intent ${rid}] plan blocked after quote refine (risk ${decision.riskScore})`);
+    res.json({ status: "ok", intentType, autoExecuted: false, safeAddress, plan: view, assessment, agentReasoning, timing: timing() });
+    return;
+  }
   const fits = (valueUsd: number) => fitsDailyCeiling(safeAddress, valueUsd);
 
   if (decision.verdict === "AUTO_EXECUTE") {
@@ -880,7 +915,7 @@ async function respondWithPlan(plan: MultiStepPlan, r: PlanRequest): Promise<voi
   // answered now, rather than after the OK: it could never run. A plan of sends only is held like a
   // single send: after the OK it goes to owner-sign if it is still over (ORC-21).
   try {
-    if (!(await fits(plan.valueUsd)) && hasSwapOrLiquidity(built.steps)) {
+    if (!(await fits(totalUsd)) && hasSwapOrLiquidity(built.steps)) {
       unsupported(overCeilingReason(built.steps));
       return;
     }
@@ -891,7 +926,7 @@ async function respondWithPlan(plan: MultiStepPlan, r: PlanRequest): Promise<voi
   let approval: PendingApproval;
   try {
     approval = await createApproval({
-      wallet, safeAddress, intentType: "plan", summary: view.summary, valueUsd: plan.valueUsd,
+      wallet, safeAddress, intentType: "plan", summary: view.summary, valueUsd: totalUsd,
       reason: decision.reason, triggered: decision.triggered, execution: { planData: { steps: built.steps } },
     });
   } catch (err: any) {

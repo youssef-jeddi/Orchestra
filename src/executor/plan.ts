@@ -181,8 +181,11 @@ export interface BuildDeps {
 }
 
 /**
- * Build every step in order. A step that uses a swap's output is first capped at that share of what
- * the quote promised. Any refusal, or a step with nothing to run, refuses the whole plan.
+ * Build every step in order. A step that uses a swap's output is set to that share of what the quote
+ * promised (raised or lowered from the market estimate): this runs before any approval card is shown,
+ * so the amount on the card is already the quote-based one and is never raised after an OK. At run
+ * time, fillAmount can only go down from that approved amount. Any refusal, or a step with nothing
+ * to run, refuses the whole plan.
  */
 export async function buildPlanSteps(
   steps: PlanAction[],
@@ -195,16 +198,20 @@ export async function buildPlanSteps(
       if (rule.kind !== "output" || rule.fromStep == null) continue;
       const promised = out[rule.fromStep]?.promisedOut;
       if (!promised || promised.symbol !== rule.symbol) continue;
-      const cap = promised.amount * rule.fraction;
+      // The quote is the planning number once we have it (Sepolia pools can be far from market).
+      const target = promised.amount * rule.fraction;
       const current = Number(step.params[rule.field]);
-      if (cap < current) {
-        const str = decimalString(cap, tokenOf(rule.symbol));
-        if (!(Number(str) > 0)) return { refusal: `Step ${i + 1} would use too little ${rule.symbol} from the swap before it, so nothing was done.` };
+      if (!(current > 0) || !(target > 0)) {
+        return { refusal: `Step ${i + 1} would use too little ${rule.symbol} from the swap before it, so nothing was done.` };
+      }
+      const str = decimalString(target, tokenOf(rule.symbol));
+      if (!(Number(str) > 0)) return { refusal: `Step ${i + 1} would use too little ${rule.symbol} from the swap before it, so nothing was done.` };
+      if (str !== String(step.params[rule.field])) {
         const params = { ...step.params, [rule.field]: str };
         step = {
           ...step, params, valueUsd: step.valueUsd * (Number(str) / current),
           steps: step.steps.map((s) => ({ ...s, params })),
-          summary: step.summary.replace(String(step.params[rule.field]), `~${str}`),
+          summary: step.summary.replace(String(step.params[rule.field]), str),
         };
       }
     }

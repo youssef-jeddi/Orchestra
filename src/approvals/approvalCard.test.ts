@@ -206,11 +206,12 @@ test("done after a passkey approval reads 'Done'; a failed run says it didn't go
 });
 
 // ── The header balance is re-read after money moves ──
-test("balance refresh: an auto-executed send, swap or liquidity change refreshes; chat, held and failed answers don't", () => {
-  for (const intentType of ["send", "swap", "add_liquidity", "remove_liquidity"]) {
+test("balance refresh: an auto-executed send, swap, liquidity change or plan refreshes; chat, held and failed answers don't", () => {
+  for (const intentType of ["send", "swap", "add_liquidity", "remove_liquidity", "plan"]) {
     assert.equal(bal.shouldRefreshBalances({ autoExecuted: true, txHash: "0x1", intentType }), true, intentType);
   }
   assert.equal(bal.shouldRefreshBalances({ autoExecuted: false, intentType: "send" }), false, "held for approval");
+  assert.equal(bal.shouldRefreshBalances({ autoExecuted: false, intentType: "plan", planResult: { complete: true } }), false, "held plan");
   assert.equal(bal.shouldRefreshBalances({ autoExecuted: true, intentType: "send" }), false, "no transaction");
   assert.equal(bal.shouldRefreshBalances({ autoExecuted: true, txHash: "0x1", intentType: "balance" }), false);
   assert.equal(bal.shouldRefreshBalances({ status: "reply" }), false);
@@ -220,7 +221,9 @@ test("balance refresh: an auto-executed send, swap or liquidity change refreshes
 test("balance refresh: an approval that was carried out (passkey, Telegram, phone) refreshes; one that wasn't doesn't", () => {
   assert.equal(bal.approvalMovedFunds({ status: "executed", intentType: "send" }), true);
   assert.equal(bal.approvalMovedFunds({ status: "executed", intentType: "swap" }), true);
+  assert.equal(bal.approvalMovedFunds({ status: "executed", intentType: "plan" }), true, "Telegram-approved plan");
   for (const status of ["pending", "executing", "rejected", "expired", "failed"]) assert.equal(bal.approvalMovedFunds({ status, intentType: "send" }), false, status);
+  assert.equal(bal.approvalMovedFunds({ status: "pending", intentType: "plan" }), false);
 });
 
 test("balance refresh: read now and once more shortly after", () => {

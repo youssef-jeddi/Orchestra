@@ -3,7 +3,7 @@
 // out of the account it would stay stale until a reload. Pure, so it's tested without a browser
 // (src/approvals/approvalCard.test.ts).
 
-const MOVES_FUNDS = new Set(['send', 'swap', 'add_liquidity', 'remove_liquidity']);
+const MOVES_FUNDS = new Set(['send', 'swap', 'add_liquidity', 'remove_liquidity', 'plan']);
 
 /** An /intent answer that already went through on its own (auto-executed) and changed the balance. */
 export const shouldRefreshBalances = (data) => !!data?.autoExecuted && !!data.txHash && MOVES_FUNDS.has(data.intentType);

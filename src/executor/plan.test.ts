@@ -248,6 +248,25 @@ test("a dependent amount ('send half of what I get') uses what the swap actually
   assert.equal(Number((lucky.ran[1].execution as any).sendData.amount), approved);
 });
 
+test("a dependent amount is raised to half of the quote when the pool pays more than the market estimate (Sepolia-style)", async () => {
+  // Market: 0.001 ETH × $2500 = $2.50 → estimate 2.5 USDC → half 1.25. Quote at 18× market (~45 USDC).
+  const plan = await planOf(actions(swap("ETH", "USDC", "0.001"), send("USDC", "50%", ALICE, { of: "previous" })));
+  assert.ok(Number(plan.steps[1].params.amount) < 2, `estimate-based half should be ~1.25, got ${plan.steps[1].params.amount}`);
+  const steps = await built(plan, 18);
+  const promised = steps[0].promisedOut!.amount;
+  assert.ok(promised > 40, `quote should be ≫ market (~45), got ${promised}`);
+  const approved = Number((steps[1].execution as any).sendData.amount);
+  const halfQuote = promised * 0.5;
+  assert.ok(Math.abs(approved - halfQuote) < 0.01, `approved ${approved} should be ~half of quote ${halfQuote}`);
+  assert.match(steps[1].summary, new RegExp(String(approved).replace(".", "\\.")));
+  // At run time, fillAmount still never goes above the (quote-based) approved amount.
+  const chain = fakeChain({ ...BAL, eth: 0.05, usdc: 0 }, { swapGives: () => promised });
+  const r = await runPlan(steps, chain.deps);
+  assert.equal(r.complete, true);
+  assert.equal(Number((chain.ran[1].execution as any).sendData.amount), approved);
+  assert.equal((chain.ran[1].execution as any).sendData.to, ALICE);
+});
+
 test("'the rest' is what the account holds when the step runs, capped at the approved amount", async () => {
   const plan = await planOf(actions(send("USDC", "5", ALICE), send("USDC", "all", BOB)));
   assert.equal(plan.steps[1].amounts[0].kind, "balance");
