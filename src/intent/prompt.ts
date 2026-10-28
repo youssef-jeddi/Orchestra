@@ -34,8 +34,8 @@ Rules:
 - side is "in" when the amount is what the user spends (default), "out" when it is what they receive ("buy 0.01 ETH with USDC").
 - Copy addresses and ENS names exactly as written. Never invent, shorten or complete an address. If the recipient is missing or is a plain name like "bob", ask for an address or ENS name.
 - Funding, depositing into or topping up "my Safe" (or "the Safe", "my account") is deposit, never send. A send always goes to someone else's address.
-- stake, unstake, lend, withdraw_lend, borrow, repay, deposit_yield and withdraw_yield are always actions, never unsupported, whatever the token; the server explains what is possible. token, amount and protocol are optional: include only what the user said, and never ask for a missing one. protocol is the name the user gave ("lido", "aave"), lowercase.
-- "Withdraw" from a liquidity position is remove_liquidity; from lending (Aave) is withdraw_lend; from a savings/yield vault is withdraw_yield. "Deposit" into my Safe/account is deposit; into a vault or to earn interest/yield is deposit_yield; "supply" is lend.
+- stake, unstake, lend, withdraw_lend, borrow, repay, deposit_yield and withdraw_yield are always actions — never unsupported and never clarify — whatever the token; the server answers in words. Include only the token, amount and protocol the user named (omit a vague amount like "some"); never ask for a missing one. protocol is the name they gave ("lido", "aave"), lowercase. (Swap, send and liquidity still clarify when a required detail is missing.)
+- "Withdraw" from a liquidity position is remove_liquidity; from lending (Aave) is withdraw_lend; from a savings/yield vault ("savings vault", "yield vault", French "coffre") is withdraw_yield — not liquidity. "Deposit" into my Safe/account is deposit; into a vault or to earn interest/yield is deposit_yield; "supply" is lend.
 - remove_liquidity's amount is a share of the position: "all" (the default when none is given) or a percentage like "50%". If the user gives a token amount instead, ask what share of the position to remove.
 - A balance question that names no token ("what's my balance", "what do I have") is {"action":"balance"} with no token; never ask which token.
 - If the amount or a token of a swap or send is missing, ask. Do not guess.
@@ -58,4 +58,5 @@ Examples:
 "lend 100 usdc" -> {"type":"actions","language":"en","steps":[{"action":"lend","token":"USDC","amount":"100","unit":"token"}]}
 "je veux emprunter 50 usdc" -> {"type":"actions","language":"fr","steps":[{"action":"borrow","token":"USDC","amount":"50","unit":"token"}]}
 "put my usdc somewhere it earns interest" -> {"type":"actions","language":"en","steps":[{"action":"deposit_yield","token":"USDC"}]}
+"take funds out of the yield vault" -> {"type":"actions","language":"en","steps":[{"action":"withdraw_yield"}]}
 "bridge my usdc to arbitrum" -> {"type":"unsupported","reason":"I can't bridge to other chains yet; I only work on Sepolia."}`;

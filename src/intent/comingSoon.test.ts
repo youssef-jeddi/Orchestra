@@ -220,6 +220,14 @@ test("prompt: actions carry a language field and replies must match the user's l
   assert.match(PLANNER_SYSTEM_PROMPT, /must be in the same language/);
 });
 
+test("prompt: planned DeFi actions never clarify; coffre/savings vault means yield", () => {
+  assert.match(PLANNER_SYSTEM_PROMPT, /never unsupported and never clarify/);
+  assert.match(PLANNER_SYSTEM_PROMPT, /vague amount like "some"/);
+  assert.match(PLANNER_SYSTEM_PROMPT, /French "coffre"/);
+  assert.match(PLANNER_SYSTEM_PROMPT, /take funds out of the yield vault/);
+});
+
+
 (async () => {
   console.log("planned DeFi actions");
   for (const [name, fn] of tests) {
