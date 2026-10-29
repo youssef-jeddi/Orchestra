@@ -43,7 +43,7 @@ test("schema: rejects non-numeric amounts", () => {
 });
 
 test("schema: rejects unknown actions and missing fields", () => {
-  assert.equal(Step.safeParse({ action: "stake", token: "ETH", amount: "1" }).success, false);
+  assert.equal(Step.safeParse({ action: "mint_nft", token: "ETH", amount: "1" }).success, false);
   assert.equal(Step.safeParse({ action: "send", token: "USDC", amount: "5" }).success, false);
   assert.equal(PlannerOutput.safeParse({ type: "clarify" }).success, false);
   assert.equal(PlannerOutput.safeParse({ type: "actions", steps: [] }).success, false);

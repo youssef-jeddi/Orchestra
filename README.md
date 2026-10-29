@@ -40,7 +40,7 @@ Built for **ETHGlobal Cannes 2026**. Runs on the Sepolia testnet.
 
 Every chat message goes through `POST /intent` (`src/intent/`):
 
-1. **Planner** (`planner.ts`, `prompt.ts`, `schema.ts`) — one LLM call turns the message and recent conversation into JSON: `actions` (swap, send, deposit, add_liquidity, remove_liquidity, balance, price, positions), `clarify`, `reply` or `unsupported`. The output is validated against a strict Zod schema; an invalid reply gets one repair retry with the concrete errors, then the user is asked to rephrase. Unvalidated model output never reaches the rest of the pipeline.
+1. **Planner** (`planner.ts`, `prompt.ts`, `schema.ts`) — one LLM call turns the message and recent conversation into JSON: `actions` (swap, send, deposit, add_liquidity, remove_liquidity, balance, price, positions, address), `clarify`, `reply` or `unsupported`. Planned actions (stake/unstake, lend/withdraw_lend/borrow/repay, deposit_yield/withdraw_yield) are understood too, but `comingSoon.ts` answers them in plain words before resolution, so they never reach the limits, approvals or execution. The output is validated against a strict Zod schema; an invalid reply gets one repair retry with the concrete errors, then the user is asked to rephrase. Unvalidated model output never reaches the rest of the pipeline.
 2. **Resolver** (`resolve.ts`) — turns the plan into exact values: token symbols → registry addresses, ENS → address, `"all"` / `"50%"` / `"$20"` → exact amounts. It **rejects amounts above your balance** before anything is built (no failed transaction, no wasted gas), keeps a little ETH for gas where your wallet pays it, and writes the summary from the resolved values — so what you approve is what executes. Anything ambiguous becomes a clarifying question, not a guess.
 3. **Policy** (`src/policy/`) — `decide()` computes the verdict from scratch, with no LLM input. See [Risk policy](#risk-policy).
 4. **Adapter** (`src/executor/adapters.ts`) — builds the transaction. Swaps fetch a Uniswap quote (v3 and v4 routes, native-ETH pools included) and are **refused if the quote returns more than 5% below market value** at the reference price feed (thin or mispriced pools — common on testnets). Liquidity mints a **full-range Uniswap v3 position** from your account, and is refused when the pool's price is more than 5% from market (depositing at a wrong price hands value to arbitrageurs). Removing liquidity finds your account's positions (asking which one when several match), withdraws a share or all of it together with the fees earned, and returns WETH as ETH; it isn't price-guarded, since refusing would only trap the funds. Auto-approved swaps, sends and liquidity execute through your account with the agent wallet; deposits are only ever signed by your own wallet.
@@ -256,7 +256,7 @@ npm test                 # policy, intent, approvals, Telegram, auth, passkey an
 npm run eval             # score the planner + policy against labelled datasets
 ```
 
-`eval/run.ts` runs two suites: **parsing** (68 messages → expected structured plans, including typos, multi-turn answers, deposits and liquidity) and **risk** (34 scenarios → expected verdicts, including prompt injection and social engineering). It reports exact/type match, false auto-executions, over-escalation and model latency, and can compare the pipeline against the legacy planner (`--target new,legacy`) or other models (`--provider`, `--model`). Prices, ENS and storage are fixed, and model responses are cached in `eval/.cache` (`--replay` fails on a cache miss instead of calling the API).
+`eval/run.ts` runs two suites: **parsing** (155 messages → expected structured plans: every planner action, including the planned stake, lend and yield ones, with paraphrases, typos, unclear amounts, multi-turn answers and French, Spanish and German) and **risk** (43 scenarios → expected verdicts, including prompt injection, social engineering and planned actions that must do nothing). `npm run test:eval-datasets` (part of `npm test`, no model) checks every expected answer against the planner schema, unique ids and at least 5 cases per action. It reports exact/type match, false auto-executions, over-escalation and model latency, and can compare the pipeline against the legacy planner (`--target new,legacy`) or other models (`--provider`, `--model`). Prices, ENS and storage are fixed, and model responses are cached in `eval/.cache` (`--replay` fails on a cache miss instead of calling the API).
 
 ---
 
@@ -269,6 +269,7 @@ src/
 │   ├── prompt.ts, schema.ts # planner prompt and output schema
 │   ├── resolve.ts           # tokens, ENS, amounts, balance checks, summaries
 │   ├── pipeline.ts          # interpretIntent + assessAction (shared with the eval)
+│   ├── comingSoon.ts        # plain answers for planned actions (stake, lend, yield)
 │   └── tokens.ts, context.ts
 ├── policy/                  # deterministic risk engine (pure, tested)
 │   ├── index.ts             # decide(), habit profile, valuation
