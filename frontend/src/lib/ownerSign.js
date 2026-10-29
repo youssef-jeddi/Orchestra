@@ -23,6 +23,28 @@ export function ownerSignCard(offer, safeAddress) {
   if (!safeAddress) return { canSign: false, refused: false, text: null };
   const check = checkOwnerSign(offer, { safeAddress });
   return check.ok
-    ? { canSign: true, refused: false, text: check.text }
+    ? { canSign: true, refused: false, text: `${seriesLabel(offer)}${check.text}` }
     : { canSign: false, refused: true, text: NOT_A_PAYMENT };
+}
+
+/** "Send 2 of 3: " for one send of a plan signed one at a time (ORC-21), else "". */
+export function seriesLabel(offer) {
+  const s = offer?.series;
+  if (!s || !Number.isInteger(s.index) || !Number.isInteger(s.total) || s.total < 2 || s.index < 0 || s.index >= s.total) return '';
+  return `Send ${s.index + 1} of ${s.total}: `;
+}
+
+/**
+ * The chat messages after an owner-signed send went through: its receipt, then (a plan's sends are
+ * signed one at a time) the next send to sign, or why it couldn't be prepared.
+ */
+export function afterOwnerSign(result) {
+  const out = [{ role: 'system', txHash: result.txHash, explorerUrl: result.explorerUrl }];
+  const next = result?.next;
+  if (next?.kind === 'safe-owner' && next.id && next.typedData) {
+    out.push({ role: 'agent', tone: 'info', error: 'That send went through. Sign the next one with your wallet.', ownerSign: next });
+  } else if (result?.nextError) {
+    out.push({ role: 'agent', error: result.nextError });
+  }
+  return out;
 }

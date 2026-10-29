@@ -27,7 +27,7 @@ export interface PendingApproval {
   /** Lowercased wallet that owns the Safe. */
   wallet: string;
   safeAddress: string;
-  intentType: "swap" | "send" | "add_liquidity" | "remove_liquidity";
+  intentType: "swap" | "send" | "add_liquidity" | "remove_liquidity" | "plan";
   summary: string;
   valueUsd: number;
   /** Why approval is required (policy reason + rule slugs). */
@@ -63,12 +63,14 @@ export interface PendingApproval {
   reviewTokenHash?: string;
   result?: { txHash: string; explorerUrl: string };
   error?: string;
+  /** A plan's steps once it ran (ORC-21): which went through, with their receipts, and which didn't. */
+  steps?: { index: number; summary: string; status: string; txHash?: string; explorerUrl?: string; error?: string }[];
 }
 
 export interface NewApproval {
   wallet: string;
   safeAddress: string;
-  intentType: "swap" | "send" | "add_liquidity" | "remove_liquidity";
+  intentType: "swap" | "send" | "add_liquidity" | "remove_liquidity" | "plan";
   summary: string;
   valueUsd: number;
   reason: string;
@@ -317,6 +319,7 @@ export function approvalView(a: PendingApproval) {
     hash: a.hash, expiresAt: new Date(a.expiresAt).toISOString(), channel: a.channel ?? "passkey",
     ...(a.factor ? { factor: a.factor } : {}),
     ...(a.result ? a.result : {}), ...(a.error ? { error: a.error } : {}),
+    ...(a.steps ? { steps: a.steps.map(({ index, summary, status, txHash, explorerUrl }) => ({ index, summary, status, txHash, explorerUrl })) } : {}),
   };
 }
 

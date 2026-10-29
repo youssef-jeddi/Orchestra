@@ -116,7 +116,11 @@ export async function signOwnerRequest(ledger, offer, who, safeAddress) {
   // Ledger returns {v,r,s}; provider wallets return a serialized hex string.
   const signature = typeof sig === 'string' ? sig : ethers.Signature.from({ v: sig.v, r: sig.r, s: sig.s }).serialized;
   const result = await submitOwnerSignature(offer.id, signature);
-  return { txHash: result.txHash, explorerUrl: result.explorerUrl || explorer(result.txHash) };
+  // A plan's sends are signed one at a time (ORC-21): the next one comes back once this one went through.
+  return {
+    txHash: result.txHash, explorerUrl: result.explorerUrl || explorer(result.txHash),
+    ...(result.next ? { next: result.next } : {}), ...(result.nextError ? { nextError: result.nextError } : {}),
+  };
 }
 
 // ── Fund a Safe from the connected wallet (ETH or ERC-20) ──

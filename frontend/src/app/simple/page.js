@@ -16,7 +16,7 @@ import PauseBanner from '@/components/PauseBanner';
 import { activityRow, ownerSignIdFromSearch, ACTIVITY_EMPTY, EXPIRED_OWNER_SIGN } from '@/lib/activity';
 import { gasLine } from '@/lib/gas';
 import { signOwnerRequest } from '@/lib/signing';
-import { errorMessage, ownerSignCard } from '@/lib/ownerSign';
+import { errorMessage, ownerSignCard, afterOwnerSign } from '@/lib/ownerSign';
 import { registerPasskey, approveWithPasskey, setUpPhonePasskey, removePasskey } from '@/lib/passkey';
 import { addPasskeyButton, explainPasskeyAddError } from '@/lib/passkeyErrors';
 import { PRIVY_APP_ID } from '@/lib/privy';
@@ -33,7 +33,7 @@ import { LIMITS_BUTTON_HINT } from '@/lib/limits';
 import { HINT_COLOR, HINT_SIZE } from '@/lib/contrast';
 import { headerState, CONNECTING_GIVE_UP_MS } from '@/lib/connection';
 import {
-  ruleHint, declineLabel, declinedText, expiredText, ALREADY_SETTLED, approvalControls,
+  ruleHint, declineLabel, declinedText, expiredText, ALREADY_SETTLED, approvalControls, planHint, planStepLines, DONE_TEXT,
   cardView, doneOutcome, outcomeAfterError, valueSuffix,
 } from '@/lib/approvalCard';
 import { shouldRefreshBalances, approvalMovedFunds, refreshSoon } from '@/lib/balances';
@@ -255,7 +255,8 @@ function SimpleChat() {
     setSigningIdx(idx);
     try {
       const result = await signOwnerRequest(ledger, offer, { emailWallet, hasPasskey: session.hasPasskey }, safe.safeAddress);
-      setMessages((m) => [...m, { role: 'system', txHash: result.txHash, explorerUrl: result.explorerUrl }]);
+      // Its card loses the Sign button; a plan's next send (if any) follows with its own.
+      setMessages((m) => [...m.map((x, i) => (i === idx ? { ...x, signed: true } : x)), ...afterOwnerSign(result)]);
       movedFunds();
     } catch (err) {
       setMessages((m) => [...m, { role: 'agent', error: err.message }]);
@@ -549,11 +550,12 @@ function MessageRow({ m, idx, onExecute, onPasskey, onOwnerSign, onAddPasskeyHer
   if (m.error) {
     // An owner-sign offer is decoded here, not described by the bridge: a refused one shows only the refusal.
     const owner = ownerSignCard(m.ownerSign, safeAddress);
+    const tint = m.tone === 'info' ? '#E8E4DE' : '#FF453A';
     return (
-      <div style={{ alignSelf: 'flex-start', maxWidth: '90%', color: '#FF453A', fontSize: 14,
-        border: '1px solid #FF453A44', borderRadius: 12, padding: '10px 14px', background: '#FF453A11' }}>
+      <div style={{ alignSelf: 'flex-start', maxWidth: '90%', color: tint, fontSize: 14,
+        border: `1px solid ${tint}44`, borderRadius: 12, padding: '10px 14px', background: `${tint}11` }}>
         {owner?.refused ? owner.text : m.error}
-        {owner?.canSign && (
+        {owner?.canSign && !m.signed && (
           <div style={{ marginTop: 10 }}>
             <div style={{ color: '#E8E4DE', marginBottom: 10 }}>{owner.text}</div>
             <button onClick={() => onOwnerSign(m.ownerSign, idx)} disabled={signing} style={approveBtn(signing)}>
@@ -636,7 +638,7 @@ function AgentCard({ data, onExecute, onPasskey, onAddPasskey, addingPasskey, on
   const verdict = data.assessment?.verdict || 'UNKNOWN';
   const color = VERDICT_COLOR[verdict] || '#666';
   const triggered = data.assessment?.triggered || [];
-  const needsSign = !data.autoExecuted && (data.quoteData || data.sendData || data.depositData || data.lpData || data.lpRemoveData);
+  const needsSign = !data.autoExecuted && (data.quoteData || data.sendData || data.depositData || data.lpData || data.lpRemoveData || data.planData);
   const controls = needsSign ? approvalControls({ intentType: data.intentType, approval: data.approval, passkeyReg }) : null;
   // After the user declines (or the request lapses) the card stays settled: no buttons.
   const [ended, setEnded] = useState(null); // { text }
@@ -687,6 +689,10 @@ function AgentCard({ data, onExecute, onPasskey, onAddPasskey, addingPasskey, on
         </div>
       )}
 
+      {planHint(data) && (
+        <p style={{ margin: 0, fontSize: 13, color: '#E8E4DE', lineHeight: 1.5 }}>{planHint(data)}</p>
+      )}
+
       {/* Reasoning (compact) */}
       {data.agentReasoning?.gatekeeper && (
         <p style={{ margin: 0, fontSize: 13, color: HINT_COLOR, lineHeight: 1.5 }}>
@@ -714,13 +720,17 @@ function AgentCard({ data, onExecute, onPasskey, onAddPasskey, addingPasskey, on
       </div>
 
       {/* Outcome */}
-      {data.autoExecuted && data.txHash && (
+      {data.planResult && <PlanSteps steps={data.planResult.steps} text={data.planResult.complete ? null : data.planResult.text.split('\n')[0]} />}
+      {!data.planResult && data.autoExecuted && data.txHash && (
         <a href={data.explorerUrl} target="_blank" rel="noreferrer"
           style={{ fontSize: 13, color: '#30D158', textDecoration: 'none' }}>
           ✓ Done — {RECEIPT_LABEL}
         </a>
       )}
-      {controls && view.settled && (
+      {controls && view.settled && outcome?.steps && (
+        <PlanSteps steps={outcome.steps} text={outcome.status === 'done' ? DONE_TEXT : outcome.text.split('\n')[0]} />
+      )}
+      {controls && view.settled && !outcome?.steps && (
         <span style={{ fontSize: 13, color: outcome?.status === 'done' ? '#30D158' : HINT_COLOR, lineHeight: 1.5 }}>
           {view.line}
           {view.receiptUrl && (
@@ -759,6 +769,23 @@ function AgentCard({ data, onExecute, onPasskey, onAddPasskey, addingPasskey, on
         </div>
       )}
       <Timing timing={data.timing} />
+    </div>
+  );
+}
+
+// What each step of a plan that ran did: a receipt for every step that went through.
+function PlanSteps({ steps, text }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13, lineHeight: 1.5 }}>
+      {text && <span style={{ color: HINT_COLOR }}>{text}</span>}
+      {planStepLines(steps).map((l) => (
+        <span key={l.key} style={{ color: l.status === 'done' ? '#30D158' : l.status === 'failed' ? '#FF453A' : HINT_COLOR }}>
+          {l.text}
+          {l.receiptUrl && (
+            <> <a href={l.receiptUrl} target="_blank" rel="noreferrer" style={{ color: '#30D158', textDecoration: 'none' }}>{RECEIPT_LABEL}</a></>
+          )}
+        </span>
+      ))}
     </div>
   );
 }

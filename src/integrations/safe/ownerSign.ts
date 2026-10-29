@@ -58,6 +58,17 @@ export interface OwnerSignRecord {
   symbol?: string;
   expiresAt: number;
   status: "pending" | "executing" | "executed" | "expired";
+  /** Part of a sends-only plan signed one send at a time (ORC-21): its place in the plan. */
+  series?: { index: number; total: number };
+  /** The plan's sends still to sign after this one; the next is held only once this one has gone through. */
+  rest?: OwnerSend[];
+}
+
+/** One send of a plan, waiting to be held for the owner to sign (a plain payment, never a bundle). */
+export interface OwnerSend {
+  summary: string;
+  batch: Array<{ to: string; value: string; data: string }>;
+  meta: { valueUsd?: number; to?: string; token?: string; amount?: string; symbol?: string };
 }
 
 const records = new Map<string, OwnerSignRecord>();
@@ -82,11 +93,12 @@ export function ownerSignView(r: OwnerSignRecord) {
     expiresAt: r.expiresAt,
     typedData: { domain: r.domain, types: SAFE_TX_TYPES, primaryType: "SafeTx", message: r.message },
     ...(claim.to || claim.amount || claim.symbol ? { claim } : {}),
+    ...(r.series ? { series: r.series } : {}),
   };
 }
 
 /** Store the Safe transaction for `call` (a fresh nonce read) and return the offer to sign it. */
-export function holdOwnerSign(input: { wallet: string; safeAddress: string; summary: string; call: SafeCall & { nonce: number }; valueUsd?: number; to?: string; token?: string; amount?: string; symbol?: string }, now = Date.now()): OwnerSignRecord {
+export function holdOwnerSign(input: { wallet: string; safeAddress: string; summary: string; call: SafeCall & { nonce: number }; valueUsd?: number; to?: string; token?: string; amount?: string; symbol?: string; series?: OwnerSignRecord["series"]; rest?: OwnerSend[] }, now = Date.now()): OwnerSignRecord {
   const { call } = input;
   const domain = { chainId: SEPOLIA_CHAIN_ID, verifyingContract: ethers.getAddress(input.safeAddress) };
   const message = {
@@ -99,6 +111,8 @@ export function holdOwnerSign(input: { wallet: string; safeAddress: string; summ
     summary: input.summary, domain, message, safeTxHash: safeTxHashOf(domain, message),
     valueUsd: input.valueUsd ?? 0, to: input.to, token: input.token, amount: input.amount, symbol: input.symbol,
     expiresAt: now + OWNER_SIGN_TTL_MS, status: "pending",
+    ...(input.series ? { series: input.series } : {}),
+    ...(input.rest?.length ? { rest: input.rest } : {}),
   };
   records.set(record.id, record);
   return record;
@@ -116,11 +130,34 @@ export function tamperedCall(safeAddress: string, call: SafeCall & { nonce: numb
 }
 
 /** Build and hold the offer for a batch the module refused. */
-export async function offerOwnerSign(wallet: string, safeAddress: string, summary: string, batch: Array<{ to: string; value: string; data: string }>, meta: { valueUsd?: number; to?: string; token?: string; amount?: string; symbol?: string } = {}) {
+export async function offerOwnerSign(wallet: string, safeAddress: string, summary: string, batch: Array<{ to: string; value: string; data: string }>, meta: { valueUsd?: number; to?: string; token?: string; amount?: string; symbol?: string } = {}, chain: { series?: OwnerSignRecord["series"]; rest?: OwnerSend[] } = {}) {
   let call = await safeCallFor(safeAddress, batch);
   if (faultOn("owner-sign-tamper")) call = tamperedCall(safeAddress, call);
-  return ownerSignView(holdOwnerSign({ wallet, safeAddress, summary, call, ...meta }));
+  return ownerSignView(holdOwnerSign({ wallet, safeAddress, summary, call, ...meta, ...chain }));
 }
+
+/**
+ * A sends-only plan over the ceiling (ORC-21): the owner signs its sends one at a time, each a plain
+ * payment the browser check (ORC-113) can decode, never one MultiSend (a DelegateCall, which that
+ * check refuses). Only the first is held now; each next one is held with a fresh nonce once the one
+ * before has gone through (see submitOwnerSignature), so they can only be signed and sent in order.
+ */
+export async function offerOwnerSignSeries(wallet: string, safeAddress: string, sends: OwnerSend[]) {
+  if (!sends.length) throw new Error("nothing to sign");
+  const [first, ...rest] = sends;
+  return offerOwnerSign(wallet, safeAddress, first.summary, first.batch, first.meta, { series: { index: 0, total: sends.length }, rest });
+}
+
+/** Hold the send after `r` in its plan (the default for OwnerSignDeps.holdNext). */
+async function holdNextSend(r: OwnerSignRecord): Promise<ReturnType<typeof ownerSignView>> {
+  const [next, ...rest] = r.rest!;
+  const index = (r.series?.index ?? 0) + 1;
+  return offerOwnerSign(r.wallet, r.safeAddress, next.summary, next.batch, next.meta, { series: { index, total: r.series?.total ?? index + 1 + rest.length }, rest });
+}
+
+/** When the next send of a plan couldn't be prepared after one went through. */
+export const NEXT_SEND_FAILED_TEXT =
+  "That send went through, but I couldn't prepare the next one for you to sign. Ask me again for the sends that are left.";
 
 /**
  * The pending offer `id` for `wallet`, to show again in the app (e.g. from a Telegram link).
@@ -142,13 +179,15 @@ export interface OwnerSignDeps {
   /** Throws when the account's network fees for today are used up or can't be read (ORC-31); defaults to the real check. */
   gasBudget?: (safeAddress: string) => Promise<void>;
   now?: () => number;
+  /** Hold the plan's next send once this one went through (defaults to a fresh offer from the chain). */
+  holdNext?: (r: OwnerSignRecord) => Promise<Record<string, unknown>>;
 }
 
 /**
  * Submit the owner's signature for a held transaction. Only the wallet it was held for may submit;
  * the signature must be that wallet's over the stored hash; it runs at most once.
  */
-export async function submitOwnerSignature(wallet: string, id: unknown, signature: unknown, deps: OwnerSignDeps): Promise<{ txHash: string; explorerUrl: string }> {
+export async function submitOwnerSignature(wallet: string, id: unknown, signature: unknown, deps: OwnerSignDeps): Promise<{ txHash: string; explorerUrl: string; next?: Record<string, unknown>; nextError?: string }> {
   const r = typeof id === "string" ? records.get(id) : undefined;
   if (!r || r.wallet !== wallet.toLowerCase()) throw new UserFacingError("I couldn't find that request. Ask me again.", 404);
   if (r.status !== "pending") throw new UserFacingError(r.status === "expired" ? "That request expired. Ask me again." : "That request was already sent.", 409);
@@ -179,6 +218,15 @@ export async function submitOwnerSignature(wallet: string, id: unknown, signatur
       await recordActivity(r.wallet, spendActivity({ valueUsd: r.valueUsd, to: r.to, token: r.token, txHash, explorerUrl, source: "owner" }));
     } catch (e) {
       console.warn(`[owner-sign] sent, but couldn't record activity: ${safeErr(e)}`);
+    }
+    // A plan's next send is held only now, so its nonce is the one after this send's.
+    if (r.rest?.length) {
+      try {
+        return { txHash, explorerUrl, next: await (deps.holdNext ?? holdNextSend)(r) };
+      } catch (e) {
+        console.warn(`[owner-sign] sent, but couldn't hold the next send: ${safeErr(e)}`);
+        return { txHash, explorerUrl, nextError: NEXT_SEND_FAILED_TEXT };
+      }
     }
     return { txHash, explorerUrl };
   } catch (err) {

@@ -10,6 +10,7 @@ import { recordKnownRecipient, recordActivity, spendActivity } from "../policy/s
 import { safeErr } from "../utils/redact";
 import { UserFacingError, OverCapError } from "../utils/userFacing";
 import { isUserFacing, executionErrorMessage } from "../integrations/ledger/errors";
+import type { PlanRunResult, StepOutcome } from "../executor/plan";
 
 /**
  * After a send through the account actually went through, remember who it paid: the next send to
@@ -124,6 +125,52 @@ export async function executeApprovalFlow(
     await notifyOverCap(a, err, notifier);
     throw err;
   }
+}
+
+/**
+ * Run a claimed plan approval (ORC-21) and record it: each step that went through is recorded toward
+ * activity and the daily limit as it finishes (and a paid recipient remembered), a step that didn't
+ * run never counts. All steps done settles it as executed with the last receipt; otherwise it is
+ * failed with the plain list of what went through and what didn't, and that is thrown to the caller.
+ */
+export async function executePlanApprovalFlow(
+  a: PendingApproval,
+  run: (a: PendingApproval, onStepDone: (step: { intentType: string; execution: Record<string, unknown> }, outcome: StepOutcome) => Promise<void>) => Promise<PlanRunResult>,
+  notifier?: OverCapNotifier,
+): Promise<{ txHash: string; explorerUrl: string; steps: StepOutcome[]; text: string }> {
+  const onStepDone = async (step: { intentType: string; execution: Record<string, unknown> }, outcome: StepOutcome) => {
+    try {
+      await recordActivity(a.wallet, spendActivity({
+        valueUsd: outcome.valueUsd,
+        to: sentRecipient(step.execution),
+        token: activityToken(step.intentType, step.execution),
+        txHash: outcome.txHash,
+        explorerUrl: outcome.explorerUrl,
+        source: "approved",
+      }));
+    } catch (err: any) {
+      console.warn(`[approval] ${a.id} step ran, but couldn't record activity: ${safeErr(err)}`);
+    }
+    await rememberSentRecipient(a.wallet, step.intentType, step.execution);
+  };
+  let result: PlanRunResult;
+  try {
+    result = await run(a, onStepDone);
+  } catch (err: any) {
+    if (!isUserFacing(err)) console.error(`[approval] ${a.id} failed unexpectedly: ${safeErr(err)}`);
+    await settle(a, { error: executionErrorMessage(err) });
+    // A sends-only plan over the daily ceiling, approved in Telegram: send the link to sign it as owner.
+    await notifyOverCap(a, err, notifier);
+    throw err;
+  }
+  a.steps = result.steps.map(({ index, summary, status, txHash, explorerUrl, error }) => ({ index, summary, status, txHash, explorerUrl, error }));
+  const last = [...result.steps].reverse().find((s) => s.status === "done");
+  if (result.complete && last?.txHash && last.explorerUrl) {
+    await settle(a, { result: { txHash: last.txHash, explorerUrl: last.explorerUrl } });
+    return { txHash: last.txHash, explorerUrl: last.explorerUrl, steps: result.steps, text: result.text };
+  }
+  await settle(a, { error: result.text });
+  throw new UserFacingError(result.text, result.refused ? 409 : 502);
 }
 
 export interface PasskeyApproveDeps {

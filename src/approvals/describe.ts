@@ -68,6 +68,24 @@ export function sentRecipient(execution: Record<string, unknown> | undefined): s
 
 /** Title + details decoded from the payload, or null if it isn't something we recognise. */
 function decode(a: PendingApproval): { title: string; details: ReviewDetail[] } | null {
+  // A plan (ORC-21): every step decoded on its own from its stored payload; one step that can't be
+  // decoded makes the whole plan "couldn't work out what this would do".
+  if (a.intentType === "plan") {
+    const steps = (a.execution as any)?.planData?.steps;
+    if (!Array.isArray(steps) || steps.length < 2 || steps.length > 3) return null;
+    const details: ReviewDetail[] = [];
+    let dependent = false;
+    for (const [i, step] of steps.entries()) {
+      if (!step || step.intentType === "plan" || typeof step.execution !== "object") return null;
+      const d = decode({ ...a, intentType: step.intentType, execution: step.execution });
+      if (!d) return null;
+      details.push({ label: `Step ${i + 1}:`, value: d.title }, ...d.details.map((x) => ({ ...x, label: `  ${x.label}` })));
+      if (Array.isArray(step.amounts) && step.amounts.some((r: any) => r?.kind !== "fixed")) dependent = true;
+    }
+    details.push({ label: "How it runs", value: "one step after another; if one doesn't go through, I stop there" });
+    if (dependent) details.push({ label: "Amounts", value: "the most each step uses; a step that uses what is left, or what an earlier step brought in, can only use less" });
+    return { title: `${steps.length} steps, approved together`, details };
+  }
   if (a.intentType === "send") {
     const tx = (a.execution as any)?.sendData?.unsignedTx;
     if (!tx || typeof tx.to !== "string") return null;
@@ -197,6 +215,15 @@ export function describeApproval(a: PendingApproval, opts: { phonePasskey?: bool
 
 /** One-line outcome that replaces the buttons once the approval is settled. */
 export function describeOutcome(a: PendingApproval): string {
+  if (a.intentType === "plan" && a.steps && (a.status === "executed" || a.status === "failed")) {
+    const lines = a.steps.map((st) => {
+      const mark = st.status === "done" ? "✅" : st.status === "failed" ? "❌" : "–";
+      const receipt = st.explorerUrl ? ` <a href="${esc(st.explorerUrl)}">receipt ↗</a>` : "";
+      return `${mark} ${st.index + 1}. ${esc(st.summary)}${receipt}`;
+    });
+    const head = a.status === "executed" ? "✅ <b>Approved and done</b>" : `❌ <b>Approved, but not every step went through</b>`;
+    return [head, ...lines].join("\n");
+  }
   if (a.status === "executed" && a.result) return `✅ <b>Approved and done</b>\n<a href="${esc(a.result.explorerUrl)}">View receipt ↗</a>`;
   if (a.status === "failed") return `❌ <b>Approved, but it didn't go through</b>\n${esc(a.error || "something went wrong")}`;
   if (a.status === "rejected") return "🚫 <b>You said no.</b> Nothing was done.";
