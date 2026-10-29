@@ -298,6 +298,22 @@ test("/intent checks the allowance before it builds, holds an approval, asks Tel
   }
 });
 
+
+test("respondWithPlan checks the allowance before it builds, holds an approval, or offers owner-sign", () => {
+  const src = readFileSync("src/integrations/ledger/serve.ts", "utf-8");
+  const start = src.indexOf("async function respondWithPlan(");
+  assert.ok(start > 0, "respondWithPlan is in serve.ts");
+  const end = src.indexOf("function planResultView(", start);
+  assert.ok(end > start, "planResultView follows respondWithPlan");
+  const body = src.slice(start, end);
+  const early = body.indexOf("await gasBudgetRefusal(safeAddress)");
+  assert.ok(early > 0, "the early check is in respondWithPlan");
+  for (const later of ["await buildPlanSteps(", "await createApproval(", "planOwnerSignOffer(", "await runPlan("]) {
+    const at = body.indexOf(later);
+    assert.ok(at > early, `${later} comes after the early check in respondWithPlan`);
+  }
+});
+
 (async () => {
   console.log("gas budget");
   for (const [name, fn] of tests) {

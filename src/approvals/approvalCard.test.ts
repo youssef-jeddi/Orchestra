@@ -206,11 +206,12 @@ test("done after a passkey approval reads 'Done'; a failed run says it didn't go
 });
 
 // ── The header balance is re-read after money moves ──
-test("balance refresh: an auto-executed send, swap or liquidity change refreshes; chat, held and failed answers don't", () => {
-  for (const intentType of ["send", "swap", "add_liquidity", "remove_liquidity"]) {
+test("balance refresh: an auto-executed send, swap, liquidity change or plan refreshes; chat, held and failed answers don't", () => {
+  for (const intentType of ["send", "swap", "add_liquidity", "remove_liquidity", "plan"]) {
     assert.equal(bal.shouldRefreshBalances({ autoExecuted: true, txHash: "0x1", intentType }), true, intentType);
   }
   assert.equal(bal.shouldRefreshBalances({ autoExecuted: false, intentType: "send" }), false, "held for approval");
+  assert.equal(bal.shouldRefreshBalances({ autoExecuted: false, intentType: "plan", planResult: { complete: true } }), false, "held plan");
   assert.equal(bal.shouldRefreshBalances({ autoExecuted: true, intentType: "send" }), false, "no transaction");
   assert.equal(bal.shouldRefreshBalances({ autoExecuted: true, txHash: "0x1", intentType: "balance" }), false);
   assert.equal(bal.shouldRefreshBalances({ status: "reply" }), false);
@@ -220,7 +221,9 @@ test("balance refresh: an auto-executed send, swap or liquidity change refreshes
 test("balance refresh: an approval that was carried out (passkey, Telegram, phone) refreshes; one that wasn't doesn't", () => {
   assert.equal(bal.approvalMovedFunds({ status: "executed", intentType: "send" }), true);
   assert.equal(bal.approvalMovedFunds({ status: "executed", intentType: "swap" }), true);
+  assert.equal(bal.approvalMovedFunds({ status: "executed", intentType: "plan" }), true, "Telegram-approved plan");
   for (const status of ["pending", "executing", "rejected", "expired", "failed"]) assert.equal(bal.approvalMovedFunds({ status, intentType: "send" }), false, status);
+  assert.equal(bal.approvalMovedFunds({ status: "pending", intentType: "plan" }), false);
 });
 
 test("balance refresh: read now and once more shortly after", () => {
@@ -232,6 +235,43 @@ test("balance refresh: read now and once more shortly after", () => {
   assert.equal(timers[0][1], bal.REFRESH_AGAIN_MS);
   timers[0][0]();
   assert.deepEqual(calls, ["read", "read"]);
+});
+
+// ── Multi-step plans (ORC-21) ──
+
+test("a held plan says one OK covers every step; a plan that ran or a single action shows no such line", () => {
+  const held = { intentType: "plan", autoExecuted: false, planData: { steps: ["Swap 2 USDC for ETH", "Send 1 USDC to bob.eth"] } };
+  assert.match(card.planHint(held), /^Approving covers all 2 steps\. They run one after another/);
+  assert.doesNotMatch(card.planHint(held), JARGON);
+  assert.equal(card.planHint({ ...held, autoExecuted: true }), "");
+  assert.equal(card.planHint({ intentType: "send", sendData: {} }), "");
+  assert.equal(card.declineLabel("plan"), "Don't do any of it");
+});
+
+test("a plan's step lines: a receipt only for a step that went through, plain marks for the rest", () => {
+  const lines = card.planStepLines([
+    { index: 0, summary: "Send 1 USDC to A", status: "done", explorerUrl: "https://sepolia.etherscan.io/tx/1" },
+    { index: 1, summary: "Send 1 USDC to B", status: "failed", explorerUrl: "https://example.invalid" },
+    { index: 2, summary: "Swap 1 USDC for ETH", status: "not-run" },
+  ]);
+  assert.deepEqual(lines.map((l: any) => l.text), [
+    "✓ 1. Send 1 USDC to A",
+    "✗ 2. Send 1 USDC to B — didn't go through",
+    "– 3. Swap 1 USDC for ETH — not started",
+  ]);
+  assert.deepEqual(lines.map((l: any) => l.receiptUrl), ["https://sepolia.etherscan.io/tx/1", undefined, undefined]);
+  assert.deepEqual(card.planStepLines(undefined), []);
+});
+
+test("a plan that stopped partway settles its card with the steps and the plan's own sentence", () => {
+  const approval = { status: "failed", error: "Step 2 didn't go through: Not enough USDC. I stopped there.\n✓ 1. …", steps: [{ index: 0, summary: "a", status: "done" }] };
+  const o = card.outcomeAfterError(new Error("x"), approval, "plan");
+  assert.equal(o.status, "failed");
+  assert.match(o.text, /^Step 2 didn't go through/);
+  assert.equal(o.steps.length, 1);
+  const done = card.doneOutcome({ txHash: "0x1", explorerUrl: "u", steps: [{ index: 0, summary: "a", status: "done" }] });
+  assert.equal(done.steps.length, 1);
+  assert.equal(card.doneOutcome({ txHash: "0x1", explorerUrl: "u" }).steps, undefined);
 });
 
 (async () => {

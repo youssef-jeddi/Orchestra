@@ -105,3 +105,21 @@ export async function executeForAccount(input: AccountExecInput, deps: AccountEx
     throw err;
   }
 }
+
+/**
+ * Whether `valueUsd` still fits in the account's on-chain daily ceiling (always true without the
+ * module). Asked once before a multi-step plan starts (ORC-21), so a plan that can't finish on the
+ * agent's own allowance is answered in plain words before its first step runs. Fails closed: an
+ * unreadable ceiling throws the same plain error as a single request.
+ */
+export async function fitsDailyCeiling(safeAddress: string, valueUsd: number, deps: Pick<AccountExecDeps, "enabled" | "remainingCents"> = realDeps): Promise<boolean> {
+  if (!deps.enabled()) return true;
+  let remaining: bigint;
+  try {
+    remaining = await deps.remainingCents(safeAddress);
+  } catch (err) {
+    logCapReadFailure(err);
+    throw new UserFacingError("I couldn't check your account's daily ceiling just now, so nothing was sent. Please try again in a moment.", 503);
+  }
+  return !exceedsRemaining(valueUsd, remaining);
+}
