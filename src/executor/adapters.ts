@@ -75,11 +75,12 @@ export function assessQuote(quote: any, leg: QuoteLeg): { amountOut: number | nu
   return { amountOut, check, refusal: check.ok ? undefined : check.reason };
 }
 
-/** "Swap 10 USDC for ~0.00398 ETH", with the USD value and any notable gap to market. */
-function swapSummary(amountIn: string, symbolIn: string, amountOut: number, symbolOut: string, check: QuoteCheck | null): string {
+/** "Swap 0.001 ETH (~$2.37) for ~44.64 USDC", with the USD on the input and any notable gap to market (ORC-119). */
+export function swapSummary(amountIn: string, symbolIn: string, amountOut: number, symbolOut: string, check: QuoteCheck | null): string {
   const usd = estimateUsd(symbolIn, Number(amountIn));
-  let s = `Swap ${amountIn} ${symbolIn} for ~${formatTokenAmount(amountOut, symbolOut)} ${symbolOut}`;
+  let s = `Swap ${amountIn} ${symbolIn}`;
   if (symbolIn !== "USDC" && usd > 0) s += ` (~$${usd.toFixed(2)})`;
+  s += ` for ~${formatTokenAmount(amountOut, symbolOut)} ${symbolOut}`;
   if (check && check.shortfall >= 0.01) s += `, ${(check.shortfall * 100).toFixed(1)}% below the market price`;
   return s;
 }

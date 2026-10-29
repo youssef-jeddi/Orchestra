@@ -10,6 +10,7 @@ import { OrchestraProvider, useOrchestra } from '@/context/OrchestraContext';
 import {
   sendIntent, getPrices, getPasskeyStatus, getApproval,
   getTelegramStatus, telegramLinkRequest, telegramLink, listPasskeys, rejectApproval, getOwnerSign, getActivity, getGasToday, getPauseStatus,
+  passkeyRecoveryStatus, passkeyRecoveryCancel,
 } from '@/lib/bridge';
 import PauseBanner from '@/components/PauseBanner';
 import { activityRow, ownerSignIdFromSearch, ACTIVITY_EMPTY, EXPIRED_OWNER_SIGN } from '@/lib/activity';
@@ -25,7 +26,9 @@ import EmailPasskeySetup from '@/components/EmailPasskeySetup';
 import SocialPasskeySetup from '@/components/SocialPasskeySetup';
 import LimitsSheet from '@/components/LimitsSheet';
 import BackupSignIn from '@/components/BackupSignIn';
+import PasskeyRecovery from '@/components/PasskeyRecovery';
 import { hasFunds, backupPreviewEnabled } from '@/lib/backupSignIn';
+import { shouldOfferRecovery, canCancelRecovery, isPendingReplacement, pendingLabel } from '@/lib/passkeyRecovery';
 import { LIMITS_BUTTON_HINT } from '@/lib/limits';
 import { HINT_COLOR, HINT_SIZE } from '@/lib/contrast';
 import { headerState, CONNECTING_GIVE_UP_MS } from '@/lib/connection';
@@ -447,7 +450,7 @@ function SimpleChat() {
             : <p style={{ fontSize: 13, color: '#B9B5AE' }}>{SOCIAL_NONE}</p>
       )}
       {connected && session.ready && showPasskeys && (
-        <PasskeyPanel onAdd={registerPk} adding={addingPasskey} onChange={refreshPasskeyStatus} onClose={() => setShowPasskeys(false)} onError={showError} />
+        <PasskeyPanel wallet={ledger.walletAddress} onAdd={registerPk} adding={addingPasskey} onChange={refreshPasskeyStatus} onClose={() => setShowPasskeys(false)} onError={showError} buttonStyle={approveBtn} />
       )}
       {connected && session.ready && showLimits && (
         <LimitsSheet ledger={ledger} onClose={() => setShowLimits(false)} buttonStyle={approveBtn} onPauseChange={loadPause} />
@@ -895,18 +898,37 @@ function TelegramLink({ ledger, session, onError }) {
 }
 
 // The account's passkeys. Adding or removing one asks for an existing passkey
-// first (the server checks it); the last one can't be removed.
-function PasskeyPanel({ onAdd, adding, onChange, onClose, onError }) {
+// first (the server checks it); the last one can't be removed. Lost-passkey
+// recovery (ORC-118) is offered here when the account already has a passkey.
+function PasskeyPanel({ wallet, onAdd, adding, onChange, onClose, onError, buttonStyle }) {
   const [passkeys, setPasskeys] = useState(null);
+  const [recovery, setRecovery] = useState(null);
   const [busy, setBusy] = useState(null); // passkey id being removed, or 'add'
+  const [showRecovery, setShowRecovery] = useState(false);
 
   const load = useCallback(() => {
     listPasskeys().then((d) => setPasskeys(d.passkeys)).catch((err) => onError(`Couldn't load your passkeys: ${err.message}`));
+    passkeyRecoveryStatus().then(setRecovery).catch(() => setRecovery(null));
   }, [onError]);
 
   useEffect(() => { load(); }, [load]);
 
   const remove = async (p) => {
+    if (isPendingReplacement(p)) {
+      if (!window.confirm('Cancel this replacement passkey? It will be removed and never become active.')) return;
+      setBusy(p.id);
+      try {
+        const d = await passkeyRecoveryCancel();
+        setPasskeys(d.passkeys);
+        setRecovery(d.recovery);
+        onChange();
+      } catch (err) {
+        onError(`Couldn't cancel: ${err.message}`);
+      } finally {
+        setBusy(null);
+      }
+      return;
+    }
     if (!window.confirm(`Remove the ${passkeyName(p).toLowerCase()} on ${p.rpID}? It will no longer be able to approve anything.`)) return;
     setBusy(p.id);
     try {
@@ -929,7 +951,8 @@ function PasskeyPanel({ onAdd, adding, onChange, onClose, onError }) {
     }
   };
 
-  const only = passkeys?.length === 1;
+  const only = passkeys?.filter((p) => !isPendingReplacement(p)).length === 1;
+  const offer = shouldOfferRecovery(recovery);
   return (
     <div style={{ marginTop: 12, padding: '10px 12px', border: '1px solid #1c1c22', borderRadius: 12 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
@@ -940,19 +963,47 @@ function PasskeyPanel({ onAdd, adding, onChange, onClose, onError }) {
       {passkeys?.map((p) => (
         <div key={`${p.rpID}:${p.id}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 0', borderTop: '1px solid #1c1c22' }}>
           <span style={{ fontSize: 13, color: '#E8E4DE' }}>{p.label === 'phone' ? '📱' : '🔑'} {passkeyName(p)}</span>
-          <span style={{ fontSize: 11, color: '#666' }}>
-            {p.rpID}{p.createdAt ? ` · added ${new Date(p.createdAt).toLocaleDateString()}` : ''}
+          <span style={{ fontSize: 11, color: isPendingReplacement(p) ? '#FF9F0A' : '#666' }}>
+            {isPendingReplacement(p)
+              ? pendingLabel(p)
+              : `${p.rpID}${p.createdAt ? ` · added ${new Date(p.createdAt).toLocaleDateString()}` : ''}`}
           </span>
-          <button onClick={() => remove(p)} disabled={!!busy || only} style={{ ...pill(false), marginLeft: 'auto', padding: '4px 10px', fontSize: 12, opacity: only ? 0.5 : 1 }}
-            title={only ? 'Your only passkey: add another before removing it' : 'Remove (confirm with one of your passkeys)'}>
-            {busy === p.id ? 'Confirm with your passkey…' : 'Remove'}
+          <button onClick={() => remove(p)} disabled={!!busy || (!isPendingReplacement(p) && only)} style={{ ...pill(false), marginLeft: 'auto', padding: '4px 10px', fontSize: 12, opacity: (!isPendingReplacement(p) && only) ? 0.5 : 1 }}
+            title={isPendingReplacement(p) ? 'Cancel this waiting replacement' : only ? 'Your only passkey: add another before removing it' : 'Remove (confirm with one of your passkeys)'}>
+            {busy === p.id ? (isPendingReplacement(p) ? 'Cancelling…' : 'Confirm with your passkey…') : (isPendingReplacement(p) ? 'Cancel' : 'Remove')}
           </button>
         </div>
       ))}
-      <button onClick={add} disabled={!!busy || adding} style={{ ...pill(false), marginTop: 8, fontSize: 12, padding: '5px 12px' }}
+      <button onClick={add} disabled={!!busy || adding || showRecovery} style={{ ...pill(false), marginTop: 8, fontSize: 12, padding: '5px 12px' }}
         title="Add a passkey on this device (confirm with an existing one first)">
         {busy === 'add' || adding ? 'Follow the passkey prompts…' : '+ Add another passkey'}
       </button>
+      {offer && !showRecovery && (
+        <div style={{ marginTop: 10 }}>
+          <button onClick={() => setShowRecovery(true)} disabled={!!busy || adding} style={{ ...pill(false), fontSize: 12, padding: '5px 12px' }}
+            title={recovery?.help || ''}>
+            {recovery?.label || 'Lost your passkey? Add a new one'}
+          </button>
+          {recovery?.help && <p style={{ margin: '6px 0 0', fontSize: 11, color: '#8d8a84', lineHeight: 1.5 }}>{recovery.help}</p>}
+          {canCancelRecovery(recovery) && recovery.status !== 'none' && (
+            <button onClick={async () => {
+              try {
+                const d = await passkeyRecoveryCancel();
+                setPasskeys(d.passkeys);
+                setRecovery(d.recovery);
+                onChange();
+              } catch (err) { onError(`Couldn't cancel: ${err.message}`); }
+            }} style={{ ...pill(false), marginTop: 6, fontSize: 12, padding: '5px 12px' }}>
+              Cancel recovery
+            </button>
+          )}
+        </div>
+      )}
+      {showRecovery && (
+        <PasskeyRecovery wallet={wallet} style={{ button: buttonStyle?.(false) }}
+          onDone={() => { load(); onChange(); }}
+          onClose={() => setShowRecovery(false)} />
+      )}
     </div>
   );
 }

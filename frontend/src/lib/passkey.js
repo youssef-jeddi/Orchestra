@@ -42,6 +42,17 @@ export async function registerPasskey(walletAddress) {
   return passkeyRegister(walletAddress, response);
 }
 
+/**
+ * Register a replacement passkey after recovery was granted (ORC-118).
+ * Skips the existing-passkey check: the server accepts the recovery grant instead.
+ */
+export async function registerRecoveryPasskey(walletAddress) {
+  if (!browserCanUsePasskeys()) throw noWebAuthnError();
+  const optionsJSON = await passkeyRegisterOptions(walletAddress, null);
+  const response = await ceremony(startRegistration, optionsJSON);
+  return passkeyRegister(walletAddress, response);
+}
+
 /** Remove one of the account's passkeys, confirming with an existing one. Returns the updated list. */
 export async function removePasskey(id) {
   return passkeyRemove(id, await confirmExistingPasskey());

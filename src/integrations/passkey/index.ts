@@ -13,6 +13,8 @@
 // A wallet's first passkey only needs its session. Adding or removing one
 // after that needs a check with an existing passkey first (ownerCheckOptions /
 // verifyOwner), or a session alone could add its own passkey and approve anything.
+// Losing every usable authenticator goes through recovery (recovery.ts, ORC-118): a fresh
+// email code, then Telegram confirm or a 48h delay before the replacement can approve.
 //
 // Wallets that signed in with an email (emailGate.ts) go further: nothing moves funds until
 // they hold a passkey, and their first one also needs a fresh email code, checked here in
@@ -30,6 +32,7 @@ import { decodeCredentialPublicKey } from "@simplewebauthn/server/helpers";
 import crypto from "crypto";
 import { read, write } from "../zero-g/storage";
 import { isEmailWallet, passkeyGate, hasEmailVerification, consumeEmailVerification } from "./emailGate";
+import { isCredActive, peekRecoveryGrant, completeRecoveryRegistration, type RecoveryMode } from "./recovery";
 
 export interface RelyingParty {
   rpID: string;
@@ -81,11 +84,13 @@ interface HeldChallenge {
   expires: number;
   /** A registration challenge issued after a check with an existing passkey. */
   ownerChecked?: boolean;
+  /** Registration opened by passkey recovery (ORC-118); mode decides pending vs active. */
+  viaRecovery?: RecoveryMode;
 }
 const challenges = new Map<string, HeldChallenge>();
 
-function setChallenge(key: string, challenge: string, ownerChecked = false): void {
-  challenges.set(key.toLowerCase(), { challenge, expires: Date.now() + CHALLENGE_TTL_MS, ownerChecked });
+function setChallenge(key: string, challenge: string, ownerChecked = false, viaRecovery?: RecoveryMode): void {
+  challenges.set(key.toLowerCase(), { challenge, expires: Date.now() + CHALLENGE_TTL_MS, ownerChecked, viaRecovery });
 }
 function takeChallenge(key: string): HeldChallenge | null {
   const k = key.toLowerCase();
@@ -111,6 +116,8 @@ interface StoredCred {
   createdAt?: string;
   /** Where it was created when not registered here: the Privy sign-in passkey. */
   source?: "privy";
+  /** ISO time until which this credential must not approve (recovery delay, ORC-118). */
+  pendingUntil?: string;
 }
 
 const storeKey = (wallet: string) => `passkey:${wallet.toLowerCase()}`;
@@ -132,9 +139,9 @@ async function saveCreds(wallet: string, creds: StoredCred[]): Promise<void> {
   await write(storeKey(wallet), { creds });
 }
 
-/** A passkey usable on `rp` (the desktop app's domain by default). */
-export async function hasPasskey(wallet: string, rp: RelyingParty = browserRp()): Promise<boolean> {
-  return (await getCreds(wallet)).some((c) => c.rpID === rp.rpID);
+/** A passkey usable on `rp` (the desktop app's domain by default). Pending recovery replacements don't count. */
+export async function hasPasskey(wallet: string, rp: RelyingParty = browserRp(), now = Date.now()): Promise<boolean> {
+  return (await getCreds(wallet)).some((c) => c.rpID === rp.rpID && isCredActive(c, now));
 }
 
 /** Any passkey at all, on any domain: then adding another needs an owner check. */
@@ -161,7 +168,13 @@ export async function hasPhonePasskey(wallet: string): Promise<boolean> {
  * kept per wallet, marked with `ownerChecked` (an existing passkey was checked
  * first, see verifyOwner).
  */
-export async function registrationOptions(wallet: string, rp: RelyingParty = browserRp(), holdChallenge = false, ownerChecked = false) {
+export async function registrationOptions(
+  wallet: string,
+  rp: RelyingParty = browserRp(),
+  holdChallenge = false,
+  ownerChecked = false,
+  viaRecovery?: RecoveryMode,
+) {
   const all = await getCreds(wallet);
   // Say so before the device prompt, not after it: the verification is spent when the passkey is saved.
   if (all.length === 0 && (await isEmailWallet(wallet)) && !hasEmailVerification(wallet)) throw emailVerificationNeeded();
@@ -175,7 +188,7 @@ export async function registrationOptions(wallet: string, rp: RelyingParty = bro
     excludeCredentials: existing.map((c) => ({ id: c.id, transports: c.transports as any })),
     authenticatorSelection: { residentKey: "preferred", userVerification: "preferred" },
   });
-  if (!holdChallenge) setChallenge(`reg:${wallet}:${rp.rpID}`, opts.challenge, ownerChecked);
+  if (!holdChallenge) setChallenge(`reg:${wallet}:${rp.rpID}`, opts.challenge, ownerChecked, viaRecovery);
   return opts;
 }
 
@@ -188,10 +201,12 @@ export async function registrationOptions(wallet: string, rp: RelyingParty = bro
 export async function verifyRegistration(
   wallet: string,
   response: any,
-  opts: { rp?: RelyingParty; challenge?: string; ownerChecked?: boolean; label?: PasskeyLabel } = {}
+  opts: { rp?: RelyingParty; challenge?: string; ownerChecked?: boolean; viaRecovery?: RecoveryMode; label?: PasskeyLabel } = {}
 ): Promise<boolean> {
   const rp = opts.rp ?? browserRp();
-  const held = opts.challenge ? { challenge: opts.challenge, ownerChecked: !!opts.ownerChecked } : takeChallenge(`reg:${wallet}:${rp.rpID}`);
+  const held = opts.challenge
+    ? { challenge: opts.challenge, ownerChecked: !!opts.ownerChecked, viaRecovery: opts.viaRecovery }
+    : takeChallenge(`reg:${wallet}:${rp.rpID}`);
   if (!held) throw new PasskeyError(400, "No or expired registration challenge");
   const expectedChallenge = held.challenge;
 
@@ -207,9 +222,22 @@ export async function verifyRegistration(
 
   const cred = verification.registrationInfo.credential;
   const existing = await getCreds(wallet);
-  if (existing.length && !held.ownerChecked) throw ownerCheckNeeded();
+  // Recovery (ORC-118) is the only path that can add a passkey without an existing one when some are stored.
+  let viaRecovery = held.viaRecovery;
+  if (existing.length && !held.ownerChecked) {
+    const grant = await peekRecoveryGrant(wallet);
+    if (!grant) throw ownerCheckNeeded();
+    viaRecovery = grant.mode;
+  }
   // An email wallet's first passkey needs a fresh email code, spent here, once.
   if (!existing.length && (await isEmailWallet(wallet)) && !(await consumeEmailVerification(wallet))) throw emailVerificationNeeded();
+
+  let pendingUntil: string | undefined;
+  if (viaRecovery) {
+    const done = await completeRecoveryRegistration(wallet, cred.id);
+    pendingUntil = done.pendingUntil;
+  }
+
   const creds = existing.filter((c) => c.id !== cred.id);
   creds.push({
     id: cred.id,
@@ -219,6 +247,7 @@ export async function verifyRegistration(
     rpID: rp.rpID,
     label: opts.label ?? "browser",
     createdAt: new Date().toISOString(),
+    ...(pendingUntil ? { pendingUntil } : {}),
   });
   await saveCreds(wallet, creds);
   return true;
@@ -285,8 +314,8 @@ export async function addExternalCredentials(wallet: string, list: ExternalCrede
 // ── Authentication ──
 // Approvals pass their own challenge (derived from the pending payload's hash)
 // and hold it themselves; without one, a random challenge is kept per wallet.
-export async function authenticationOptions(wallet: string, challenge?: Uint8Array, rp: RelyingParty = browserRp()) {
-  const creds = (await getCreds(wallet)).filter((c) => c.rpID === rp.rpID);
+export async function authenticationOptions(wallet: string, challenge?: Uint8Array, rp: RelyingParty = browserRp(), now = Date.now()) {
+  const creds = (await getCreds(wallet)).filter((c) => c.rpID === rp.rpID && isCredActive(c, now));
   if (creds.length === 0) throw new PasskeyError(400, "No passkey registered for this wallet on this device");
 
   const opts = await generateAuthenticationOptions({
@@ -307,11 +336,18 @@ export interface PasskeyView {
   label: PasskeyLabel;
   source?: "privy";
   createdAt?: string;
+  /** Present while a recovery replacement can't approve yet (ORC-118). */
+  pendingUntil?: string;
+  /** False while pendingUntil is in the future. */
+  active: boolean;
 }
 
 /** The wallet's passkeys, without their keys. */
-export async function listPasskeys(wallet: string): Promise<PasskeyView[]> {
-  return (await getCreds(wallet)).map(({ id, rpID, label, source, createdAt }) => ({ id, rpID, label, source, createdAt }));
+export async function listPasskeys(wallet: string, now = Date.now()): Promise<PasskeyView[]> {
+  return (await getCreds(wallet)).map(({ id, rpID, label, source, createdAt, pendingUntil }) => ({
+    id, rpID, label, source, createdAt, pendingUntil,
+    active: isCredActive({ pendingUntil }, now),
+  }));
 }
 
 /**
@@ -319,14 +355,28 @@ export async function listPasskeys(wallet: string): Promise<PasskeyView[]> {
  * (verifyOwner). The last one stays: without any, a session alone could add one
  * again, so losing every passkey goes through recovery instead.
  */
-export async function removePasskey(wallet: string, id: string): Promise<PasskeyView> {
+export async function removePasskey(wallet: string, id: string, now = Date.now()): Promise<PasskeyView> {
   const creds = await getCreds(wallet);
   const cred = creds.find((c) => c.id === id);
   if (!cred) throw new PasskeyError(404, "This passkey isn't on this account.");
   if (creds.length === 1) throw new PasskeyError(409, "This is the account's only passkey. Add another before removing it.", "last_passkey");
   await saveCreds(wallet, creds.filter((c) => c !== cred));
-  const { rpID, label, source, createdAt } = cred;
-  return { id, rpID, label, source, createdAt };
+  const { rpID, label, source, createdAt, pendingUntil } = cred;
+  return { id, rpID, label, source, createdAt, pendingUntil, active: isCredActive(cred, now) };
+}
+
+/**
+ * Remove a not-yet-active recovery passkey without an owner check (the user can't use it to
+ * prove ownership, and cancel must work with only the email-backup session — ORC-118).
+ */
+export async function removePendingPasskey(wallet: string, id: string, now = Date.now()): Promise<PasskeyView> {
+  const creds = await getCreds(wallet);
+  const cred = creds.find((c) => c.id === id);
+  if (!cred) throw new PasskeyError(404, "This passkey isn't on this account.");
+  if (isCredActive(cred, now)) throw new PasskeyError(403, "That passkey is already active. Remove it with one of your passkeys.", "passkey_required");
+  await saveCreds(wallet, creds.filter((c) => c !== cred));
+  const { rpID, label, source, createdAt, pendingUntil } = cred;
+  return { id, rpID, label, source, createdAt, pendingUntil, active: false };
 }
 
 // ── Funds gate ──
@@ -336,8 +386,9 @@ export async function removePasskey(wallet: string, id: string): Promise<Passkey
  * Every path that moves funds goes through this (see getAdapter): without it, a session
  * alone could move money from an account that has nothing else protecting it.
  */
-export async function requirePasskeyToMoveFunds(wallet: string): Promise<void> {
-  const gate = passkeyGate({ emailWallet: await isEmailWallet(wallet), passkeyCount: (await getCreds(wallet)).length });
+export async function requirePasskeyToMoveFunds(wallet: string, now = Date.now()): Promise<void> {
+  const active = (await getCreds(wallet)).filter((c) => isCredActive(c, now)).length;
+  const gate = passkeyGate({ emailWallet: await isEmailWallet(wallet), passkeyCount: active });
   if (!gate.ok) throw new PasskeyError(403, gate.message, gate.code);
 }
 
@@ -391,6 +442,7 @@ export async function verifyAuthentication(wallet: string, response: any, challe
   const creds = await getCreds(wallet);
   const cred = creds.find((c) => c.id === response?.id && c.rpID === rp.rpID);
   if (!cred) throw new PasskeyError(400, "This passkey isn't registered for this wallet");
+  if (!isCredActive(cred)) throw new PasskeyError(403, "This passkey can't approve yet — it's still in its waiting period.", "passkey_pending");
 
   const verification = await verifyAuthenticationResponse({
     response,

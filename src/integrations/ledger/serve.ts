@@ -81,8 +81,11 @@ import {
   sendText,
   startTelegramBot,
   broadcastText,
+  sendRecoveryConfirmMessage,
+  sendRecoveryPendingMessage,
   type DecisionHandler,
   type CommandHandler,
+  type RecoveryHandler,
 } from "../telegram";
 import { runCommand, resumeLink } from "../telegram/commands";
 import { requireAdmin, adminConfigWarning, isAdminChat } from "../../auth/admin";
@@ -101,6 +104,7 @@ import {
   verifyOwner,
   listPasskeys,
   removePasskey,
+  removePendingPasskey,
   PasskeyError,
   phoneRp,
   browserRp,
@@ -108,7 +112,11 @@ import {
   type RelyingParty,
 } from "../passkey";
 import { createSetupToken, getSetup, consumeSetup } from "../passkey/phoneSetup";
-import { isEmailWallet, hasEmailVerification, verificationAccountTypes } from "../passkey/emailGate";
+import { isEmailWallet, hasEmailVerification, verificationAccountTypes, consumeEmailVerification } from "../passkey/emailGate";
+import {
+  startRecovery, getRecovery, recoveryView, confirmRecoveryTelegram, cancelRecovery,
+  peekRecoveryGrant, setTelegramMessageId,
+} from "../passkey/recovery";
 import { moduleConfigProblem } from "../safe/spendingModule";
 import { agentKeyConfigProblem } from "../safe/agentKeys";
 
@@ -1169,6 +1177,12 @@ app.post("/passkey/register-options", requireSession, async (req, res) => {
   try {
     const walletAddress = res.locals.wallet as string;
     const rp = desktopRp(req);
+    // Recovery grant (ORC-118) stands in for an existing-passkey check — desktop only, never phone setup.
+    const grant = await peekRecoveryGrant(walletAddress);
+    if (grant) {
+      res.json(await registrationOptions(walletAddress, rp, false, true, grant.mode));
+      return;
+    }
     const ownerChecked = await checkOwnerToAddPasskey(walletAddress, req);
     res.json(await registrationOptions(walletAddress, rp, false, ownerChecked));
   } catch (e: any) { sendError(res, e); }
@@ -1180,10 +1194,25 @@ app.post("/passkey/register", requireSession, async (req, res) => {
     const { response } = req.body;
     if (!response) { res.status(400).json({ error: "response required" }); return; }
     const rp = desktopRp(req);
+    // Capture whether this registration is a recovery before verifyRegistration consumes the grant.
+    const recoveryGrant = await peekRecoveryGrant(walletAddress);
     await verifyRegistration(walletAddress, response, { rp });
-    console.log(`[passkey] registered for ${shortAddr(walletAddress)}`);
-    notifyNewPasskey(walletAddress, describePasskey({ label: "browser", rpID: rp.rpID }));
-    res.json({ status: "ok", registered: true });
+    console.log(`[passkey] registered for ${shortAddr(walletAddress)}${recoveryGrant ? ` (recovery:${recoveryGrant.mode})` : ""}`);
+    if (recoveryGrant?.mode === "delay") {
+      const rec = await getRecovery(walletAddress);
+      if (rec && rec.status === "pending") {
+        // No email sender in this repo yet — log the notice and surface it via GET /passkey/recovery.
+        console.warn(`[passkey-recovery] email notice (no mail sender configured): ${rec.emailNotice}`);
+        const link = telegramEnabled() ? await getLink(walletAddress) : null;
+        if (link) {
+          sendRecoveryPendingMessage(link.chatId, rec.pendingUntil).catch((err) =>
+            console.warn(`[passkey-recovery] telegram pending notice failed: ${safeErr(err)}`));
+        }
+      }
+    } else {
+      notifyNewPasskey(walletAddress, describePasskey({ label: "browser", rpID: rp.rpID }));
+    }
+    res.json({ status: "ok", registered: true, recovery: recoveryGrant?.mode ?? null });
   } catch (e: any) { sendError(res, e, 400); }
 });
 
@@ -1206,6 +1235,70 @@ app.post("/passkey/remove", requireSession, async (req, res) => {
     notifyPasskeyChange(walletAddress,
       `🗑 A passkey was removed from your Orchestra account (${describePasskey(removed)}). It can no longer approve transactions.`).catch(() => {});
     res.json({ status: "ok", passkeys: await listPasskeys(walletAddress) });
+  } catch (e: any) { sendError(res, e); }
+});
+
+// ─── Passkey recovery (ORC-118) ───
+// After email-backup login, a user who lost their only authenticator can replace it:
+// fresh email code → Telegram confirm (active at once) or 48h delay (pending, cancellable).
+app.get("/passkey/recovery", requireSession, async (_req, res) => {
+  try {
+    const wallet = res.locals.wallet as string;
+    const link = telegramEnabled() ? await getLink(wallet) : null;
+    const rec = await getRecovery(wallet);
+    res.json(recoveryView(rec, { telegramLinked: !!link, hasPasskey: await hasAnyPasskey(wallet) }));
+  } catch (e: any) { sendError(res, e); }
+});
+
+app.post("/passkey/recovery/start", requireSession, async (_req, res) => {
+  try {
+    const wallet = res.locals.wallet as string;
+    if (!(await hasAnyPasskey(wallet))) {
+      res.status(400).json({ error: "Add your first passkey the usual way — recovery is only for replacing a lost one.", code: "no_passkey_yet" });
+      return;
+    }
+    // Fresh email code required (fail closed): same single-use grant as the first passkey.
+    if (!(await consumeEmailVerification(wallet))) {
+      res.status(403).json({
+        error: "First we need to check it's really you. Confirm with a fresh email code, then try again.",
+        code: "email_verification_required",
+      });
+      return;
+    }
+    const link = telegramEnabled() ? await getLink(wallet) : null;
+    const rec = await startRecovery(wallet, { telegramLinked: !!link });
+    if (rec.status === "awaiting_telegram" && link) {
+      try {
+        const messageId = await sendRecoveryConfirmMessage(link.chatId);
+        await setTelegramMessageId(wallet, messageId);
+      } catch (err: any) {
+        await cancelRecovery(wallet);
+        throw err;
+      }
+    }
+    console.log(`[passkey-recovery] started for ${shortAddr(wallet)} (${rec.status})`);
+    res.json(recoveryView(rec, { telegramLinked: !!link, hasPasskey: true }));
+  } catch (e: any) { sendError(res, e); }
+});
+
+app.post("/passkey/recovery/cancel", requireSession, async (_req, res) => {
+  try {
+    const wallet = res.locals.wallet as string;
+    const { pendingCredId } = await cancelRecovery(wallet);
+    if (pendingCredId) {
+      try { await removePendingPasskey(wallet, pendingCredId); }
+      catch (e: any) {
+        if (!(e instanceof PasskeyError && e.status === 404)) throw e;
+      }
+    }
+    const link = telegramEnabled() ? await getLink(wallet) : null;
+    if (link) sendText(link.chatId, "✖️ Passkey recovery was cancelled. No new passkey was activated.").catch(() => {});
+    console.log(`[passkey-recovery] cancelled for ${shortAddr(wallet)}`);
+    res.json({
+      status: "ok",
+      passkeys: await listPasskeys(wallet),
+      recovery: recoveryView(null, { telegramLinked: !!link, hasPasskey: await hasAnyPasskey(wallet) }),
+    });
   } catch (e: any) { sendError(res, e); }
 });
 
@@ -1346,6 +1439,30 @@ app.post("/admin/kill-switch", requireAdmin, async (req, res) => {
     });
   }
 });
+
+// Passkey recovery confirm/cancel from the linked Telegram chat (ORC-118).
+const onTelegramRecovery: RecoveryHandler = async ({ wallet, confirm, chatId, messageId }) => {
+  if (confirm) {
+    await confirmRecoveryTelegram(wallet);
+    await settleApprovalMessage(chatId, messageId,
+      "🔑 Passkey recovery",
+      "✅ Confirmed. Open Orchestra and add your new passkey now — it can approve right away.").catch(() => {});
+    console.log(`[passkey-recovery] telegram confirmed for ${shortAddr(wallet)}`);
+    return "Confirmed — add your new passkey in Orchestra.";
+  }
+  const { pendingCredId } = await cancelRecovery(wallet);
+  if (pendingCredId) {
+    try { await removePendingPasskey(wallet, pendingCredId); }
+    catch (e: any) {
+      if (!(e instanceof PasskeyError && e.status === 404)) throw e;
+    }
+  }
+  await settleApprovalMessage(chatId, messageId,
+    "🔑 Passkey recovery",
+    "✖️ Cancelled. No new passkey was activated.").catch(() => {});
+  console.log(`[passkey-recovery] telegram cancelled for ${shortAddr(wallet)}`);
+  return "Cancelled.";
+};
 
 // /pause, /resume, /status, and /pauseall, /resumeall from ADMIN_CHAT_IDS (see telegram/commands.ts).
 const onTelegramCommand: CommandHandler = ({ text, chatId, wallet }) => runCommand(text, chatId, wallet, {
@@ -1706,7 +1823,7 @@ loadApprovals().then(() => loadGlobalSwitch()).then((switchRead) => {
   console.log();
   // Warm the price cache at startup.
   refreshPrices().catch(() => {});
-  startTelegramBot(onTelegramDecision, onTelegramCommand);
+  startTelegramBot(onTelegramDecision, onTelegramCommand, onTelegramRecovery);
 })).catch((err) => {
   console.error(`[approval] couldn't read the saved approvals, so the bridge won't start: ${safeErr(err)}`);
   process.exit(1);

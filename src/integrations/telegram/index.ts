@@ -274,6 +274,39 @@ export async function sendLinkMessage(chatId: number, text: string, buttonText: 
   });
 }
 
+/** Ask the linked chat to confirm a passkey recovery (ORC-118). Returns the message id. */
+export async function sendRecoveryConfirmMessage(chatId: number): Promise<number> {
+  const msg = await call<{ message_id: number }>("sendMessage", {
+    chat_id: chatId,
+    text:
+      "🔑 Someone asked to add a new passkey to your Orchestra account (they passed an email code).\n\n" +
+      "If this was you, press Confirm — the new passkey can approve right away.\n" +
+      "If this wasn't you, press Cancel. A stolen email alone can't add a passkey without this.",
+    reply_markup: {
+      inline_keyboard: [[
+        { text: "✅ Confirm", callback_data: "rk:ok" },
+        { text: "✖️ Cancel", callback_data: "rk:no" },
+      ]],
+    },
+  });
+  return msg.message_id;
+}
+
+/** Tell the linked chat a delayed recovery passkey was registered (ORC-118). */
+export async function sendRecoveryPendingMessage(chatId: number, pendingUntil: string): Promise<number> {
+  const when = new Date(pendingUntil).toUTCString();
+  const msg = await call<{ message_id: number }>("sendMessage", {
+    chat_id: chatId,
+    text:
+      `🔑 A new passkey was added to your Orchestra account. It can't approve anything until ${when} (48 hours).\n\n` +
+      "If this wasn't you, press Cancel below or cancel in Orchestra → Passkeys. Telegram approvals still work meanwhile.",
+    reply_markup: {
+      inline_keyboard: [[{ text: "✖️ Cancel pending passkey", callback_data: "rk:no" }]],
+    },
+  });
+  return msg.message_id;
+}
+
 export async function sendText(chatId: number, text: string): Promise<void> {
   await call("sendMessage", { chat_id: chatId, text });
 }
@@ -290,8 +323,8 @@ export async function settleApprovalMessage(chatId: number, messageId: number, o
 }
 
 /** Test hook: run one update through the handler, as the polling loop would. */
-export function _handleUpdate(update: any, onDecision: DecisionHandler, onCommand?: CommandHandler): Promise<void> {
-  return handleUpdate(update, onDecision, onCommand);
+export function _handleUpdate(update: any, onDecision: DecisionHandler, onCommand?: CommandHandler, onRecovery?: RecoveryHandler): Promise<void> {
+  return handleUpdate(update, onDecision, onCommand, onRecovery);
 }
 
 // ── Update loop ──
@@ -301,12 +334,17 @@ export interface DecisionHandler {
   (input: { wallet: string; approvalId: string; approve: boolean; chatId: number; messageId: number }): Promise<string>;
 }
 
+/** Confirm or cancel a passkey recovery for the wallet linked to this chat (ORC-118). */
+export interface RecoveryHandler {
+  (input: { wallet: string; confirm: boolean; chatId: number; messageId: number }): Promise<string>;
+}
+
 /** A text command other than /start and /unlink (the pause commands); null when it isn't one. */
 export interface CommandHandler {
   (input: { text: string; chatId: number; wallet: string | null }): Promise<{ text: string; button?: { text: string; url: string } } | null>;
 }
 
-async function handleUpdate(update: any, onDecision: DecisionHandler, onCommand?: CommandHandler): Promise<void> {
+async function handleUpdate(update: any, onDecision: DecisionHandler, onCommand?: CommandHandler, onRecovery?: RecoveryHandler): Promise<void> {
   if (update.message?.text) {
     const chatId: number = update.message.chat.id;
     const text: string = update.message.text.trim();
@@ -341,7 +379,10 @@ async function handleUpdate(update: any, onDecision: DecisionHandler, onCommand?
     // The chat pressing the button must be the one linked to a wallet; the handler checks it owns the approval.
     const wallet = await walletForChat(chatId);
     let toast = "This chat isn't linked to a wallet.";
-    if (wallet && (kind === "a" || kind === "r") && approvalId) {
+    if (wallet && kind === "rk" && onRecovery && (approvalId === "ok" || approvalId === "no")) {
+      toast = await onRecovery({ wallet, confirm: approvalId === "ok", chatId, messageId: cb.message.message_id })
+        .catch((err: any) => err.message as string);
+    } else if (wallet && (kind === "a" || kind === "r") && approvalId) {
       toast = await onDecision({ wallet, approvalId, approve: kind === "a", chatId, messageId: cb.message.message_id })
         .catch((err: any) => err.message as string);
     }
@@ -352,7 +393,7 @@ async function handleUpdate(update: any, onDecision: DecisionHandler, onCommand?
 let polling = false;
 
 /** Start long polling (idempotent). Logs and retries on errors; never throws. */
-export async function startTelegramBot(onDecision: DecisionHandler, onCommand?: CommandHandler): Promise<void> {
+export async function startTelegramBot(onDecision: DecisionHandler, onCommand?: CommandHandler, onRecovery?: RecoveryHandler): Promise<void> {
   if (!telegramEnabled() || polling) return;
   polling = true;
   try {
@@ -371,7 +412,7 @@ export async function startTelegramBot(onDecision: DecisionHandler, onCommand?: 
         }, 35_000);
         for (const u of updates) {
           offset = u.update_id + 1;
-          await handleUpdate(u, onDecision, onCommand).catch((err) => console.error(`[telegram] update error: ${safeErr(err)}`));
+          await handleUpdate(u, onDecision, onCommand, onRecovery).catch((err) => console.error(`[telegram] update error: ${safeErr(err)}`));
         }
       } catch (err: any) {
         if (err?.name !== "AbortError") console.warn(`[telegram] polling error: ${safeErr(err)}`);
