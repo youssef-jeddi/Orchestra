@@ -28,7 +28,7 @@ const REDACTION_CSS =
 
 export const metadata = {
   title: 'Orchestra — Join the waitlist',
-  description: 'Crypto kept most people out. Orchestra is the way in: say what you want, routine moves run on their own, and anything that matters waits for your approval.',
+  description: 'An AI agent for your crypto that lives in your own account. It proposes, fixed rules decide, and anything big waits for your approval. Pre-launch, on testnet.',
 };
 
 export default function WaitlistLayout({ children }) {

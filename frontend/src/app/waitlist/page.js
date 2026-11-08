@@ -100,21 +100,22 @@ export default function WaitlistPage() {
         </Link>
         <div className={s.pill}>
           <Link href="/waitlist">Overview</Link>
-          <Link href="/simple">Try the test version</Link>
+          <Link href="/simple">Try on testnet (no real funds)</Link>
         </div>
         <a href="#email" className={s.navCta} onClick={focusEmail}>Join waitlist</a>
       </motion.nav>
 
       <section className={s.copy}>
         <motion.p className={`${s.mono} ${s.eyebrow}`} {...rise(1)}>
-          [ Crypto, <b>finally for everyone</b> ]
+          [ Pre-launch · <b>now on testnet</b> ]
         </motion.p>
         <motion.h1 className={s.title} {...rise(2)}>
           Crypto kept you out.<br /><em>Here’s the door.</em>
         </motion.h1>
         <motion.p className={s.sub} {...rise(3)}>
-          Orchestra makes crypto simple. Say what you want in plain words: everyday moves run on
-          their own, and anything that matters waits for your approval.
+          Ask in plain words. Small moves within your limits go through on their own; anything
+          bigger waits for your approval. Your own account, and code, not the AI, decides what goes
+          through.
         </motion.p>
 
         <AnimatePresence mode="wait" initial={false}>
@@ -164,7 +165,7 @@ export default function WaitlistPage() {
       </motion.aside>
       <motion.aside className={`${s.note} ${s.noteRight}`} {...rise(6)}>
         <span className={s.mono}>002 — Early access</span>
-        <p>Opening in small groups, first come first served.</p>
+        <p>Pre-launch on testnet. We’ll invite people in small groups.</p>
       </motion.aside>
     </main>
   );
